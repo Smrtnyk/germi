@@ -1,0 +1,222 @@
+import type { FlowSummary, ResourceKind } from "./types";
+
+// ---- the token filter ----
+//
+// Grammar (DevTools-flavored): whitespace-separated terms = AND. A bare word (or
+// "quoted phrase") is a case-insensitive substring over `method scheme://host
+// path`. A `/regex/` term is a regex over that same string. A leading `-`
+// negates any term. `key:value` tokens filter structured fields. `body:` /
+// `req-body:` / `resp-body:` are the only tokens that cross into the backend.
+
+export interface BodyTerm {
+  side: "request" | "response" | "either";
+  value: string;
+  regex: boolean;
+  neg: boolean;
+}
+
+type SummaryTerm =
+  | { t: "text"; value: string; neg: boolean }
+  | { t: "regex"; re: RegExp; neg: boolean }
+  | { t: "kv"; key: string; value: string; neg: boolean };
+
+export interface ParsedFilter {
+  /** Predicate over a FlowSummary for all non-body terms (instant, frontend). */
+  matchSummary: (s: FlowSummary) => boolean;
+  /** Body terms requiring a backend scan. Empty = no backend call needed. */
+  bodyTerms: BodyTerm[];
+}
+
+const SUMMARY_KEYS = new Set([
+  "method",
+  "host",
+  "domain",
+  "path",
+  "scheme",
+  "status",
+  "mime",
+  "kind",
+  "ext",
+  "rule",
+  "matched",
+  "larger-than",
+  "smaller-than",
+  "req-larger-than",
+  "slower-than",
+]);
+const BODY_KEYS = new Set(["body", "req-body", "resp-body"]);
+
+/** Tokenize on whitespace, honoring (and stripping) double quotes anywhere. */
+function tokenize(s: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /\s/.test(s[i])) i++;
+    if (i >= s.length) break;
+    let tok = "";
+    while (i < s.length && !/\s/.test(s[i])) {
+      if (s[i] === '"') {
+        i++;
+        while (i < s.length && s[i] !== '"') tok += s[i++];
+        if (i < s.length) i++; // closing quote
+      } else {
+        tok += s[i++];
+      }
+    }
+    out.push(tok);
+  }
+  return out;
+}
+
+export function parseFilter(input: string): ParsedFilter {
+  const summaryTerms: SummaryTerm[] = [];
+  const bodyTerms: BodyTerm[] = [];
+
+  for (let raw of tokenize(input)) {
+    if (!raw) continue;
+    let neg = false;
+    if (raw.startsWith("-") && raw.length > 1) {
+      neg = true;
+      raw = raw.slice(1);
+    }
+
+    const colon = raw.indexOf(":");
+    if (colon > 0) {
+      const key = raw.slice(0, colon).toLowerCase();
+      const value = raw.slice(colon + 1);
+      if (BODY_KEYS.has(key)) {
+        const side =
+          key === "req-body" ? "request" : key === "resp-body" ? "response" : "either";
+        const m = /^\/(.*)\/$/.exec(value);
+        bodyTerms.push({ side, value: m ? m[1] : value, regex: !!m, neg });
+        continue;
+      }
+      if (SUMMARY_KEYS.has(key)) {
+        summaryTerms.push({ t: "kv", key, value, neg });
+        continue;
+      }
+    }
+
+    const rx = /^\/(.*)\/$/.exec(raw);
+    if (rx) {
+      try {
+        summaryTerms.push({ t: "regex", re: new RegExp(rx[1], "i"), neg });
+        continue;
+      } catch {
+        /* invalid regex → treat as text */
+      }
+    }
+    summaryTerms.push({ t: "text", value: raw.toLowerCase(), neg });
+  }
+
+  return {
+    matchSummary: (s) => summaryTerms.every((term) => matchTerm(term, s)),
+    bodyTerms,
+  };
+}
+
+function urlOf(s: FlowSummary): string {
+  return `${s.method} ${s.scheme}://${s.host}${s.path}`;
+}
+
+export function extOf(path: string): string {
+  const p = path.split("?")[0];
+  const dot = p.lastIndexOf(".");
+  const slash = p.lastIndexOf("/");
+  return dot > slash && dot !== -1 ? p.slice(dot + 1).toLowerCase() : "";
+}
+
+function parseSize(v: string): number {
+  const m = /^(\d+(?:\.\d+)?)\s*([km]?)b?$/i.exec(v.trim());
+  if (!m) return NaN;
+  const n = parseFloat(m[1]);
+  const unit = m[2].toLowerCase();
+  return n * (unit === "k" ? 1000 : unit === "m" ? 1_000_000 : 1);
+}
+
+/** status:404 (exact), status:4xx (class), status:>=400 / <500 (ranges). */
+function matchStatus(value: string, status: number | null): boolean {
+  if (status == null) return false; // in-flight matches only the Pending chip
+  const v = value.trim().toLowerCase();
+  if (/^[1-5]xx$/.test(v)) return Math.floor(status / 100) === Number(v[0]);
+  const r = /^(>=|<=|>|<)(\d+)$/.exec(v);
+  if (r) {
+    const n = Number(r[2]);
+    return r[1] === ">="
+      ? status >= n
+      : r[1] === "<="
+        ? status <= n
+        : r[1] === ">"
+          ? status > n
+          : status < n;
+  }
+  const exact = Number(v);
+  return Number.isFinite(exact) && status === exact;
+}
+
+function matchKv(key: string, value: string, s: FlowSummary): boolean {
+  const v = value.toLowerCase();
+  switch (key) {
+    case "method":
+      return s.method.toLowerCase() === v;
+    case "host":
+    case "domain":
+      return s.host.toLowerCase().includes(v);
+    case "path":
+      return s.path.toLowerCase().includes(v);
+    case "scheme":
+      return s.scheme.toLowerCase() === v;
+    case "status":
+      return matchStatus(value, s.status);
+    case "mime":
+      return (s.mime ?? "").toLowerCase().includes(v);
+    case "kind":
+      return s.kind === (v === "fetch" ? "xhr" : v);
+    case "ext":
+      return extOf(s.path) === v;
+    case "rule":
+    case "matched":
+      return value
+        ? (s.matchedRule ?? "").toLowerCase().includes(v)
+        : s.matchedRule != null;
+    case "larger-than":
+      return s.respSize > parseSize(value);
+    case "smaller-than":
+      return s.respSize < parseSize(value);
+    case "req-larger-than":
+      return s.reqSize > parseSize(value);
+    case "slower-than":
+      return s.durationMs != null && s.durationMs > Number(value);
+    default:
+      return true;
+  }
+}
+
+function matchTerm(term: SummaryTerm, s: FlowSummary): boolean {
+  let r: boolean;
+  if (term.t === "text") r = urlOf(s).toLowerCase().includes(term.value);
+  else if (term.t === "regex") r = term.re.test(urlOf(s));
+  else r = matchKv(term.key, term.value, s);
+  return term.neg ? !r : r;
+}
+
+// ---- chips ----
+
+export const KIND_CHIPS: { kind: ResourceKind; label: string }[] = [
+  { kind: "xhr", label: "Fetch/XHR" },
+  { kind: "doc", label: "Doc" },
+  { kind: "js", label: "JS" },
+  { kind: "css", label: "CSS" },
+  { kind: "img", label: "Img" },
+  { kind: "font", label: "Font" },
+  { kind: "media", label: "Media" },
+  { kind: "ws", label: "WS" },
+  { kind: "wasm", label: "Wasm" },
+  { kind: "other", label: "Other" },
+];
+
+export const STATUS_CHIPS = ["2xx", "3xx", "4xx", "5xx", "pending"] as const;
+
+export function statusClass(status: number | null): string {
+  return status == null ? "pending" : `${Math.floor(status / 100)}xx`;
+}

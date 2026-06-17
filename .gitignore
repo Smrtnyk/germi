@@ -1,1 +1,22 @@
+# IDE
 .idea
+.vscode/*
+!.vscode/extensions.json
+
+# Rust / Cargo
+/target
+**/target
+
+# Node / frontend
+node_modules
+/dist
+dist-ssr
+*.local
+
+# Tauri generated
+/src-tauri/gen/schemas
+
+# Logs / OS
+*.log
+.DS_Store
+Thumbs.db

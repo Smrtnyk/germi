@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/proxy-core", "src-tauri"]
+
+# proxy-core is kept deliberately free of any GUI/webkit dependency so it can be
+# built, tested and run as a standalone proxy without the desktop shell:
+#   cargo build  -p proxy-core
+#   cargo test   -p proxy-core
+#   cargo run    -p proxy-core --example standalone
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+rust-version = "1.82"

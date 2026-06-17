@@ -1,0 +1,68 @@
+//! Germi desktop shell. Thin Tauri wrapper around the `proxy-core` engine.
+
+mod commands;
+mod persist;
+mod state;
+
+use std::sync::Arc;
+
+use proxy_core::ProxyController;
+use tauri::Manager;
+
+use state::AppState;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .try_init();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            // One persistent CA per install, under the OS app-data dir.
+            let ca_dir = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| std::env::temp_dir().join("germi"));
+            let ca = ProxyController::load_or_generate_ca(&ca_dir)
+                .map_err(|e| format!("failed to initialize CA: {e}"))?;
+            let controller = Arc::new(ProxyController::new(ca));
+            // Restore persisted scenarios (else the seeded example remains).
+            if let Some(ar) = persist::load_autoresponder(&ca_dir) {
+                controller.set_autoresponder(ar);
+            }
+            app.manage(AppState {
+                controller,
+                ca_dir,
+            });
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::proxy_status,
+            commands::start_proxy,
+            commands::stop_proxy,
+            commands::subscribe_flows,
+            commands::list_flows,
+            commands::get_flow,
+            commands::clear_flows,
+            commands::get_autoresponder,
+            commands::set_autoresponder,
+            commands::test_rules,
+            commands::mock_flows,
+            commands::ca_info,
+            commands::set_system_proxy,
+            commands::clear_system_proxy,
+            commands::import_archive,
+            commands::pick_file,
+            commands::file_exists,
+            commands::search_bodies,
+            commands::save_session,
+            commands::open_session,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running Germi");
+}
