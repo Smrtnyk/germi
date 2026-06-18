@@ -78,5 +78,8 @@ jobs:
       - name: Lint frontend (oxlint)
         run: pnpm lint
 
+      - name: Analyze frontend (fallow)
+        run: pnpm fallow
+
       - name: Build frontend (tsc + vite)
         run: pnpm build

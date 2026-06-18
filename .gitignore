@@ -16,6 +16,9 @@ dist-ssr
 # Tauri generated
 /src-tauri/gen/schemas
 
+# Fallow cache
+.fallow/
+
 # Logs / OS
 *.log
 .DS_Store
