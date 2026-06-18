@@ -113,7 +113,11 @@ impl ProxyController {
     /// proxy must be stopped (the running proxy holds the old authority); the
     /// user must re-trust the new CA afterwards.
     pub async fn regenerate_ca(&self, dir: &Path) -> Result<()> {
-        if self.is_running().await {
+        // Hold the `running` lock across the whole swap so a concurrent start()
+        // cannot read the old CA and bake it into a freshly-spawned proxy in the
+        // window between the check and the swap (check-then-act TOCTOU).
+        let running = self.running.lock().await;
+        if running.is_some() {
             bail!("stop the proxy before regenerating the CA");
         }
         let new_ca = CertAuthority::generate()?;
@@ -127,8 +131,10 @@ impl ProxyController {
         self.running.lock().await.is_some()
     }
 
-    /// Start the proxy listening on `addr`. Errors if already running.
-    pub async fn start(&self, addr: SocketAddr) -> Result<()> {
+    /// Start the proxy listening on `addr`. Errors if already running, or if the
+    /// bind fails (e.g. the port is in use). Returns the actually-bound address
+    /// (e.g. resolving port 0 to the OS-assigned port).
+    pub async fn start(&self, addr: SocketAddr) -> Result<SocketAddr> {
         let mut guard = self.running.lock().await;
         if guard.is_some() {
             bail!("proxy is already running");
@@ -136,6 +142,14 @@ impl ProxyController {
 
         // Install a default crypto provider once (ignored if already set).
         let _ = aws_lc_rs::default_provider().install_default();
+
+        // Bind here (not inside the spawned task) so a bind failure propagates to
+        // the caller BEFORE we record the proxy as running — otherwise the UI
+        // would show "running" while the proxy had actually died on bind.
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| anyhow!("failed to bind {addr}: {e}"))?;
+        let local_addr = listener.local_addr().unwrap_or(addr);
 
         let authority = {
             let ca = self.ca.read().map_err(|_| anyhow!("CA lock poisoned"))?;
@@ -145,7 +159,7 @@ impl ProxyController {
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
         let proxy = Proxy::builder()
-            .with_addr(addr)
+            .with_listener(listener)
             .with_ca(authority)
             .with_rustls_connector(aws_lc_rs::default_provider())
             .with_http_handler(handler.clone())
@@ -163,7 +177,7 @@ impl ProxyController {
         });
 
         *guard = Some(shutdown_tx);
-        Ok(())
+        Ok(local_addr)
     }
 
     /// Gracefully stop the proxy if running.

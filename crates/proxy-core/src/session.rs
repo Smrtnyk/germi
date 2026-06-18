@@ -107,6 +107,15 @@ pub fn export_session(flows: &[Flow]) -> Vec<u8> {
 /// Parse a `.germi` session back into flows (ids are assigned on insert).
 pub fn import_session(bytes: &[u8]) -> Result<Vec<Flow>> {
     let session: SessionFile = serde_json::from_slice(bytes)?;
+    // Refuse files from a newer, incompatible format rather than silently
+    // misinterpreting their fields as v1.
+    if session.version > FORMAT_VERSION {
+        anyhow::bail!(
+            "unsupported .germi session version {} (this build supports up to {})",
+            session.version,
+            FORMAT_VERSION
+        );
+    }
     let flows = session
         .flows
         .into_iter()
@@ -194,5 +203,15 @@ mod tests {
         assert_eq!(r.body, b"hello");
         assert_eq!(f.matched_rule.as_deref(), Some("r"));
         assert_eq!(f.duration_ms, Some(7));
+    }
+
+    #[test]
+    fn rejects_newer_format_version() {
+        let newer = format!(r#"{{"version":{},"flows":[]}}"#, FORMAT_VERSION + 1);
+        let err = import_session(newer.as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("unsupported"));
+        // The current version still parses.
+        let ok = format!(r#"{{"version":{FORMAT_VERSION},"flows":[]}}"#);
+        assert!(import_session(ok.as_bytes()).is_ok());
     }
 }

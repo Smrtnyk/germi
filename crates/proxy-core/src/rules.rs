@@ -11,10 +11,33 @@
 //! Request-phase actions run in `handle_request`; response-phase in
 //! `handle_response`.
 
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::flow::{CapturedRequest, CapturedResponse, Flow};
+
+/// Compile-once cache for user rule regexes. The same pattern is evaluated on
+/// every intercepted request (and response), so memoize the compiled `Regex`
+/// (cloning is cheap — it's internally reference-counted) instead of recompiling
+/// per flow. Bounded so a long session that edits many patterns can't grow it
+/// without limit; returns `None` for an invalid pattern (callers fall back).
+fn cached_regex(pattern: &str) -> Option<Regex> {
+    static CACHE: LazyLock<Mutex<HashMap<String, Regex>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let mut cache = CACHE.lock().ok()?;
+    if let Some(re) = cache.get(pattern) {
+        return Some(re.clone());
+    }
+    let re = Regex::new(pattern).ok()?;
+    if cache.len() >= 256 {
+        cache.clear();
+    }
+    cache.insert(pattern.to_string(), re.clone());
+    Some(re)
+}
 
 /// How a [`Matcher`]'s `url` pattern is compared against a flow's URL.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
@@ -54,8 +77,7 @@ impl Matcher {
         match self.url_match {
             MatchKind::Contains => self.url.is_empty() || url.contains(&self.url),
             MatchKind::Exact => url == self.url,
-            MatchKind::Regex => Regex::new(&self.url)
-                .is_ok_and(|re| re.is_match(&url)),
+            MatchKind::Regex => cached_regex(&self.url).is_some_and(|re| re.is_match(&url)),
         }
     }
 }
@@ -261,16 +283,33 @@ pub fn apply_response_rules(
                 replace,
                 regex,
             } => {
-                if let Ok(text) = String::from_utf8(resp.body.clone()) {
+                // The captured body holds the raw network bytes, which for most
+                // real responses are gzip/br/deflate-compressed — decode first so
+                // find/replace operates on actual text (otherwise from_utf8 fails
+                // and the rule silently no-ops on compressed responses).
+                let encoding = crate::body::content_encoding_of(&resp.headers);
+                let decoded = match &encoding {
+                    Some(enc) => crate::body::try_decompress(enc, &resp.body)
+                        .unwrap_or_else(|| resp.body.clone()),
+                    None => resp.body.clone(),
+                };
+                if let Ok(text) = String::from_utf8(decoded) {
                     let new = if *regex {
-                        match Regex::new(find) {
-                            Ok(re) => re.replace_all(&text, replace.as_str()).into_owned(),
-                            Err(_) => text,
+                        match cached_regex(find) {
+                            Some(re) => re.replace_all(&text, replace.as_str()).into_owned(),
+                            None => text,
                         }
                     } else {
                         text.replace(find, replace)
                     };
                     resp.body = new.into_bytes();
+                    // We replaced the body with its decompressed form, so drop the
+                    // now-stale Content-Encoding; the client gets identity bytes
+                    // (Content-Length is recomputed downstream in build_parts).
+                    if encoding.is_some() {
+                        resp.headers
+                            .retain(|(k, _)| !k.eq_ignore_ascii_case("content-encoding"));
+                    }
                     matched = Some(rule.name.clone());
                 }
             }
@@ -550,6 +589,48 @@ mod tests {
         let matched = rs.apply_response(&req("GET", "https", "x", "/"), &mut resp);
         assert_eq!(matched.as_deref(), Some("redact"));
         assert_eq!(resp.body, b"card XXXX XXXX");
+    }
+
+    #[test]
+    fn response_body_rewrite_decodes_compressed() {
+        use std::io::Write;
+        // A gzip-encoded response body: the rewrite must decode it, replace, and
+        // strip Content-Encoding so the forwarded identity body is consistent.
+        let mut enc =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(b"the secret token").unwrap();
+        let gz = enc.finish().unwrap();
+
+        let rs = RuleSet {
+            rules: vec![Rule {
+                id: "1".into(),
+                name: "redact".into(),
+                enabled: true,
+                matcher: Matcher::default(),
+                action: Action::RewriteResponseBody {
+                    find: "secret".into(),
+                    replace: "public".into(),
+                    regex: false,
+                },
+            }],
+        };
+        let mut resp = CapturedResponse {
+            status: 200,
+            version: "HTTP/1.1".into(),
+            headers: vec![("Content-Encoding".into(), "gzip".into())],
+            body: gz,
+            timestamp_ms: 0,
+        };
+        let matched = rs.apply_response(&req("GET", "https", "x", "/"), &mut resp);
+        assert_eq!(matched.as_deref(), Some("redact"));
+        assert_eq!(resp.body, b"the public token");
+        assert!(
+            !resp
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding")),
+            "content-encoding must be stripped after decode+rewrite"
+        );
     }
 
     #[test]

@@ -68,7 +68,8 @@ export interface FlowDetail {
 export type FlowEvent =
   | { type: "new"; summary: FlowSummary }
   | { type: "completed"; summary: FlowSummary }
-  | { type: "cleared" };
+  | { type: "cleared" }
+  | { type: "resync" };
 
 // ---- rules (mirror crates/proxy-core/src/rules.rs) ----
 

@@ -72,18 +72,21 @@ impl CertAuthority {
         }
 
         fs::create_dir_all(dir).context("create CA dir")?;
+        restrict_dir(dir);
         let ca = Self::generate()?;
         fs::write(&cert_path, &ca.cert_pem).context("write CA cert")?;
-        fs::write(&key_path, &ca.key_pem).context("write CA key")?;
+        write_key_private(&key_path, &ca.key_pem).context("write CA key")?;
         fs::write(&der_path, &ca.cert_der).context("write CA der")?;
         Ok(ca)
     }
 
-    /// Persist the CA material (cert PEM, key PEM, cert DER) under `dir`.
+    /// Persist the CA material (cert PEM, key PEM, cert DER) under `dir`. The
+    /// private key is written owner-only (see [`write_key_private`]).
     pub fn save(&self, dir: &Path) -> Result<()> {
         fs::create_dir_all(dir).context("create CA dir")?;
+        restrict_dir(dir);
         fs::write(dir.join("germi-ca.pem"), &self.cert_pem).context("write CA cert")?;
-        fs::write(dir.join("germi-ca.key"), &self.key_pem).context("write CA key")?;
+        write_key_private(&dir.join("germi-ca.key"), &self.key_pem).context("write CA key")?;
         fs::write(dir.join("germi-ca.der"), &self.cert_der).context("write CA der")?;
         Ok(())
     }
@@ -102,9 +105,59 @@ impl CertAuthority {
     }
 }
 
+/// Write the CA *private key* with owner-only permissions. The root key signs
+/// every leaf cert the proxy mints, so on a shared host it must not be readable
+/// by other users (whoever reads it can MITM anyone who trusts the Germi CA).
+#[cfg(unix)]
+fn write_key_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(contents.as_bytes())?;
+    // `mode` only applies on creation; tighten explicitly so a key written by an
+    // older (world-readable) build is repaired in place too.
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn write_key_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    // On Windows the per-user app-data dir ACL protects the key.
+    fs::write(path, contents)
+}
+
+/// Restrict the CA directory to the owner (best-effort; ignored on non-unix).
+#[cfg(unix)]
+fn restrict_dir(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn restrict_dir(_dir: &Path) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn ca_key_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("germi-ca-perm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        CertAuthority::load_or_generate(&dir).unwrap();
+        let mode = fs::metadata(dir.join("germi-ca.key"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "CA key must be readable only by owner");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn generate_produces_valid_material() {

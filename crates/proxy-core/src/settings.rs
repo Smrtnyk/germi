@@ -72,7 +72,7 @@ impl Default for ProxySettings {
 impl ProxySettings {
     /// Whether `host` should bypass interception (excluded, or filtered out).
     pub fn is_excluded(&self, host: &str) -> bool {
-        let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        let host = normalize_host(host);
         if host.is_empty() {
             return false;
         }
@@ -84,8 +84,37 @@ impl ProxySettings {
         if self.capture_filter.is_empty() {
             return true;
         }
-        let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        let host = normalize_host(host);
         self.capture_filter.iter().any(|p| host_matches(&host, p))
+    }
+}
+
+/// Normalize an incoming host for matching: strip any `:port` suffix (the Host
+/// header carries one for non-default ports, e.g. `example.com:8080`), the
+/// trailing dot, and case. Without this, an excluded/filtered host would be
+/// bypassed for plain-HTTP requests to a non-standard port.
+fn normalize_host(host: &str) -> String {
+    strip_port(host.trim())
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+/// Drop a trailing `:port`. Handles bracketed IPv6 literals (`[::1]:8080` →
+/// `::1`) and leaves a bare IPv6 address (`::1`, which has no port) intact.
+fn strip_port(host: &str) -> &str {
+    if host.starts_with('[') {
+        return match host.find(']') {
+            Some(end) => &host[1..end],
+            None => host,
+        };
+    }
+    match host.rsplit_once(':') {
+        Some((name, port))
+            if !name.contains(':') && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            name
+        }
+        _ => host,
     }
 }
 
@@ -140,6 +169,31 @@ mod tests {
         assert!(s.matches_capture_filter("example.com"));
         assert!(s.matches_capture_filter("api.example.com"));
         assert!(!s.matches_capture_filter("other.com"));
+    }
+
+    #[test]
+    fn strips_port_before_matching() {
+        let s = settings(&["example.com"]);
+        // A Host header with a port must still match the exclusion.
+        assert!(s.is_excluded("example.com:8080"));
+        assert!(s.is_excluded("api.example.com:443"));
+        assert!(!s.is_excluded("other.com:8080"));
+
+        let mut c = settings(&[]);
+        c.capture_filter = vec!["example.com".into()];
+        assert!(c.matches_capture_filter("example.com:8080"));
+        assert!(!c.matches_capture_filter("other.com:8080"));
+    }
+
+    #[test]
+    fn strip_port_handles_ipv6() {
+        // Bracketed literal with a port normalizes to the bare address; a bare
+        // IPv6 (no port) is left intact.
+        assert_eq!(strip_port("[::1]:8080"), "::1");
+        assert_eq!(strip_port("[::1]"), "::1");
+        assert_eq!(strip_port("::1"), "::1");
+        assert_eq!(strip_port("example.com"), "example.com");
+        assert_eq!(strip_port("example.com:8080"), "example.com");
     }
 
     #[test]

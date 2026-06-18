@@ -84,6 +84,20 @@ pub fn parse_url(url: &str) -> (String, String, String) {
     }
 }
 
+/// Headers the live pipeline (`handler::build_parts`) strips before sending to
+/// the client — content-length / transfer-encoding are recomputed by hyper from
+/// the (possibly rewritten) body. Mirror that here so the preview matches what
+/// the client actually receives.
+fn client_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
+    headers
+        .into_iter()
+        .filter(|(k, _)| {
+            !k.eq_ignore_ascii_case("content-length")
+                && !k.eq_ignore_ascii_case("transfer-encoding")
+        })
+        .collect()
+}
+
 pub fn test_rules(rules: &RuleSet, input: &TestInput) -> TestResult {
     let (scheme, host, path) = parse_url(&input.url);
     let req = CapturedRequest {
@@ -121,7 +135,7 @@ pub fn test_rules(rules: &RuleSet, input: &TestInput) -> TestResult {
             effective_request_headers: req.headers,
             response: Some(TestResponse {
                 status: response.status,
-                headers: response.headers,
+                headers: client_headers(response.headers),
                 body: String::from_utf8_lossy(&response.body).into_owned(),
                 source: format!("Synthesized by rule \u{201c}{rule}\u{201d} — request never hit the network"),
             }),
@@ -180,7 +194,7 @@ pub fn test_rules(rules: &RuleSet, input: &TestInput) -> TestResult {
                 effective_request_headers: eff,
                 response: Some(TestResponse {
                     status: resp.status,
-                    headers: resp.headers,
+                    headers: client_headers(resp.headers),
                     body: String::from_utf8_lossy(&resp.body).into_owned(),
                     source,
                 }),
@@ -282,6 +296,47 @@ mod tests {
         assert_eq!(result.outcome, "continue");
         assert!(!result.short_circuit);
         assert_eq!(result.response.unwrap().body, "the \u{2022}\u{2022}\u{2022} is here");
+    }
+
+    #[test]
+    fn preview_strips_length_and_encoding_headers() {
+        // A Respond rule that (against advice) hand-adds content-length /
+        // transfer-encoding: the preview must not show them, matching the live
+        // pipeline which recomputes/strips those.
+        let rules = RuleSet {
+            rules: vec![Rule {
+                id: "1".into(),
+                name: "mock".into(),
+                enabled: true,
+                matcher: Matcher::default(),
+                action: Action::Respond {
+                    status: 200,
+                    headers: vec![
+                        ("Content-Length".into(), "999".into()),
+                        ("Transfer-Encoding".into(), "chunked".into()),
+                        ("X-Keep".into(), "yes".into()),
+                    ],
+                    body: "hi".into(),
+                    content_type: None,
+                },
+            }],
+        };
+        let input = TestInput {
+            method: "GET".into(),
+            url: "https://api.test/x".into(),
+            req_headers: vec![],
+            req_body: String::new(),
+            resp_status: 200,
+            resp_headers: vec![],
+            resp_body: String::new(),
+        };
+        let resp = test_rules(&rules, &input).response.unwrap();
+        assert!(resp
+            .headers
+            .iter()
+            .all(|(k, _)| !k.eq_ignore_ascii_case("content-length")
+                && !k.eq_ignore_ascii_case("transfer-encoding")));
+        assert!(resp.headers.iter().any(|(k, _)| k == "X-Keep"));
     }
 
     #[test]

@@ -22,6 +22,55 @@ interface Section {
   render: (ctx: SectionCtx) => ReactNode;
 }
 
+/** A controlled numeric input that keeps a local draft string so the field can
+ *  be cleared/edited freely, then commits a clamped INTEGER on blur/Enter. This
+ *  avoids two bugs: typing an out-of-range value (e.g. a port > 65535) that the
+ *  Rust u16 rejects (silently desyncing the UI from the backend), and the
+ *  field snapping to a fallback mid-edit when momentarily empty. */
+function NumberField({
+  value,
+  min,
+  max,
+  fallback,
+  step,
+  width,
+  onCommit,
+}: {
+  value: number;
+  min: number;
+  max?: number;
+  fallback: number;
+  step?: number;
+  width?: number;
+  onCommit: (n: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  // Resync when the committed value changes from outside (e.g. import settings).
+  useEffect(() => setDraft(String(value)), [value]);
+  const commit = () => {
+    const parsed = Math.trunc(Number(draft));
+    let n = draft.trim() !== "" && Number.isFinite(parsed) ? parsed : fallback;
+    n = Math.max(min, Math.min(max ?? n, n));
+    onCommit(n);
+    setDraft(String(n));
+  };
+  return (
+    <input
+      type="number"
+      min={min}
+      max={max}
+      step={step}
+      style={{ width }}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+      }}
+    />
+  );
+}
+
 // Extensible registry: to add a settings category, append a section here and a
 // component below. The nav and content area are driven entirely by this list.
 const SECTIONS: Section[] = [
@@ -70,15 +119,13 @@ function ConnectionsSection({ settings, onChange }: SectionProps) {
       <h4>Connections</h4>
       <div className="row">
         <label>Listen port</label>
-        <input
-          type="number"
+        <NumberField
+          value={settings.port}
           min={1}
           max={65535}
-          style={{ width: 90 }}
-          value={settings.port}
-          onChange={(e) =>
-            onChange({ ...settings, port: Number(e.target.value) || 8080 })
-          }
+          fallback={8080}
+          width={90}
+          onCommit={(port) => onChange({ ...settings, port })}
         />
         <span className="muted small">applied on next Start</span>
       </div>
@@ -123,18 +170,13 @@ function CaptureSection({ settings, onChange }: SectionProps) {
       <h4>Capture</h4>
       <div className="row">
         <label>Keep last</label>
-        <input
-          type="number"
-          min={100}
-          step={100}
-          style={{ width: 100 }}
+        <NumberField
           value={settings.maxFlows}
-          onChange={(e) =>
-            onChange({
-              ...settings,
-              maxFlows: Math.max(100, Number(e.target.value) || 5000),
-            })
-          }
+          min={100}
+          fallback={5000}
+          step={100}
+          width={100}
+          onCommit={(maxFlows) => onChange({ ...settings, maxFlows })}
         />
         <span className="muted small">flows in memory (oldest evicted)</span>
       </div>
@@ -208,18 +250,13 @@ function ThrottlingSection({ settings, onChange }: SectionProps) {
       </p>
       <div className="row">
         <label>Response delay</label>
-        <input
-          type="number"
-          min={0}
-          step={100}
-          style={{ width: 100 }}
+        <NumberField
           value={settings.responseDelayMs}
-          onChange={(e) =>
-            onChange({
-              ...settings,
-              responseDelayMs: Math.max(0, Number(e.target.value) || 0),
-            })
-          }
+          min={0}
+          fallback={0}
+          step={100}
+          width={100}
+          onCommit={(responseDelayMs) => onChange({ ...settings, responseDelayMs })}
         />
         <span className="muted small">
           ms {settings.responseDelayMs === 0 ? "(off)" : ""}

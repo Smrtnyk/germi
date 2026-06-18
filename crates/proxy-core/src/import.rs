@@ -201,13 +201,23 @@ pub fn parse_saz(bytes: &[u8]) -> Result<Vec<Flow>> {
         let Some(caps) = re.captures(&name) else {
             continue;
         };
-        let n: u64 = caps[1].parse().unwrap_or(0);
+        // Skip entries whose session number doesn't parse (e.g. a crafted name
+        // with 20+ digits that overflows u64) rather than folding them all into
+        // session 0, which would clobber unrelated sessions.
+        let Ok(n) = caps[1].parse::<u64>() else {
+            continue;
+        };
         let is_client = caps[2].eq_ignore_ascii_case("c");
-        let mut entry = zip.by_name(&name).map_err(|_| {
+        let entry = zip.by_name(&name).map_err(|_| {
             anyhow::anyhow!("could not read '{name}' (encrypted SAZ is not supported)")
         })?;
         let mut buf = Vec::new();
-        entry.read_to_end(&mut buf).ok();
+        // Cap how much we inflate from a single zip member so a small crafted
+        // archive can't expand to gigabytes (zip-bomb) and exhaust memory.
+        entry
+            .take(crate::body::MAX_DECOMPRESSED_BYTES as u64)
+            .read_to_end(&mut buf)
+            .ok();
         let slot = sessions.entry(n).or_default();
         if is_client {
             slot.client = Some(buf);

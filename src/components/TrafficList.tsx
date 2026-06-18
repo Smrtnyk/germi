@@ -30,7 +30,12 @@ const FLEX_MIN = 60;
 
 function loadWidths(): Record<string, number> {
   try {
-    return JSON.parse(localStorage.getItem(STORE_KEY) ?? "{}");
+    const v = JSON.parse(localStorage.getItem(STORE_KEY) ?? "{}");
+    // Guard against a corrupt/legacy value (e.g. the literal "null", a number,
+    // or an array) — indexing those during render would crash the whole list.
+    return v && typeof v === "object" && !Array.isArray(v)
+      ? (v as Record<string, number>)
+      : {};
   } catch {
     return {};
   }
@@ -64,7 +69,12 @@ export function TrafficList({
     localStorage.setItem(STORE_KEY, JSON.stringify(widths));
   }, [widths]);
 
-  const widthOf = (c: ColumnDef) => widths[c.id] ?? c.width;
+  const widthOf = (c: ColumnDef) => {
+    const w = widths[c.id];
+    // Coerce/clamp: a non-number or sub-minimum value falls back to the default
+    // (otherwise a stale/negative/NaN width yields a broken CSS track).
+    return typeof w === "number" && Number.isFinite(w) && w >= MIN_W ? w : c.width;
+  };
 
   // The visible column that flexes to fill leftover width (first present wins).
   const flexId = FLEX_PREFERENCE.find((id) => columns.some((c) => c.id === id));
@@ -101,10 +111,15 @@ export function TrafficList({
       el.releasePointerCapture(e.pointerId);
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up);
+      // pointercancel (touch/pen interruption, lost capture) fires INSTEAD of
+      // pointerup, so clean up here too — else the move listener leaks and the
+      // global cursor stays stuck on "col-resize".
+      el.removeEventListener("pointercancel", up);
       document.body.style.cursor = "";
     };
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
   }
 
   function commitComment(id: string) {

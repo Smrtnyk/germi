@@ -75,7 +75,9 @@ function fmtSize(n: number): string {
 
 /** Decide whether a body should be shown as text, an image, or binary/hex. */
 function classify(ct: string, text: string): "image" | "text" | "binary" {
-  if (ct.startsWith("image/")) return "image";
+  // SVG is XML text — the backend treats it as textual (no base64), so render it
+  // from bodyText rather than as an <img> with an empty data URL.
+  if (ct.startsWith("image/")) return ct.includes("svg") ? "text" : "image";
   if (
     ct.startsWith("text/") ||
     /(json|javascript|ecmascript|xml|x-www-form-urlencoded|csv|html|graphql)/.test(ct)
@@ -238,13 +240,24 @@ function MessageView({
           <span className="muted">(empty)</span>
         </pre>
       ) : kind === "image" ? (
-        <div className="img-wrap">
-          <img
-            className="img-preview"
-            src={`data:${ct || "image/png"};base64,${msg.bodyBase64}`}
-            alt="response preview"
-          />
-        </div>
+        msg.truncated ? (
+          // The base64 is only the first 512 KB — rendering it yields a broken
+          // image. Show a placeholder; the banner above offers "Load full body".
+          <div className="binary-note">
+            <span className="muted">
+              Image · {fmtSize(msg.size)} — too large to preview. Load the full
+              body to view it.
+            </span>
+          </div>
+        ) : (
+          <div className="img-wrap">
+            <img
+              className="img-preview"
+              src={`data:${ct || "image/png"};base64,${msg.bodyBase64}`}
+              alt="response preview"
+            />
+          </div>
+        )
       ) : kind === "binary" ? (
         <div className="binary-note">
           <span className="muted">
@@ -329,10 +342,22 @@ export function FlowInspector({ detail, onMock, decode, onLoadFull }: Props) {
         </button>
       </div>
 
+      {/* key on flow id + side so switching selection or side remounts with fresh
+          Pretty/Raw/Hex toggle state and scroll position (no stale carry-over). */}
       {showResponse && detail.response ? (
-        <MessageView msg={detail.response} decode={decode} onLoadFull={onLoadFull} />
+        <MessageView
+          key={`${detail.id}-response`}
+          msg={detail.response}
+          decode={decode}
+          onLoadFull={onLoadFull}
+        />
       ) : (
-        <MessageView msg={detail.request} decode={decode} onLoadFull={onLoadFull} />
+        <MessageView
+          key={`${detail.id}-request`}
+          msg={detail.request}
+          decode={decode}
+          onLoadFull={onLoadFull}
+        />
       )}
     </div>
   );

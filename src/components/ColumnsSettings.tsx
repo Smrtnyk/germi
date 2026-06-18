@@ -28,9 +28,16 @@ export function ColumnsSettings({
 
   function move(i: number, dir: -1 | 1) {
     const j = i + dir;
-    if (j < 0 || j >= order.length) return;
+    if (j < 0 || j >= visible.length) return;
+    // Swap the two VISIBLE rows by their real positions in `order`, so an
+    // unresolved/stale id sitting in `order` (e.g. a pinned header dropped by an
+    // imported/reset settings) can't make the visible index mis-map and swap the
+    // wrong columns.
+    const a = order.indexOf(visible[i].id);
+    const b = order.indexOf(visible[j].id);
+    if (a < 0 || b < 0) return;
     const next = [...order];
-    [next[i], next[j]] = [next[j], next[i]];
+    [next[a], next[b]] = [next[b], next[a]];
     onOrderChange(next);
   }
   function addHeaderColumn() {

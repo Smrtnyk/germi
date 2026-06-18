@@ -44,8 +44,10 @@ pub async fn start_proxy(
     // Bind 0.0.0.0 (LAN-reachable) only when explicitly allowed; loopback otherwise.
     let ip = if allow_remote { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
     let addr = SocketAddr::from((ip, port));
-    controller.start(addr).await.map_err(|e| e.to_string())?;
-    Ok(port)
+    // Returns the actually-bound address (resolving port 0); a bind failure
+    // surfaces here as Err instead of the proxy silently dying after "running".
+    let bound = controller.start(addr).await.map_err(|e| e.to_string())?;
+    Ok(bound.port())
 }
 
 #[tauri::command]
@@ -56,14 +58,16 @@ pub async fn stop_proxy(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 /// Open a long-lived channel the backend pushes batches of [`FlowEvent`] into.
-/// The forwarder self-terminates when the webview drops the channel.
+/// The forwarder is tracked in `AppState` so a re-subscribe aborts the prior
+/// task (it can't self-terminate: nulling `onmessage` in the webview leaves the
+/// Tauri channel alive, so its `send` keeps succeeding).
 #[tauri::command]
 pub async fn subscribe_flows(
     state: State<'_, AppState>,
     channel: Channel<Vec<FlowEvent>>,
 ) -> Result<(), String> {
     let mut rx = state.controller.subscribe();
-    tauri::async_runtime::spawn(async move {
+    let handle = tauri::async_runtime::spawn(async move {
         let mut buf: Vec<FlowEvent> = Vec::new();
         let mut ticker = tokio::time::interval(Duration::from_millis(60));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -76,8 +80,9 @@ pub async fn subscribe_flows(
                             break;
                         }
                     }
-                    // Subscriber fell behind; the next list refresh resynchronizes.
-                    Err(RecvError::Lagged(_)) => {}
+                    // Subscriber fell behind and events were dropped; tell the UI
+                    // to re-list and resynchronize (flushed with the next batch).
+                    Err(RecvError::Lagged(_)) => buf.push(FlowEvent::Resync),
                     Err(RecvError::Closed) => break,
                 },
                 _ = ticker.tick() => {
@@ -88,6 +93,13 @@ pub async fn subscribe_flows(
             }
         }
     });
+    // Replace (and abort) any prior forwarder so a re-subscribe doesn't leak it.
+    // No `.await` is held across this lock, so a std Mutex is fine.
+    if let Ok(mut slot) = state.flow_forwarder.lock() {
+        if let Some(prev) = slot.replace(handle) {
+            prev.abort();
+        }
+    }
     Ok(())
 }
 

@@ -1,4 +1,5 @@
 import {
+  useDeferredValue,
   useEffect,
   useMemo,
   useReducer,
@@ -78,7 +79,14 @@ export function App() {
   const anchorRef = useRef<string | null>(null);
   const saveTimer = useRef<number | null>(null);
   const summaryMatchedRef = useRef<Set<string>>(new Set());
+  // Mirrors settings.maxFlows for the mount-time subscription (empty-deps) effect,
+  // which would otherwise close over the initial default forever.
+  const maxFlowsRef = useRef(settings.maxFlows);
   const [tick, bump] = useReducer((n: number) => n + 1, 0);
+
+  useEffect(() => {
+    maxFlowsRef.current = settings.maxFlows;
+  }, [settings.maxFlows]);
 
   // Floored to the width the traffic columns actually need (reported by the
   // list), so the divider can't squeeze the list into the right panel.
@@ -91,20 +99,53 @@ export function App() {
   });
 
   useEffect(() => {
+    // Rebuild the local flow map from the backend's authoritative list — used to
+    // resynchronize after a lagged event stream (dropped events) and to drop ids
+    // the bounded backend store has already evicted.
+    const reconcile = async () => {
+      try {
+        const fresh = await api.listFlows();
+        const map = flowsRef.current;
+        const order = orderRef.current;
+        map.clear();
+        order.length = 0;
+        for (const s of fresh) {
+          order.push(s.id);
+          map.set(s.id, s);
+        }
+        bump();
+      } catch (e) {
+        setError(String(e));
+      }
+    };
+
     const channel = subscribeFlows((events) => {
       const map = flowsRef.current;
       const order = orderRef.current;
+      let resync = false;
       for (const ev of events) {
         if (ev.type === "cleared") {
           map.clear();
           order.length = 0;
           continue;
         }
+        if (ev.type === "resync") {
+          resync = true;
+          continue;
+        }
         const s = ev.summary;
         if (!map.has(s.id)) order.push(s.id);
         map.set(s.id, s);
       }
+      // Mirror the backend's bounded store: evict oldest beyond the cap so the
+      // frontend can't grow unbounded (and stays in sync after backend eviction).
+      const cap = Math.max(1, maxFlowsRef.current);
+      if (order.length > cap) {
+        const removed = order.splice(0, order.length - cap);
+        for (const id of removed) map.delete(id);
+      }
       bump();
+      if (resync) void reconcile();
     });
     return () => {
       channel.onmessage = () => {};
@@ -162,7 +203,11 @@ export function App() {
     selectedSummary?.durationMs,
   ]);
 
-  const parsed = useMemo(() => parseFilter(filter), [filter]);
+  // Defer the heavy synchronous match path (parse + per-flow matching, incl. a
+  // user /regex/) off the keystroke so typing stays responsive even with many
+  // flows or a slow pattern. The input stays bound to the immediate `filter`.
+  const deferredFilter = useDeferredValue(filter);
+  const parsed = useMemo(() => parseFilter(deferredFilter), [deferredFilter]);
 
   // The list shows ALL flows (Fiddler-style highlight, not filter-hide).
   const allFlows = useMemo(() => {
@@ -189,7 +234,7 @@ export function App() {
     }
     return set;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allFlows, filter, typeChips, statusChips]);
+  }, [allFlows, deferredFilter, typeChips, statusChips]);
   summaryMatchedRef.current = summaryMatched;
 
   // Body search is the only filter that hits the backend (debounced/cancellable).
@@ -221,8 +266,10 @@ export function App() {
       cancelled = true;
       clearTimeout(handle);
     };
+    // `tick` re-runs the search as new flows arrive (debounced/cancelled below),
+    // so flows captured after the filter was set still get highlighted.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filter, typeChips, statusChips]);
+  }, [deferredFilter, typeChips, statusChips, tick]);
 
   // The highlighted set: null when no filter is active (nothing dimmed).
   const matchedIds = useMemo<Set<string> | null>(() => {
@@ -230,7 +277,7 @@ export function App() {
     if (parsed.bodyTerms.length === 0 || bodyMatchIds === null) return summaryMatched;
     return new Set([...summaryMatched].filter((id) => bodyMatchIds.has(id)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasFilter, summaryMatched, bodyMatchIds, filter]);
+  }, [hasFilter, summaryMatched, bodyMatchIds, deferredFilter]);
 
   function toggleTypeChip(k: ResourceKind) {
     setTypeChips((prev) => {
@@ -561,6 +608,7 @@ export function App() {
       <StatusBar
         running={running}
         port={settings.port}
+        allowRemote={settings.allowRemote}
         flowCount={orderRef.current.length}
         activeScenario={activeScenario}
       />

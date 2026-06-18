@@ -134,6 +134,21 @@ function parseSize(v: string): number {
   return n * (unit === "k" ? 1000 : unit === "m" ? 1_000_000 : 1);
 }
 
+const SIZE_KEYS = new Set(["larger-than", "smaller-than", "req-larger-than"]);
+
+/** Whether a numeric-comparison term has an unparseable value (empty or junk).
+ *  Such a term must match NOTHING — and, crucially, must not flip to matching
+ *  EVERYTHING when negated (see matchTerm). */
+function numericValueInvalid(key: string, value: string): boolean {
+  if (SIZE_KEYS.has(key)) return Number.isNaN(parseSize(value));
+  if (key === "slower-than") {
+    const t = value.trim();
+    // Number("") === 0 (not NaN), so guard the empty string explicitly.
+    return t === "" || !Number.isFinite(Number(t));
+  }
+  return false;
+}
+
 /** status:404 (exact), status:4xx (class), status:>=400 / <500 (ranges). */
 function matchStatus(value: string, status: number | null): boolean {
   if (status == null) return false; // in-flight matches only the Pending chip
@@ -192,11 +207,24 @@ function matchKv(key: string, value: string, s: FlowSummary): boolean {
   }
 }
 
+// Cap the input a user-supplied /regex/ runs against. URLs are short, so this
+// bounds per-match work and polynomial backtracking without affecting real
+// matches. (A pathological exponential pattern on the local user's own filter
+// is still a footgun, but it's their own input — out of scope per the threat
+// model; this just keeps accidental slow patterns from scaling with body/URL size.)
+const MAX_REGEX_INPUT = 2048;
+
 function matchTerm(term: SummaryTerm, s: FlowSummary): boolean {
   let r: boolean;
   if (term.t === "text") r = urlOf(s).toLowerCase().includes(term.value);
-  else if (term.t === "regex") r = term.re.test(urlOf(s));
-  else r = matchKv(term.key, term.value, s);
+  else if (term.t === "regex") r = term.re.test(urlOf(s).slice(0, MAX_REGEX_INPUT));
+  else {
+    // A malformed numeric value (empty while typing, or junk like "10gb")
+    // matches nothing regardless of negation — otherwise `-larger-than:bogus`
+    // or `slower-than:` would highlight every flow.
+    if (numericValueInvalid(term.key, term.value)) return false;
+    r = matchKv(term.key, term.value, s);
+  }
   return term.neg ? !r : r;
 }
 

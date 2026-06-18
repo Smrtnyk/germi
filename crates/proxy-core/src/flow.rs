@@ -307,6 +307,9 @@ pub enum FlowEvent {
     Completed { summary: FlowSummary },
     /// The store was cleared.
     Cleared,
+    /// The event stream lagged (a subscriber fell behind) and some events were
+    /// dropped; the UI should re-fetch the flow list to resynchronize.
+    Resync,
 }
 
 /// Extract the bare content-type (without parameters) from a header list.

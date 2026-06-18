@@ -1,12 +1,28 @@
 //! Persistence for the autoresponder config (scenarios) under the app data dir,
 //! alongside the CA. Plain JSON — the config is small and human-inspectable.
 
+use std::io::Write;
 use std::path::Path;
 
 use proxy_core::{AutoResponder, ProxySettings};
 
 const FILE: &str = "autoresponder.json";
 const SETTINGS_FILE: &str = "settings.json";
+
+/// Write `contents` to `path` atomically: write a sibling temp file, flush +
+/// fsync it, then rename it over the target (atomic on the same filesystem).
+/// A crash / power loss / full disk mid-write thus leaves the previous file
+/// intact instead of truncated — otherwise the next launch's `from_str(..).ok()`
+/// would silently fall back to defaults, losing all the user's scenarios.
+fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(contents)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
 
 /// Load the saved autoresponder, or `None` if absent / unreadable / malformed.
 pub fn load_autoresponder(dir: &Path) -> Option<AutoResponder> {
@@ -20,7 +36,7 @@ pub fn save_autoresponder(dir: &Path, ar: &AutoResponder) {
     let result = std::fs::create_dir_all(dir).and_then(|()| {
         let text = serde_json::to_string_pretty(ar)
             .map_err(std::io::Error::other)?;
-        std::fs::write(dir.join(FILE), text)
+        write_atomic(&dir.join(FILE), text.as_bytes())
     });
     if let Err(e) = result {
         tracing::warn!("failed to persist autoresponder: {e}");
@@ -38,7 +54,7 @@ pub fn save_settings(dir: &Path, settings: &ProxySettings) {
     let result = std::fs::create_dir_all(dir).and_then(|()| {
         let text = serde_json::to_string_pretty(settings)
             .map_err(std::io::Error::other)?;
-        std::fs::write(dir.join(SETTINGS_FILE), text)
+        write_atomic(&dir.join(SETTINGS_FILE), text.as_bytes())
     });
     if let Err(e) = result {
         tracing::warn!("failed to persist settings: {e}");

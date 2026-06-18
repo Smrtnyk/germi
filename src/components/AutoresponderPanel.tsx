@@ -314,6 +314,7 @@ export function AutoresponderPanel({ ar, onChange, selectRuleId }: Props) {
                 </div>
               ) : (
                 <RuleEditor
+                  key={selectedRule.id}
                   rule={selectedRule}
                   onPatch={(patch) => patchRule(selectedRule.id, patch)}
                   onDelete={() => deleteRule(selectedRule.id)}
@@ -481,6 +482,20 @@ function StatusField({
   status: number;
   onChange: (s: number) => void;
 }) {
+  // Local draft so the field can be cleared / retyped without immediately
+  // committing an invalid status 0 (Number("") === 0). Commit a valid HTTP
+  // status (100–599) on blur/Enter, otherwise revert to the last good value.
+  const [draft, setDraft] = useState(String(status));
+  useEffect(() => setDraft(String(status)), [status]);
+  const commit = () => {
+    const n = Math.trunc(Number(draft));
+    if (draft.trim() !== "" && Number.isFinite(n) && n >= 100 && n <= 599) {
+      onChange(n);
+      setDraft(String(n));
+    } else {
+      setDraft(String(status));
+    }
+  };
   return (
     <div className="status-field">
       <div className="row status-row">
@@ -488,8 +503,12 @@ function StatusField({
         <input
           type="number"
           style={{ width: 78 }}
-          value={status}
-          onChange={(e) => onChange(Number(e.target.value))}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          }}
         />
         <span className="muted reason">{STATUS_REASON[status] ?? ""}</span>
       </div>
@@ -516,45 +535,52 @@ function HeadersTable({
   headers: [string, string][];
   onChange: (h: [string, string][]) => void;
 }) {
+  // Keep stable per-row ids so removing a middle row doesn't rebind input DOM
+  // state (focus / selection / IME) to the wrong logical row (the index-as-key
+  // anti-pattern). The DTO stays [name, value][]; ids are local-only. This
+  // component remounts per rule (RuleEditor is keyed by rule id) and per action
+  // kind, so the prop is the source of truth only at mount.
+  const nextId = useRef(0);
+  const [rows, setRows] = useState(() =>
+    headers.map(([name, value]) => ({ id: nextId.current++, name, value })),
+  );
+
+  const emit = (next: { id: number; name: string; value: string }[]) => {
+    setRows(next);
+    onChange(next.map((r) => [r.name, r.value] as [string, string]));
+  };
+
   return (
     <div className="headers-table">
       <div className="row">
         <label>Headers</label>
         <button
           className="btn small"
-          onClick={() => onChange([...headers, ["", ""]])}
+          onClick={() => emit([...rows, { id: nextId.current++, name: "", value: "" }])}
         >
           + Add header
         </button>
       </div>
-      {headers.map((h, i) => (
-        <div className="header-row" key={i}>
+      {rows.map((row) => (
+        <div className="header-row" key={row.id}>
           <input
             placeholder="Name"
-            value={h[0]}
+            value={row.name}
             onChange={(e) =>
-              onChange(
-                headers.map((x, j) =>
-                  j === i ? ([e.target.value, x[1]] as [string, string]) : x,
-                ),
-              )
+              emit(rows.map((r) => (r.id === row.id ? { ...r, name: e.target.value } : r)))
             }
           />
           <input
             placeholder="Value"
-            value={h[1]}
+            value={row.value}
             onChange={(e) =>
-              onChange(
-                headers.map((x, j) =>
-                  j === i ? ([x[0], e.target.value] as [string, string]) : x,
-                ),
-              )
+              emit(rows.map((r) => (r.id === row.id ? { ...r, value: e.target.value } : r)))
             }
           />
           <button
             className="btn ghost"
             title="Remove header"
-            onClick={() => onChange(headers.filter((_, j) => j !== i))}
+            onClick={() => emit(rows.filter((r) => r.id !== row.id))}
           >
             ✕
           </button>

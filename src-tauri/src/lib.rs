@@ -23,11 +23,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // One persistent CA per install, under the OS app-data dir.
+            // One persistent CA per install, under the OS app-data dir. Treat an
+            // unresolvable app-data dir as fatal rather than writing the root CA
+            // private key to a predictable, world-traversable temp path.
             let ca_dir = app
                 .path()
                 .app_data_dir()
-                .unwrap_or_else(|_| std::env::temp_dir().join("germi"));
+                .map_err(|e| format!("could not resolve app data dir: {e}"))?;
             let ca = ProxyController::load_or_generate_ca(&ca_dir)
                 .map_err(|e| format!("failed to initialize CA: {e}"))?;
             let controller = Arc::new(ProxyController::new(ca));
@@ -42,6 +44,7 @@ pub fn run() {
             app.manage(AppState {
                 controller,
                 ca_dir,
+                flow_forwarder: std::sync::Mutex::new(None),
             });
             Ok(())
         })
