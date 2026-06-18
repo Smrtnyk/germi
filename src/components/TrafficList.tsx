@@ -17,6 +17,9 @@ interface Props {
   selectedId: string | null;
   selectedIds: Set<string>;
   onRowClick: (id: string, e: ReactMouseEvent) => void;
+  /** Reports the px width the columns currently need, so the panel divider can
+   *  floor to it and never let the list be squeezed into the right panel. */
+  onContentWidth?: (w: number) => void;
 }
 
 // Path is the flexible (1fr) column that absorbs every resize; the rest are
@@ -42,6 +45,9 @@ const DEFAULT_W: Record<ColKey, number> = {
 const MIN_W = 38;
 const STORE_KEY = "germi.colWidths";
 const FLEX_INDEX = COLUMNS.findIndex((c) => c.key === "path");
+const PATH_MIN = 60; // matches the minmax(60px, 1fr) path track
+const GAP = 8; // .flow-row column gap
+const ROW_PAD = 20; // .flow-row left+right padding
 
 function loadWidths(): Record<ColKey, number> {
   try {
@@ -73,6 +79,7 @@ export function TrafficList({
   selectedId,
   selectedIds,
   onRowClick,
+  onContentWidth,
 }: Props) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [widths, setWidths] = useState<Record<ColKey, number>>(loadWidths);
@@ -80,6 +87,22 @@ export function TrafficList({
   useEffect(() => {
     localStorage.setItem(STORE_KEY, JSON.stringify(widths));
   }, [widths]);
+
+  // The minimum width the columns occupy (path collapsed to its 60px min). The
+  // parent uses this to floor the panel divider so the list can't be clipped.
+  const contentWidth =
+    widths.method +
+    widths.host +
+    widths.status +
+    widths.mime +
+    widths.size +
+    widths.time +
+    PATH_MIN +
+    GAP * (COLUMNS.length - 1) +
+    ROW_PAD;
+  useEffect(() => {
+    onContentWidth?.(contentWidth);
+  }, [contentWidth, onContentWidth]);
 
   const cols = `${widths.method}px ${widths.host}px minmax(60px, 1fr) ${widths.status}px ${widths.mime}px ${widths.size}px ${widths.time}px`;
 

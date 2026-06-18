@@ -1,4 +1,10 @@
-import { useCallback, useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 
 interface Options {
   /** Initial column width in px (used when nothing is persisted). */
@@ -21,6 +27,21 @@ export function useResizable({ initial, min, getMax, storageKey }: Options) {
     const saved = Number(localStorage.getItem(storageKey));
     return Number.isFinite(saved) && saved >= min ? saved : initial;
   });
+
+  // Clamp on mount and on every window resize, so a width persisted in a larger
+  // window can't squeeze the other pane (or overflow) when reopened smaller.
+  const getMaxRef = useRef(getMax);
+  getMaxRef.current = getMax;
+  useEffect(() => {
+    const clamp = () =>
+      setSize((s) => {
+        const max = Math.max(min, getMaxRef.current());
+        return Math.min(max, Math.max(min, s));
+      });
+    clamp();
+    window.addEventListener("resize", clamp);
+    return () => window.removeEventListener("resize", clamp);
+  }, [min]);
 
   const onPointerDown = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {

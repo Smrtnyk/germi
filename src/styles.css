@@ -382,6 +382,9 @@ textarea {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* hard boundary: the list can never paint into the right panel */
+  min-width: 0;
+  overflow: hidden;
 }
 .traffic-col > .flow-list {
   flex: 1;

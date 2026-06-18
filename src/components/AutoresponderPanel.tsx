@@ -252,7 +252,9 @@ export function AutoresponderPanel({ ar, onChange, selectRuleId }: Props) {
           <div
             className="rules"
             ref={rulesRef}
-            style={{ gridTemplateColumns: `${listResize.size}px 6px minmax(0, 1fr)` }}
+            style={{
+              gridTemplateColumns: `minmax(0, ${listResize.size}px) 6px minmax(280px, 1fr)`,
+            }}
           >
             <aside className="rule-list">
               <button className="btn primary block" onClick={addRule}>

@@ -15,8 +15,8 @@
         "title": "Germi",
         "width": 1320,
         "height": 860,
-        "minWidth": 960,
-        "minHeight": 600
+        "minWidth": 1100,
+        "minHeight": 640
       }
     ],
     "security": {

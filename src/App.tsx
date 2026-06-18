@@ -59,9 +59,12 @@ export function App() {
   const summaryMatchedRef = useRef<Set<string>>(new Set());
   const [tick, bump] = useReducer((n: number) => n + 1, 0);
 
+  // Floored to the width the traffic columns actually need (reported by the
+  // list), so the divider can't squeeze the list into the right panel.
+  const [trafficMin, setTrafficMin] = useState(640);
   const trafficResize = useResizable({
     initial: 760,
-    min: 360,
+    min: trafficMin,
     getMax: () => window.innerWidth - 440,
     storageKey: "germi.trafficWidth",
   });
@@ -394,7 +397,9 @@ export function App() {
 
       <main
         className="body workbench"
-        style={{ gridTemplateColumns: `${trafficResize.size}px 6px minmax(0, 1fr)` }}
+        style={{
+          gridTemplateColumns: `minmax(0, ${trafficResize.size}px) 6px minmax(440px, 1fr)`,
+        }}
       >
         <div className="traffic-col">
           <FilterChips
@@ -436,6 +441,7 @@ export function App() {
             selectedId={selectedId}
             selectedIds={selectedIds}
             onRowClick={onRowClick}
+            onContentWidth={setTrafficMin}
           />
         </div>
 
