@@ -233,9 +233,7 @@ impl ProxyController {
         let Ok(store) = self.shared.store.lock() else {
             return Vec::new();
         };
-        let ids = candidates
-            .map(|c| c.to_vec())
-            .unwrap_or_else(|| store.ids());
+        let ids = candidates.map_or_else(|| store.ids(), |c| c.to_vec());
 
         let hit = |body: &[u8], headers: &[(String, String)]| -> bool {
             if !crate::flow::is_textual(headers) {
@@ -266,8 +264,7 @@ impl ProxyController {
                     && flow
                         .response
                         .as_ref()
-                        .map(|r| hit(&r.body, &r.headers))
-                        .unwrap_or(false);
+                        .is_some_and(|r| hit(&r.body, &r.headers));
                 req || resp
             })
             .collect()

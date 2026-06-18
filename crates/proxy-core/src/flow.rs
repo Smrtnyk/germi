@@ -18,8 +18,7 @@ use serde::Serialize;
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 /// A captured request, as seen by the proxy after TLS interception.
@@ -330,14 +329,13 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
 /// `Sec-Fetch-Dest` (near-browser fidelity) → `Sec-Fetch-Mode` → `X-Requested-With`
 /// → response Content-Type → URL extension → `Accept` hint.
 fn classify_kind(req: &CapturedRequest, resp: Option<&CapturedResponse>) -> ResourceKind {
-    use ResourceKind::*;
+    use ResourceKind::{Ws, Doc, Js, Css, Font, Img, Media, Other, Xhr, Wasm};
     let h = &req.headers;
 
     // 1. WebSocket handshake (most reliable; must precede Sec-Fetch-Dest:empty).
     if header(h, "upgrade")
-        .map(|u| u.to_ascii_lowercase().contains("websocket"))
-        .unwrap_or(false)
-        || resp.map(|r| r.status == 101).unwrap_or(false)
+        .is_some_and(|u| u.to_ascii_lowercase().contains("websocket"))
+        || resp.is_some_and(|r| r.status == 101)
     {
         return Ws;
     }
@@ -367,8 +365,7 @@ fn classify_kind(req: &CapturedRequest, resp: Option<&CapturedResponse>) -> Reso
 
     // 4. Legacy XHR signal.
     if header(h, "x-requested-with")
-        .map(|v| v.eq_ignore_ascii_case("XMLHttpRequest"))
-        .unwrap_or(false)
+        .is_some_and(|v| v.eq_ignore_ascii_case("XMLHttpRequest"))
     {
         return Xhr;
     }

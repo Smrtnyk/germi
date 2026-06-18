@@ -145,7 +145,7 @@ pub fn test_rules(rules: &RuleSet, input: &TestInput) -> TestResult {
             let mut eff = req.headers.clone();
             for (k, v) in &set_headers {
                 if let Some(slot) = eff.iter_mut().find(|(hk, _)| hk.eq_ignore_ascii_case(k)) {
-                    slot.1 = v.clone();
+                    slot.1.clone_from(v);
                 } else {
                     eff.push((k.clone(), v.clone()));
                 }

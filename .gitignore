@@ -20,3 +20,6 @@ dist-ssr
 *.log
 .DS_Store
 Thumbs.db
+
+# Claude Code feature-build pipeline artifacts (transient; agents/commands ARE committed)
+.claude/pipeline/

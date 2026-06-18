@@ -20,5 +20,5 @@ fn main() {
         }
     }
 
-    germi_lib::run()
+    germi_lib::run();
 }

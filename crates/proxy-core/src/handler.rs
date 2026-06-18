@@ -72,9 +72,7 @@ impl HttpHandler for CaptureHandler {
             .to_string();
         let path = parts
             .uri
-            .path_and_query()
-            .map(|p| p.as_str().to_string())
-            .unwrap_or_else(|| parts.uri.path().to_string());
+            .path_and_query().map_or_else(|| parts.uri.path().to_string(), |p| p.as_str().to_string());
 
         let captured = CapturedRequest {
             method: parts.method.as_str().to_string(),
@@ -92,10 +90,9 @@ impl HttpHandler for CaptureHandler {
             .shared
             .autoresponder
             .read()
-            .map(|ar| ar.evaluate_request(&captured))
-            .unwrap_or(RequestOutcome::Continue {
+            .map_or(RequestOutcome::Continue {
                 set_headers: vec![],
-            });
+            }, |ar| ar.evaluate_request(&captured));
 
         let id = self.shared.next_id();
         let start = Instant::now();

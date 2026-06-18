@@ -17,7 +17,7 @@ pub fn load_autoresponder(dir: &Path) -> Option<AutoResponder> {
 /// Best-effort save. Logs (does not panic) on failure — the app-data dir is not
 /// auto-created on Linux, so create it first.
 pub fn save_autoresponder(dir: &Path, ar: &AutoResponder) {
-    let result = std::fs::create_dir_all(dir).and_then(|_| {
+    let result = std::fs::create_dir_all(dir).and_then(|()| {
         let text = serde_json::to_string_pretty(ar)
             .map_err(std::io::Error::other)?;
         std::fs::write(dir.join(FILE), text)
@@ -35,7 +35,7 @@ pub fn load_settings(dir: &Path) -> Option<ProxySettings> {
 
 /// Best-effort save of proxy settings (creates the app-data dir if missing).
 pub fn save_settings(dir: &Path, settings: &ProxySettings) {
-    let result = std::fs::create_dir_all(dir).and_then(|_| {
+    let result = std::fs::create_dir_all(dir).and_then(|()| {
         let text = serde_json::to_string_pretty(settings)
             .map_err(std::io::Error::other)?;
         std::fs::write(dir.join(SETTINGS_FILE), text)

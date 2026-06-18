@@ -23,7 +23,7 @@ in Rust and load on demand — the IPC bridge is the bottleneck, not the proxy.
 
 ## Quick start
 
-Needs **Rust** (stable), **Node 20+**, **pnpm 10+**, and a C toolchain + CMake (for
+Needs **Rust** (stable), **Node 22+**, **pnpm 10+**, and a C toolchain + CMake (for
 `aws-lc-rs`). Linux also needs the WebKitGTK/GTK dev libraries:
 
 ```sh

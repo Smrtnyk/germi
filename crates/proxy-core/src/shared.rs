@@ -47,16 +47,14 @@ impl Shared {
     pub fn should_bypass(&self, host: &str) -> bool {
         self.settings
             .read()
-            .map(|s| s.is_excluded(host) || !s.matches_capture_filter(host))
-            .unwrap_or(false)
+            .is_ok_and(|s| s.is_excluded(host) || !s.matches_capture_filter(host))
     }
 
     /// Artificial delay (ms) to add before returning each response (0 = off).
     pub fn response_delay_ms(&self) -> u64 {
         self.settings
             .read()
-            .map(|s| s.response_delay_ms)
-            .unwrap_or(0)
+            .map_or(0, |s| s.response_delay_ms)
     }
 
     pub fn next_id(&self) -> String {

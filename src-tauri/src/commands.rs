@@ -189,8 +189,7 @@ pub async fn export_ca(
     let path = picked.into_path().map_err(|e| e.to_string())?;
     let is_der = path
         .extension()
-        .map(|e| e.eq_ignore_ascii_case("der"))
-        .unwrap_or(false);
+        .is_some_and(|e| e.eq_ignore_ascii_case("der"));
     if is_der {
         std::fs::write(&path, state.controller.ca_cert_der()).map_err(|e| e.to_string())?;
     } else {
@@ -209,7 +208,7 @@ pub async fn regenerate_ca(state: State<'_, AppState>) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Route the OS system proxy through Germi (Windows WinINET / GNOME / KDE).
+/// Route the OS system proxy through Germi (Windows `WinINET` / GNOME / KDE).
 #[tauri::command]
 pub fn set_system_proxy(port: u16) -> Result<(), String> {
     let sp = sysproxy::Sysproxy {

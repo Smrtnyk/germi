@@ -6,7 +6,7 @@
 //! mock setups around and switch between them instantly.
 //!
 //! Within a scenario, rules are evaluated in order; the first *short-circuiting*
-//! action (Respond / MapLocal / Block) wins and the request never hits the
+//! action (Respond / `MapLocal` / Block) wins and the request never hits the
 //! network. Non-short-circuiting actions (header/body/status edits) accumulate.
 //! Request-phase actions run in `handle_request`; response-phase in
 //! `handle_response`.
@@ -55,8 +55,7 @@ impl Matcher {
             MatchKind::Contains => self.url.is_empty() || url.contains(&self.url),
             MatchKind::Exact => url == self.url,
             MatchKind::Regex => Regex::new(&self.url)
-                .map(|re| re.is_match(&url))
-                .unwrap_or(false),
+                .is_ok_and(|re| re.is_match(&url)),
         }
     }
 }
@@ -173,7 +172,7 @@ pub enum RequestOutcome {
     Block { rule: String },
 }
 
-/// Evaluate request-phase rules in order (shared by RuleSet, Scenario, tester).
+/// Evaluate request-phase rules in order (shared by `RuleSet`, Scenario, tester).
 pub fn evaluate_request_rules(rules: &[Rule], req: &CapturedRequest) -> RequestOutcome {
     let mut set_headers = Vec::new();
     for rule in rules.iter().filter(|r| r.enabled) {
@@ -202,8 +201,9 @@ pub fn evaluate_request_rules(rules: &[Rule], req: &CapturedRequest) -> RequestO
                     },
                 };
             }
-            Action::MapLocal { path, status } => match std::fs::read(path) {
-                Ok(bytes) => {
+            // Missing file: skip this rule rather than break the flow.
+            Action::MapLocal { path, status } => {
+                if let Ok(bytes) = std::fs::read(path) {
                     let ct = mime_guess::from_path(path)
                         .first_raw()
                         .unwrap_or("application/octet-stream")
@@ -217,9 +217,7 @@ pub fn evaluate_request_rules(rules: &[Rule], req: &CapturedRequest) -> RequestO
                         },
                     };
                 }
-                // Missing file: skip this rule rather than break the flow.
-                Err(_) => continue,
-            },
+            }
             Action::Block => {
                 return RequestOutcome::Block {
                     rule: rule.name.clone(),
@@ -511,7 +509,7 @@ mod tests {
                 enabled: true,
                 matcher: Matcher {
                     method: Some("POST".into()),
-                    url: "".into(),
+                    url: String::new(),
                     url_match: MatchKind::Contains,
                 },
                 action: Action::Block,

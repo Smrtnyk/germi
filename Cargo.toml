@@ -13,8 +13,20 @@ edition = "2021"
 license = "MIT"
 rust-version = "1.82"
 
-# Clippy's default lint groups (correctness, suspicious, style, complexity, perf).
-# Members opt in with `[lints]\nworkspace = true`. Levels are "warn" here so local
-# `cargo clippy` stays non-blocking; CI enforces them hard via `-- -D warnings`.
+# Lints are enforced repo-wide: every member opts in with `[lints] workspace = true`.
+# Levels are "deny" so they hard-fail locally too (CI also passes `-- -D warnings`).
+# Groups carry priority = -1 so the specific `allow`s below take precedence.
+[workspace.lints.rust]
+warnings = { level = "deny", priority = -1 }
+
 [workspace.lints.clippy]
-all = "warn"
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+# Pedantic lints we deliberately keep off, and why:
+missing_errors_doc = "allow"                 # internal API, not a published library
+missing_panics_doc = "allow"                 # ditto
+must_use_candidate = "allow"                 # too noisy to tag every getter in an app
+needless_pass_by_value = "allow"             # Tauri commands receive owned, deserialized args
+redundant_closure_for_method_calls = "allow" # `|s| s.to_string()` beats `ToString::to_string`
+cast_possible_truncation = "allow"           # intentional Duration/f64-ms → u64 casts
+cast_sign_loss = "allow"                      # ditto
