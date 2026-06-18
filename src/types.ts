@@ -116,6 +116,11 @@ export interface AutoResponder {
   activeScenarioId: string | null;
 }
 
+export interface ProxySettings {
+  /** Host patterns tunneled without interception (no decrypt, no capture). */
+  excludedHosts: string[];
+}
+
 export interface CaInfo {
   certPem: string;
   certPath: string;

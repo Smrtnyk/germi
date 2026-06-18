@@ -15,6 +15,7 @@ import type {
   CaInfo,
   FlowDetail,
   FlowSummary,
+  ProxySettings,
   ResourceKind,
 } from "./types";
 import { Toolbar } from "./components/Toolbar";
@@ -23,6 +24,7 @@ import { TrafficList } from "./components/TrafficList";
 import { FlowInspector } from "./components/FlowInspector";
 import { AutoresponderPanel } from "./components/AutoresponderPanel";
 import { CaDialog } from "./components/CaDialog";
+import { SettingsDialog } from "./components/SettingsDialog";
 import { StatusBar } from "./components/StatusBar";
 
 type RightTab = "inspector" | "autoresponder";
@@ -50,6 +52,8 @@ export function App() {
   const [pickScenarioId, setPickScenarioId] = useState("");
   const [caInfo, setCaInfo] = useState<CaInfo | null>(null);
   const [caOpen, setCaOpen] = useState(false);
+  const [settings, setSettings] = useState<ProxySettings>({ excludedHosts: [] });
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const flowsRef = useRef<Map<string, FlowSummary>>(new Map());
@@ -95,6 +99,7 @@ export function App() {
       try {
         setRunning(await api.proxyStatus());
         setAutoresponder(await api.getAutoresponder());
+        setSettings(await api.getSettings());
         setCaInfo(await api.caInfo());
         const initial = await api.listFlows();
         const map = flowsRef.current;
@@ -382,6 +387,7 @@ export function App() {
         onImport={importArchive}
         decode={decode}
         onToggleDecode={() => setDecode((d) => !d)}
+        onOpenSettings={() => setSettingsOpen(true)}
         onOpenSession={openSession}
         onSaveSession={saveSession}
         onClear={clearTraffic}
@@ -499,6 +505,17 @@ export function App() {
 
       {caOpen && caInfo && (
         <CaDialog info={caInfo} onClose={() => setCaOpen(false)} />
+      )}
+
+      {settingsOpen && (
+        <SettingsDialog
+          settings={settings}
+          onChange={(s) => {
+            setSettings(s);
+            void api.setSettings(s).catch((e) => setError(String(e)));
+          }}
+          onClose={() => setSettingsOpen(false)}
+        />
       )}
     </div>
   );

@@ -11,26 +11,41 @@ use tokio::sync::broadcast;
 
 use crate::flow::{CapturedRequest, CapturedResponse, Flow, FlowEvent};
 use crate::rules::AutoResponder;
+use crate::settings::ProxySettings;
 use crate::store::FlowStore;
 
 pub struct Shared {
     pub store: Mutex<FlowStore>,
     pub autoresponder: RwLock<AutoResponder>,
+    pub settings: RwLock<ProxySettings>,
     pub events: broadcast::Sender<FlowEvent>,
     counter: AtomicU64,
 }
 
 impl Shared {
-    pub fn new(max_flows: usize, autoresponder: AutoResponder) -> Arc<Self> {
+    pub fn new(
+        max_flows: usize,
+        autoresponder: AutoResponder,
+        settings: ProxySettings,
+    ) -> Arc<Self> {
         // Generous buffer; slow subscribers get a Lagged error and resync rather
         // than blocking the proxy.
         let (events, _rx) = broadcast::channel(10_000);
         Arc::new(Self {
             store: Mutex::new(FlowStore::new(max_flows)),
             autoresponder: RwLock::new(autoresponder),
+            settings: RwLock::new(settings),
             events,
             counter: AtomicU64::new(1),
         })
+    }
+
+    /// Whether `host` is configured to bypass interception (tunneled / unrecorded).
+    pub fn is_excluded(&self, host: &str) -> bool {
+        self.settings
+            .read()
+            .map(|s| s.is_excluded(host))
+            .unwrap_or(false)
     }
 
     pub fn next_id(&self) -> String {

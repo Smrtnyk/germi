@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use proxy_core::{
-    AutoResponder, FlowDetail, FlowEvent, FlowSummary, MockResult, RuleSet, SearchSide, TestInput,
-    TestResult,
+    AutoResponder, FlowDetail, FlowEvent, FlowSummary, MockResult, ProxySettings, RuleSet,
+    SearchSide, TestInput, TestResult,
 };
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -114,6 +114,17 @@ pub fn get_autoresponder(state: State<'_, AppState>) -> AutoResponder {
 pub fn set_autoresponder(state: State<'_, AppState>, autoresponder: AutoResponder) {
     state.controller.set_autoresponder(autoresponder.clone());
     crate::persist::save_autoresponder(&state.ca_dir, &autoresponder);
+}
+
+#[tauri::command]
+pub fn get_settings(state: State<'_, AppState>) -> ProxySettings {
+    state.controller.get_settings()
+}
+
+#[tauri::command]
+pub fn set_settings(state: State<'_, AppState>, settings: ProxySettings) {
+    state.controller.set_settings(settings.clone());
+    crate::persist::save_settings(&state.ca_dir, &settings);
 }
 
 /// Simulate a rule set against a sample request without touching the network.
@@ -268,4 +279,50 @@ pub async fn open_session(
         .controller
         .import_session(&bytes)
         .map_err(|e| e.to_string())
+}
+
+/// Export the current proxy settings to a user-chosen JSON file.
+#[tauri::command]
+pub async fn export_settings(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .add_filter("Germi settings", &["json"])
+        .set_file_name("germi-settings.json")
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let settings = state.controller.get_settings();
+    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Import proxy settings from a JSON file, applying + persisting them. Returns
+/// the new settings (or the unchanged current settings if cancelled).
+#[tauri::command]
+pub async fn import_settings(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ProxySettings, String> {
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .add_filter("Germi settings", &["json"])
+        .blocking_pick_file()
+    else {
+        return Ok(state.controller.get_settings());
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let settings: ProxySettings =
+        serde_json::from_str(&text).map_err(|e| format!("Invalid settings file: {e}"))?;
+    state.controller.set_settings(settings.clone());
+    crate::persist::save_settings(&state.ca_dir, &settings);
+    Ok(settings)
 }

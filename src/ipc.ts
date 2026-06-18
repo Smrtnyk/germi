@@ -7,6 +7,7 @@ import type {
   FlowEvent,
   FlowSummary,
   MockResult,
+  ProxySettings,
   RuleSet,
   TestInput,
   TestResult,
@@ -26,6 +27,11 @@ export const api = {
   getAutoresponder: () => invoke<AutoResponder>("get_autoresponder"),
   setAutoresponder: (autoresponder: AutoResponder) =>
     invoke<void>("set_autoresponder", { autoresponder }),
+  getSettings: () => invoke<ProxySettings>("get_settings"),
+  setSettings: (settings: ProxySettings) =>
+    invoke<void>("set_settings", { settings }),
+  exportSettings: () => invoke<boolean>("export_settings"),
+  importSettings: () => invoke<ProxySettings>("import_settings"),
   testRules: (rules: RuleSet, input: TestInput) =>
     invoke<TestResult>("test_rules", { rules, input }),
   mockFlows: (ids: string[], scenarioId: string | null) =>

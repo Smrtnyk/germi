@@ -28,6 +28,7 @@ mod handler;
 mod import;
 mod rules;
 mod session;
+mod settings;
 mod shared;
 mod store;
 mod tester;
@@ -45,6 +46,7 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 pub use ca::CertAuthority;
 pub use flow::{FlowDetail, FlowEvent, FlowSummary, MessageDetail, ResourceKind};
 pub use rules::{Action, AutoResponder, MatchKind, Matcher, Rule, RuleSet, Scenario};
+pub use settings::ProxySettings;
 pub use tester::{test_rules, TestInput, TestResponse, TestResult};
 
 use handler::CaptureHandler;
@@ -82,7 +84,7 @@ impl ProxyController {
     /// Build a controller around an already-loaded CA. Seeds an example scenario.
     pub fn new(ca: CertAuthority) -> Self {
         Self {
-            shared: Shared::new(MAX_FLOWS, AutoResponder::example()),
+            shared: Shared::new(MAX_FLOWS, AutoResponder::example(), ProxySettings::default()),
             ca,
             running: Mutex::new(None),
         }
@@ -301,6 +303,24 @@ impl ProxyController {
     pub fn set_autoresponder(&self, autoresponder: AutoResponder) {
         if let Ok(mut guard) = self.shared.autoresponder.write() {
             *guard = autoresponder;
+        }
+    }
+
+    // ---- proxy settings (host exclusions) ----
+
+    pub fn get_settings(&self) -> ProxySettings {
+        self.shared
+            .settings
+            .read()
+            .map(|s| s.clone())
+            .unwrap_or_default()
+    }
+
+    /// Replace the live settings. Takes effect immediately for new connections
+    /// (excluded hosts begin tunneling without restarting the proxy).
+    pub fn set_settings(&self, settings: ProxySettings) {
+        if let Ok(mut guard) = self.shared.settings.write() {
+            *guard = settings;
         }
     }
 

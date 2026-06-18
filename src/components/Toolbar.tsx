@@ -11,6 +11,7 @@ interface ToolbarProps {
   onImport: () => void;
   decode: boolean;
   onToggleDecode: () => void;
+  onOpenSettings: () => void;
   onOpenSession: () => void;
   onSaveSession: () => void;
   onClear: () => void;
@@ -30,6 +31,7 @@ export function Toolbar(props: ToolbarProps) {
     onImport,
     decode,
     onToggleDecode,
+    onOpenSettings,
     onOpenSession,
     onSaveSession,
     onClear,
@@ -86,6 +88,14 @@ export function Toolbar(props: ToolbarProps) {
         title="Decompress gzip / brotli / deflate response bodies"
       >
         Decode
+      </button>
+
+      <button
+        className="btn"
+        onClick={onOpenSettings}
+        title="Settings — exclude hosts from interception"
+      >
+        ⚙ Settings
       </button>
 
       <div className="spacer" />

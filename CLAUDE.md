@@ -99,9 +99,10 @@ Engine (proxy-core — these work without the GUI system libs):
   **clone the `Arc` out of `State` before any `.await`** (never hold the `State`
   borrow across an await). JS passes camelCase arg names; Rust receives
   snake_case (Tauri converts).
-- **Persistence:** the CA (`germi-ca.{pem,key,der}`) and `autoresponder.json` live
-  in the OS app-data dir (`AppState.ca_dir`); `src-tauri/src/persist.rs` handles
-  the latter. Scenarios are loaded on startup and saved on change (debounced).
+- **Persistence:** the CA (`germi-ca.{pem,key,der}`), `autoresponder.json`, and
+  `settings.json` (proxy-wide settings, e.g. host exclusions) live in the OS
+  app-data dir (`AppState.ca_dir`); `src-tauri/src/persist.rs` handles the latter
+  two. Scenarios + settings are loaded on startup and saved on change (debounced).
   **Traffic is deliberately NOT auto-persisted** (privacy: captured tokens/bodies
   shouldn't silently hit disk) — it's explicit Save/Open of a lossless `.germi`
   session file (`proxy-core/src/session.rs`, base64 bodies). Don't add background

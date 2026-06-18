@@ -35,6 +35,10 @@ pub fn run() {
             if let Some(ar) = persist::load_autoresponder(&ca_dir) {
                 controller.set_autoresponder(ar);
             }
+            // Restore persisted proxy settings (host exclusions).
+            if let Some(settings) = persist::load_settings(&ca_dir) {
+                controller.set_settings(settings);
+            }
             app.manage(AppState {
                 controller,
                 ca_dir,
@@ -51,6 +55,10 @@ pub fn run() {
             commands::clear_flows,
             commands::get_autoresponder,
             commands::set_autoresponder,
+            commands::get_settings,
+            commands::set_settings,
+            commands::export_settings,
+            commands::import_settings,
             commands::test_rules,
             commands::mock_flows,
             commands::ca_info,
