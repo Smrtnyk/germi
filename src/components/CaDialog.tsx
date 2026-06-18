@@ -1,7 +1,7 @@
-import { useEffect, useRef } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
 import type { CaInfo } from "../types";
+import { useModalDialog } from "./useModalDialog";
 
 interface Props {
   info: CaInfo;
@@ -9,35 +9,7 @@ interface Props {
 }
 
 export function CaDialog({ info, onClose }: Props) {
-  const ref = useRef<HTMLDialogElement>(null);
-
-  useEffect(() => {
-    const dlg = ref.current;
-    if (!dlg) return;
-    dlg.setAttribute("closedby", "any"); // native light-dismiss where supported
-    if (!dlg.open) dlg.showModal(); // top layer + focus trap + native Esc
-
-    const handleClose = () => onClose();
-    // Light-dismiss fallback for engines without <dialog closedby> (WebKitGTK).
-    const handleClick = (event: MouseEvent) => {
-      if (event.target !== dlg) return;
-      const r = dlg.getBoundingClientRect();
-      const inside =
-        r.top <= event.clientY &&
-        event.clientY <= r.top + r.height &&
-        r.left <= event.clientX &&
-        event.clientX <= r.left + r.width;
-      if (!inside) dlg.close();
-    };
-
-    dlg.addEventListener("close", handleClose);
-    dlg.addEventListener("click", handleClick);
-    return () => {
-      dlg.removeEventListener("close", handleClose);
-      dlg.removeEventListener("click", handleClick);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const ref = useModalDialog(onClose);
 
   const close = () => ref.current?.close();
   const copy = (text: string) => void navigator.clipboard.writeText(text);

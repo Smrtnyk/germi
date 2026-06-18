@@ -1,4 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
+
+import { useModalDialog } from "./useModalDialog";
 
 interface Props {
   title: string;
@@ -9,7 +11,6 @@ interface Props {
   onCancel: () => void;
 }
 
-/** A small native-<dialog> confirmation. Escape / click-outside / Cancel abort. */
 export function ConfirmDialog({
   title,
   message,
@@ -18,36 +19,10 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: Props) {
-  const ref = useRef<HTMLDialogElement>(null);
   const confirmed = useRef(false);
-
-  useEffect(() => {
-    const dlg = ref.current;
-    if (!dlg) return;
-    dlg.setAttribute("closedby", "any");
-    if (!dlg.open) dlg.showModal();
-
-    const handleClose = () => {
-      if (!confirmed.current) onCancel();
-    };
-    const handleClick = (e: MouseEvent) => {
-      if (e.target !== dlg) return;
-      const r = dlg.getBoundingClientRect();
-      const inside =
-        r.top <= e.clientY &&
-        e.clientY <= r.top + r.height &&
-        r.left <= e.clientX &&
-        e.clientX <= r.left + r.width;
-      if (!inside) dlg.close();
-    };
-    dlg.addEventListener("close", handleClose);
-    dlg.addEventListener("click", handleClick);
-    return () => {
-      dlg.removeEventListener("close", handleClose);
-      dlg.removeEventListener("click", handleClick);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const ref = useModalDialog(() => {
+    if (!confirmed.current) onCancel();
+  });
 
   return (
     <dialog ref={ref} className="modal confirm-modal" aria-labelledby="confirm-title">

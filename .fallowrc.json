@@ -1,0 +1,15 @@
+{
+  "health": {
+    "maxCyclomatic": 25,
+    "maxCognitive": 15,
+    "maxCrap": 650,
+    "thresholdOverrides": [
+      {
+        "files": ["src/appState.ts"],
+        "functions": ["useAppState"],
+        "maxCognitive": 25,
+        "reason": "Composition-root hook that wires the feature hooks; fallow's cognitive score here reflects hook count (cyclomatic is 5), not branching."
+      }
+    ]
+  }
+}

@@ -152,6 +152,96 @@ function hexDump(b64: string, maxBytes = 64 * 1024): string {
   return lines.join("\n");
 }
 
+function bodyKind(
+  msg: MessageDetail,
+  ct: string,
+  decode: boolean,
+): "image" | "text" | "binary" {
+  if (msg.size === 0) return "text";
+  if (!decode && msg.encoding) return "binary";
+  return classify(ct, msg.bodyText);
+}
+
+function encodingLabel(msg: MessageDetail, decode: boolean): string | null {
+  if (!msg.encoding) return null;
+  if (msg.decoded) return `${msg.encoding} · decoded`;
+  return `${msg.encoding}${decode ? "" : " · raw"}`;
+}
+
+function MessageHeaders({ headers }: { headers: [string, string][] }) {
+  return (
+    <div className="headers">
+      {headers.map(([k, v], i) => (
+        <div className="hrow" key={`${k}-${i}`}>
+          <span className="hkey">{k}</span>
+          <span className="hval">{v}</span>
+        </div>
+      ))}
+      {headers.length === 0 && <div className="muted">No headers</div>}
+    </div>
+  );
+}
+
+function MessageBody({
+  msg,
+  kind,
+  ct,
+  text,
+  isRawEncoded,
+  showHex,
+}: {
+  msg: MessageDetail;
+  kind: "image" | "text" | "binary";
+  ct: string;
+  text: string;
+  isRawEncoded: boolean;
+  showHex: boolean;
+}) {
+  if (msg.size === 0) {
+    return (
+      <pre className="body">
+        <span className="muted">(empty)</span>
+      </pre>
+    );
+  }
+  if (kind === "image" && msg.truncated) {
+    return (
+      <div className="binary-note">
+        <span className="muted">
+          Image · {fmtSize(msg.size)} — too large to preview. Load the full body
+          to view it.
+        </span>
+      </div>
+    );
+  }
+  if (kind === "image") {
+    return (
+      <div className="img-wrap">
+        <img
+          className="img-preview"
+          src={`data:${ct || "image/png"};base64,${msg.bodyBase64}`}
+          alt="response preview"
+        />
+      </div>
+    );
+  }
+  if (kind === "binary") {
+    return (
+      <div className="binary-note">
+        <span className="muted">
+          {isRawEncoded
+            ? `Raw ${msg.encoding} body · ${fmtSize(msg.size)} — turn Decode on to read it.`
+            : `Binary content${ct ? ` · ${ct}` : ""} · ${fmtSize(
+                msg.size,
+              )} — not shown as text.`}
+        </span>
+        {showHex && <VirtualText text={hexDump(msg.bodyBase64)} hex />}
+      </div>
+    );
+  }
+  return <VirtualText text={text} />;
+}
+
 function MessageView({
   msg,
   decode,
@@ -165,33 +255,16 @@ function MessageView({
   const [showHex, setShowHex] = useState(false);
 
   const ct = contentType(msg.headers);
-  // With Decode off, an encoded body is raw compressed bytes — show hex, not garbage.
   const isRawEncoded = !decode && !!msg.encoding;
-  const kind =
-    msg.size === 0
-      ? "text"
-      : isRawEncoded
-        ? "binary"
-        : classify(ct, msg.bodyText);
-
-  const encLabel = msg.encoding
-    ? `${msg.encoding}${msg.decoded ? " · decoded" : decode ? "" : " · raw"}`
-    : null;
+  const kind = bodyKind(msg, ct, decode);
+  const encLabel = encodingLabel(msg, decode);
 
   const { pretty, canPretty } = prettify(ct, msg.bodyText);
   const text = view === "pretty" && canPretty ? pretty : msg.bodyText;
 
   return (
     <div className="message">
-      <div className="headers">
-        {msg.headers.map(([k, v], i) => (
-          <div className="hrow" key={`${k}-${i}`}>
-            <span className="hkey">{k}</span>
-            <span className="hval">{v}</span>
-          </div>
-        ))}
-        {msg.headers.length === 0 && <div className="muted">No headers</div>}
-      </div>
+      <MessageHeaders headers={msg.headers} />
 
       <div className="body-bar">
         <span className="body-meta">
@@ -235,43 +308,14 @@ function MessageView({
         </div>
       )}
 
-      {msg.size === 0 ? (
-        <pre className="body">
-          <span className="muted">(empty)</span>
-        </pre>
-      ) : kind === "image" ? (
-        msg.truncated ? (
-          // The base64 is only the first 512 KB — rendering it yields a broken
-          // image. Show a placeholder; the banner above offers "Load full body".
-          <div className="binary-note">
-            <span className="muted">
-              Image · {fmtSize(msg.size)} — too large to preview. Load the full
-              body to view it.
-            </span>
-          </div>
-        ) : (
-          <div className="img-wrap">
-            <img
-              className="img-preview"
-              src={`data:${ct || "image/png"};base64,${msg.bodyBase64}`}
-              alt="response preview"
-            />
-          </div>
-        )
-      ) : kind === "binary" ? (
-        <div className="binary-note">
-          <span className="muted">
-            {isRawEncoded
-              ? `Raw ${msg.encoding} body · ${fmtSize(msg.size)} — turn Decode on to read it.`
-              : `Binary content${ct ? ` · ${ct}` : ""} · ${fmtSize(
-                  msg.size,
-                )} — not shown as text.`}
-          </span>
-          {showHex && <VirtualText text={hexDump(msg.bodyBase64)} hex />}
-        </div>
-      ) : (
-        <VirtualText text={text} />
-      )}
+      <MessageBody
+        msg={msg}
+        kind={kind}
+        ct={ct}
+        text={text}
+        isRawEncoded={isRawEncoded}
+        showHex={showHex}
+      />
     </div>
   );
 }

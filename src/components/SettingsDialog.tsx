@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { api } from "../ipc";
 import type { ProxySettings } from "../types";
 import { ColumnsSettings } from "./ColumnsSettings";
+import { useModalDialog } from "./useModalDialog";
 
 interface SectionProps {
   settings: ProxySettings;
@@ -436,35 +437,10 @@ export function SettingsDialog({
   onCaChanged,
   onClose,
 }: Props) {
-  const ref = useRef<HTMLDialogElement>(null);
+  const ref = useModalDialog(onClose);
   const [active, setActive] = useState(SECTIONS[0].id);
   const [err, setErr] = useState<string | null>(null);
   const section = SECTIONS.find((s) => s.id === active) ?? SECTIONS[0];
-
-  useEffect(() => {
-    const dlg = ref.current;
-    if (!dlg) return;
-    dlg.setAttribute("closedby", "any");
-    if (!dlg.open) dlg.showModal();
-    const onCloseEvent = () => onClose();
-    const onClick = (e: MouseEvent) => {
-      if (e.target !== dlg) return;
-      const r = dlg.getBoundingClientRect();
-      const inside =
-        r.top <= e.clientY &&
-        e.clientY <= r.top + r.height &&
-        r.left <= e.clientX &&
-        e.clientX <= r.left + r.width;
-      if (!inside) dlg.close();
-    };
-    dlg.addEventListener("close", onCloseEvent);
-    dlg.addEventListener("click", onClick);
-    return () => {
-      dlg.removeEventListener("close", onCloseEvent);
-      dlg.removeEventListener("click", onClick);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   async function exportSettings() {
     setErr(null);

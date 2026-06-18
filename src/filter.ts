@@ -46,67 +46,96 @@ const SUMMARY_KEYS = new Set([
 ]);
 const BODY_KEYS = new Set(["body", "req-body", "resp-body"]);
 
-/** Tokenize on whitespace, honoring (and stripping) double quotes anywhere. */
+function skipSpaces(s: string, i: number): number {
+  while (i < s.length && /\s/.test(s[i])) i++;
+  return i;
+}
+
+function readQuoted(s: string, i: number): [string, number] {
+  i++;
+  let tok = "";
+  while (i < s.length && s[i] !== '"') tok += s[i++];
+  if (i < s.length) i++;
+  return [tok, i];
+}
+
+function readToken(s: string, i: number): [string, number] {
+  let tok = "";
+  while (i < s.length && !/\s/.test(s[i])) {
+    if (s[i] === '"') {
+      const [quoted, next] = readQuoted(s, i);
+      tok += quoted;
+      i = next;
+    } else {
+      tok += s[i++];
+    }
+  }
+  return [tok, i];
+}
+
 function tokenize(s: string): string[] {
   const out: string[] = [];
   let i = 0;
   while (i < s.length) {
-    while (i < s.length && /\s/.test(s[i])) i++;
+    i = skipSpaces(s, i);
     if (i >= s.length) break;
-    let tok = "";
-    while (i < s.length && !/\s/.test(s[i])) {
-      if (s[i] === '"') {
-        i++;
-        while (i < s.length && s[i] !== '"') tok += s[i++];
-        if (i < s.length) i++; // closing quote
-      } else {
-        tok += s[i++];
-      }
-    }
+    const [tok, next] = readToken(s, i);
     out.push(tok);
+    i = next;
   }
   return out;
+}
+
+type ClassifiedTerm =
+  | { kind: "summary"; term: SummaryTerm }
+  | { kind: "body"; term: BodyTerm };
+
+function bodyTermOf(key: string, value: string, neg: boolean): BodyTerm {
+  const side =
+    key === "req-body" ? "request" : key === "resp-body" ? "response" : "either";
+  const m = /^\/(.*)\/$/.exec(value);
+  return { side, value: m ? m[1] : value, regex: !!m, neg };
+}
+
+function regexTermOf(raw: string, neg: boolean): SummaryTerm | null {
+  const rx = /^\/(.*)\/$/.exec(raw);
+  if (!rx) return null;
+  try {
+    return { t: "regex", re: new RegExp(rx[1], "i"), neg };
+  } catch {
+    return null;
+  }
+}
+
+function classifyTerm(raw: string): ClassifiedTerm {
+  let neg = false;
+  if (raw.startsWith("-") && raw.length > 1) {
+    neg = true;
+    raw = raw.slice(1);
+  }
+
+  const colon = raw.indexOf(":");
+  if (colon > 0) {
+    const key = raw.slice(0, colon).toLowerCase();
+    const value = raw.slice(colon + 1);
+    if (BODY_KEYS.has(key)) return { kind: "body", term: bodyTermOf(key, value, neg) };
+    if (SUMMARY_KEYS.has(key)) return { kind: "summary", term: { t: "kv", key, value, neg } };
+  }
+
+  const regex = regexTermOf(raw, neg);
+  if (regex) return { kind: "summary", term: regex };
+  return { kind: "summary", term: { t: "text", value: raw.toLowerCase(), neg } };
 }
 
 export function parseFilter(input: string): ParsedFilter {
   const summaryTerms: SummaryTerm[] = [];
   const bodyTerms: BodyTerm[] = [];
 
-  for (let raw of tokenize(input)) {
+  for (const raw of tokenize(input)) {
     if (!raw) continue;
-    let neg = false;
-    if (raw.startsWith("-") && raw.length > 1) {
-      neg = true;
-      raw = raw.slice(1);
-    }
-
-    const colon = raw.indexOf(":");
-    if (colon > 0) {
-      const key = raw.slice(0, colon).toLowerCase();
-      const value = raw.slice(colon + 1);
-      if (BODY_KEYS.has(key)) {
-        const side =
-          key === "req-body" ? "request" : key === "resp-body" ? "response" : "either";
-        const m = /^\/(.*)\/$/.exec(value);
-        bodyTerms.push({ side, value: m ? m[1] : value, regex: !!m, neg });
-        continue;
-      }
-      if (SUMMARY_KEYS.has(key)) {
-        summaryTerms.push({ t: "kv", key, value, neg });
-        continue;
-      }
-    }
-
-    const rx = /^\/(.*)\/$/.exec(raw);
-    if (rx) {
-      try {
-        summaryTerms.push({ t: "regex", re: new RegExp(rx[1], "i"), neg });
-        continue;
-      } catch {
-        /* invalid regex → treat as text */
-      }
-    }
-    summaryTerms.push({ t: "text", value: raw.toLowerCase(), neg });
+    const classified = classifyTerm(raw);
+    if (classified.kind === "body") bodyTerms.push(classified.term);
+    else summaryTerms.push(classified.term);
   }
 
   return {
@@ -119,7 +148,7 @@ function urlOf(s: FlowSummary): string {
   return `${s.method} ${s.scheme}://${s.host}${s.path}`;
 }
 
-export function extOf(path: string): string {
+function extOf(path: string): string {
   const p = path.split("?")[0];
   const dot = p.lastIndexOf(".");
   const slash = p.lastIndexOf("/");

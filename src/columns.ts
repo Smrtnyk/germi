@@ -42,7 +42,7 @@ function queryOf(path: string): string {
   return q === -1 ? "" : path.slice(q);
 }
 
-export const BUILTIN_COLUMNS: ColumnDef[] = [
+const BUILTIN_COLUMNS: ColumnDef[] = [
   { id: "method", label: "Method", width: 62, special: "method", text: (f) => f.method },
   { id: "host", label: "Host", width: 150, text: (f) => f.host },
   { id: "path", label: "Path", width: 240, text: (f) => f.path },
@@ -102,8 +102,7 @@ export const PRESETS: { name: string; columns: string[] }[] = [
 
 export const DEFAULT_COLUMNS = PRESETS[1].columns;
 
-/** A column definition for a pinned header spec (e.g. `cf-ray` or `req:referer`). */
-export function headerColumnDef(spec: string): ColumnDef {
+function headerColumnDef(spec: string): ColumnDef {
   const isReq = spec.startsWith("req:");
   const name = isReq ? spec.slice(4) : spec;
   return {

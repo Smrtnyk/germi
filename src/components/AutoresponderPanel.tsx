@@ -103,9 +103,68 @@ function newRule(): Rule {
   };
 }
 
-export function AutoresponderPanel({ ar, onChange, selectRuleId }: Props) {
+function RuleListItem({
+  rule,
+  selected,
+  onSelect,
+  onToggle,
+  onDuplicate,
+}: {
+  rule: Rule;
+  selected: boolean;
+  onSelect: () => void;
+  onToggle: (enabled: boolean) => void;
+  onDuplicate: () => void;
+}) {
+  return (
+    <div
+      className={`rule-item ${selected ? "selected" : ""}`}
+      onClick={onSelect}
+      title={rule.name}
+    >
+      <input
+        type="checkbox"
+        checked={rule.enabled}
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) => onToggle(e.target.checked)}
+      />
+      <div className="rmeta">
+        <div className="rtop">
+          <span className={`rname ${rule.enabled ? "" : "off"}`}>
+            {middleTruncate(rule.name)}
+          </span>
+          {rule.action.kind !== "respond" && (
+            <span className="rkind">{rule.action.kind}</span>
+          )}
+        </div>
+        <div className="rsub">{ruleSummary(rule)}</div>
+      </div>
+      <button
+        className="btn ghost dup"
+        title="Duplicate rule"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDuplicate();
+        }}
+      >
+        ⧉
+      </button>
+    </div>
+  );
+}
+
+function ScenarioView({
+  active,
+  onPatch,
+  onRequestDelete,
+  selectRuleId,
+}: {
+  active: Scenario;
+  onPatch: (patch: Partial<Scenario>) => void;
+  onRequestDelete: () => void;
+  selectRuleId?: string | null;
+}) {
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<Scenario | null>(null);
   const rulesRef = useRef<HTMLDivElement>(null);
   const listResize = useResizable({
     initial: 240,
@@ -114,61 +173,26 @@ export function AutoresponderPanel({ ar, onChange, selectRuleId }: Props) {
     storageKey: "germi.ruleListWidth",
   });
 
-  // Focus a rule when asked to (e.g. just created via "Mock this").
   useEffect(() => {
     if (selectRuleId) setSelectedRuleId(selectRuleId);
   }, [selectRuleId]);
 
-  const active = ar.scenarios.find((s) => s.id === ar.activeScenarioId) ?? null;
-
-  // ---- scenario operations ----
-  function activate(id: string | null) {
-    onChange({ ...ar, activeScenarioId: id });
-    setSelectedRuleId(null);
-  }
-  function addScenario() {
-    const s: Scenario = {
-      id: crypto.randomUUID(),
-      name: `Scenario ${ar.scenarios.length + 1}`,
-      rules: [],
-    };
-    onChange({ scenarios: [...ar.scenarios, s], activeScenarioId: s.id });
-    setSelectedRuleId(null);
-  }
-  function patchScenario(id: string, patch: Partial<Scenario>) {
-    onChange({
-      ...ar,
-      scenarios: ar.scenarios.map((s) => (s.id === id ? { ...s, ...patch } : s)),
-    });
-  }
-  function deleteScenario(id: string) {
-    onChange({
-      scenarios: ar.scenarios.filter((s) => s.id !== id),
-      activeScenarioId: ar.activeScenarioId === id ? null : ar.activeScenarioId,
-    });
-  }
-
-  // ---- rule operations (within the active scenario) ----
   function setRules(rules: Rule[]) {
-    if (active) patchScenario(active.id, { rules });
+    onPatch({ rules });
   }
   function addRule() {
-    if (!active) return;
     const r = newRule();
     setRules([...active.rules, r]);
     setSelectedRuleId(r.id);
   }
   function patchRule(id: string, patch: Partial<Rule>) {
-    if (!active) return;
     setRules(active.rules.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   }
   function deleteRule(id: string) {
-    if (!active) return;
     setRules(active.rules.filter((r) => r.id !== id));
     if (selectedRuleId === id) setSelectedRuleId(null);
   }
   function duplicateRule(id: string) {
-    if (!active) return;
     const idx = active.rules.findIndex((r) => r.id === id);
     if (idx === -1) return;
     const orig = active.rules[idx];
@@ -187,7 +211,109 @@ export function AutoresponderPanel({ ar, onChange, selectRuleId }: Props) {
     setSelectedRuleId(copy.id);
   }
 
-  const selectedRule = active?.rules.find((r) => r.id === selectedRuleId) ?? null;
+  const selectedRule = active.rules.find((r) => r.id === selectedRuleId) ?? null;
+
+  return (
+    <div className="scenario-body">
+      <div className="scenario-head">
+        <input
+          className="scenario-name"
+          value={active.name}
+          onChange={(e) => onPatch({ name: e.target.value })}
+        />
+        <span className="muted small">
+          {active.rules.filter((r) => r.enabled).length}/{active.rules.length}{" "}
+          rule(s) active · live
+        </span>
+        <div className="spacer" />
+        <button className="btn danger" onClick={onRequestDelete}>
+          Delete scenario
+        </button>
+      </div>
+
+      <div
+        className="rules"
+        ref={rulesRef}
+        style={{
+          gridTemplateColumns: `minmax(0, ${listResize.size}px) 6px minmax(280px, 1fr)`,
+        }}
+      >
+        <aside className="rule-list">
+          <button className="btn primary block" onClick={addRule}>
+            + Add rule
+          </button>
+          {active.rules.length === 0 && (
+            <div className="muted pad">No rules in this scenario yet.</div>
+          )}
+          {active.rules.map((r) => (
+            <RuleListItem
+              key={r.id}
+              rule={r}
+              selected={r.id === selectedRuleId}
+              onSelect={() => setSelectedRuleId(r.id)}
+              onToggle={(enabled) => patchRule(r.id, { enabled })}
+              onDuplicate={() => duplicateRule(r.id)}
+            />
+          ))}
+        </aside>
+
+        <div
+          className="resizer"
+          onPointerDown={listResize.onPointerDown}
+          title="Drag to resize"
+        />
+
+        <section className="rule-editor">
+          {!selectedRule ? (
+            <div className="muted pad">Select a rule to edit it, or add one.</div>
+          ) : (
+            <RuleEditor
+              key={selectedRule.id}
+              rule={selectedRule}
+              onPatch={(patch) => patchRule(selectedRule.id, patch)}
+              onDelete={() => deleteRule(selectedRule.id)}
+            />
+          )}
+
+          <RuleTester
+            rules={{ rules: active.rules }}
+            seedMethod={selectedRule?.matcher.method ?? undefined}
+            seedUrl={selectedRule?.matcher.url || undefined}
+          />
+        </section>
+      </div>
+    </div>
+  );
+}
+
+export function AutoresponderPanel({ ar, onChange, selectRuleId }: Props) {
+  const [pendingDelete, setPendingDelete] = useState<Scenario | null>(null);
+
+  const active = ar.scenarios.find((s) => s.id === ar.activeScenarioId) ?? null;
+
+  function activate(id: string | null) {
+    onChange({ ...ar, activeScenarioId: id });
+  }
+  function addScenario() {
+    const s: Scenario = {
+      id: crypto.randomUUID(),
+      name: `Scenario ${ar.scenarios.length + 1}`,
+      rules: [],
+    };
+    onChange({ scenarios: [...ar.scenarios, s], activeScenarioId: s.id });
+  }
+  function patchScenario(id: string, patch: Partial<Scenario>) {
+    onChange({
+      ...ar,
+      scenarios: ar.scenarios.map((s) => (s.id === id ? { ...s, ...patch } : s)),
+    });
+  }
+  function deleteScenario(id: string) {
+    onChange({
+      scenarios: ar.scenarios.filter((s) => s.id !== id),
+      activeScenarioId: ar.activeScenarioId === id ? null : ar.activeScenarioId,
+    });
+  }
 
   return (
     <div className="autoresponder">
@@ -229,106 +355,13 @@ export function AutoresponderPanel({ ar, onChange, selectRuleId }: Props) {
           )}
         </div>
       ) : (
-        <div className="scenario-body">
-          <div className="scenario-head">
-            <input
-              className="scenario-name"
-              value={active.name}
-              onChange={(e) => patchScenario(active.id, { name: e.target.value })}
-            />
-            <span className="muted small">
-              {active.rules.filter((r) => r.enabled).length}/{active.rules.length}{" "}
-              rule(s) active · live
-            </span>
-            <div className="spacer" />
-            <button
-              className="btn danger"
-              onClick={() => setPendingDelete(active)}
-            >
-              Delete scenario
-            </button>
-          </div>
-
-          <div
-            className="rules"
-            ref={rulesRef}
-            style={{
-              gridTemplateColumns: `minmax(0, ${listResize.size}px) 6px minmax(280px, 1fr)`,
-            }}
-          >
-            <aside className="rule-list">
-              <button className="btn primary block" onClick={addRule}>
-                + Add rule
-              </button>
-              {active.rules.length === 0 && (
-                <div className="muted pad">No rules in this scenario yet.</div>
-              )}
-              {active.rules.map((r) => (
-                <div
-                  key={r.id}
-                  className={`rule-item ${r.id === selectedRuleId ? "selected" : ""}`}
-                  onClick={() => setSelectedRuleId(r.id)}
-                  title={r.name}
-                >
-                  <input
-                    type="checkbox"
-                    checked={r.enabled}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => patchRule(r.id, { enabled: e.target.checked })}
-                  />
-                  <div className="rmeta">
-                    <div className="rtop">
-                      <span className={`rname ${r.enabled ? "" : "off"}`}>
-                        {middleTruncate(r.name)}
-                      </span>
-                      {r.action.kind !== "respond" && (
-                        <span className="rkind">{r.action.kind}</span>
-                      )}
-                    </div>
-                    <div className="rsub">{ruleSummary(r)}</div>
-                  </div>
-                  <button
-                    className="btn ghost dup"
-                    title="Duplicate rule"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      duplicateRule(r.id);
-                    }}
-                  >
-                    ⧉
-                  </button>
-                </div>
-              ))}
-            </aside>
-
-            <div
-              className="resizer"
-              onPointerDown={listResize.onPointerDown}
-              title="Drag to resize"
-            />
-
-            <section className="rule-editor">
-              {!selectedRule ? (
-                <div className="muted pad">
-                  Select a rule to edit it, or add one.
-                </div>
-              ) : (
-                <RuleEditor
-                  key={selectedRule.id}
-                  rule={selectedRule}
-                  onPatch={(patch) => patchRule(selectedRule.id, patch)}
-                  onDelete={() => deleteRule(selectedRule.id)}
-                />
-              )}
-
-              <RuleTester
-                rules={{ rules: active.rules }}
-                seedMethod={selectedRule?.matcher.method ?? undefined}
-                seedUrl={selectedRule?.matcher.url || undefined}
-              />
-            </section>
-          </div>
-        </div>
+        <ScenarioView
+          key={active.id}
+          active={active}
+          onPatch={(patch) => patchScenario(active.id, patch)}
+          onRequestDelete={() => setPendingDelete(active)}
+          selectRuleId={selectRuleId}
+        />
       )}
 
       {pendingDelete && (
