@@ -394,9 +394,16 @@ pub fn respond_rule_from_flow(flow: &Flow, id: String) -> Rule {
         None => (200, String::new(), None, Vec::new()),
     };
 
-    // One rule per request, matching its full URL (path + query), Fiddler-style —
-    // nothing is collapsed. Cap the stored name; the list middle-truncates it.
-    let mut name = format!("{} {}", flow.request.method, flow.request.path);
+    // One rule per request, host-specific: the matcher targets the flow's full
+    // URL (scheme://host/path+query) so mocking github.com/feed does NOT also
+    // catch dynatrace.com/feed. Fiddler-style — nothing is collapsed. The name
+    // includes the host so rules across hosts stay distinguishable; cap it (the
+    // list middle-truncates).
+    let full_url = format!(
+        "{}://{}{}",
+        flow.request.scheme, flow.request.host, flow.request.path
+    );
+    let mut name = format!("{} {}{}", flow.request.method, flow.request.host, flow.request.path);
     if name.chars().count() > 100 {
         name = name.chars().take(99).collect::<String>() + "\u{2026}";
     }
@@ -407,7 +414,7 @@ pub fn respond_rule_from_flow(flow: &Flow, id: String) -> Rule {
         enabled: true,
         matcher: Matcher {
             method: Some(flow.request.method.clone()),
-            url: flow.request.path.clone(),
+            url: full_url,
             url_match: MatchKind::Contains,
         },
         action: Action::Respond {
@@ -618,8 +625,8 @@ mod tests {
         };
         let rule = respond_rule_from_flow(&flow, "r1".into());
         assert_eq!(rule.matcher.method.as_deref(), Some("GET"));
-        assert_eq!(rule.matcher.url, "/api");
-        assert_eq!(rule.name, "GET /api");
+        assert_eq!(rule.matcher.url, "https://x/api");
+        assert_eq!(rule.name, "GET x/api");
         match rule.action {
             Action::Respond {
                 status,
@@ -654,10 +661,37 @@ mod tests {
             matched_rule: None,
             duration_ms: None,
         };
-        // Full URL preserved (no collapsing) — one rule per request.
+        // Host-specific full URL preserved (no collapsing) — one rule per request.
         let rule = respond_rule_from_flow(&flow, "r".into());
-        assert_eq!(rule.matcher.url, "/api/v2/rum?dd=1&k=abc");
+        assert_eq!(rule.matcher.url, "https://x/api/v2/rum?dd=1&k=abc");
         assert_eq!(rule.matcher.url_match, MatchKind::Contains);
-        assert_eq!(rule.name, "POST /api/v2/rum?dd=1&k=abc");
+        assert_eq!(rule.name, "POST x/api/v2/rum?dd=1&k=abc");
+    }
+
+    #[test]
+    fn mock_rule_is_host_specific() {
+        let req = |host: &str, path: &str| CapturedRequest {
+            method: "GET".into(),
+            uri: format!("https://{host}{path}"),
+            scheme: "https".into(),
+            host: host.into(),
+            path: path.into(),
+            version: "HTTP/1.1".into(),
+            headers: vec![],
+            body: vec![],
+            timestamp_ms: 0,
+        };
+        let flow = Flow {
+            id: "f".into(),
+            request: req("github.com", "/feed"),
+            response: None,
+            matched_rule: None,
+            duration_ms: None,
+        };
+        let rule = respond_rule_from_flow(&flow, "r".into());
+
+        // Mocking github.com/feed must NOT also catch a different host's /feed.
+        assert!(rule.matcher.matches(&req("github.com", "/feed")));
+        assert!(!rule.matcher.matches(&req("dynatrace.com", "/feed")));
     }
 }
