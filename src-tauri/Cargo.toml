@@ -7,6 +7,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 # The desktop entry point lives in the lib so it can be shared with a future
 # mobile target; main.rs just calls `germi_lib::run()`.

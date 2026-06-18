@@ -19,7 +19,7 @@ pub fn load_autoresponder(dir: &Path) -> Option<AutoResponder> {
 pub fn save_autoresponder(dir: &Path, ar: &AutoResponder) {
     let result = std::fs::create_dir_all(dir).and_then(|_| {
         let text = serde_json::to_string_pretty(ar)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(dir.join(FILE), text)
     });
     if let Err(e) = result {
@@ -37,7 +37,7 @@ pub fn load_settings(dir: &Path) -> Option<ProxySettings> {
 pub fn save_settings(dir: &Path, settings: &ProxySettings) {
     let result = std::fs::create_dir_all(dir).and_then(|_| {
         let text = serde_json::to_string_pretty(settings)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(dir.join(SETTINGS_FILE), text)
     });
     if let Err(e) = result {

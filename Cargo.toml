@@ -12,3 +12,9 @@ members = ["crates/proxy-core", "src-tauri"]
 edition = "2021"
 license = "MIT"
 rust-version = "1.82"
+
+# Clippy's default lint groups (correctness, suspicious, style, complexity, perf).
+# Members opt in with `[lints]\nworkspace = true`. Levels are "warn" here so local
+# `cargo clippy` stays non-blocking; CI enforces them hard via `-- -D warnings`.
+[workspace.lints.clippy]
+all = "warn"

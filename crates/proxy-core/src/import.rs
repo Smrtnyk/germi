@@ -348,10 +348,7 @@ fn decode_body(headers: &[(String, String)], body: &[u8]) -> Vec<u8> {
 fn dechunk(body: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut rest = body;
-    loop {
-        let Some(eol) = find_sub(rest, b"\r\n") else {
-            break;
-        };
+    while let Some(eol) = find_sub(rest, b"\r\n") {
         let hex = rest[..eol]
             .split(|&b| b == b';')
             .next()

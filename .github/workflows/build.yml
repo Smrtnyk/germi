@@ -15,9 +15,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: "."
+      - name: Clippy proxy-core (no GUI deps)
+        run: cargo clippy -p proxy-core --all-targets -- -D warnings
       - name: Test proxy-core (no GUI deps)
         run: cargo test -p proxy-core
 
@@ -66,10 +70,18 @@ jobs:
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: "."
+
+      # Lint the Tauri shell on Linux only — it needs the GTK/WebKit dev libs
+      # installed above. proxy-core is linted in the fast job; here we cover germi.
+      - name: Clippy Tauri shell (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: cargo clippy -p germi --all-targets -- -D warnings
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile

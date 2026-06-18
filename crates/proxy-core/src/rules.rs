@@ -17,21 +17,16 @@ use serde::{Deserialize, Serialize};
 use crate::flow::{CapturedRequest, CapturedResponse, Flow};
 
 /// How a [`Matcher`]'s `url` pattern is compared against a flow's URL.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MatchKind {
     /// Case-sensitive substring match (default — the friendliest).
+    #[default]
     Contains,
     /// Exact string equality.
     Exact,
     /// Rust regular expression.
     Regex,
-}
-
-impl Default for MatchKind {
-    fn default() -> Self {
-        MatchKind::Contains
-    }
 }
 
 /// Scopes which flows a rule touches.

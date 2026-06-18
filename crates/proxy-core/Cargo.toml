@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Standalone MITM HTTP/S proxy engine for Germi: capture, rules and auto-respond."
 
+[lints]
+workspace = true
+
 [dependencies]
 # The MITM proxy engine. Default features already include rcgen-ca, rustls-client
 # and decoder, which is everything we need for HTTP/1.1 + TLS interception.
