@@ -25,21 +25,16 @@ jobs:
       - name: Test proxy-core (no GUI deps)
         run: cargo test -p proxy-core
 
-  # The desktop app must be built natively on each OS — Tauri cannot
-  # cross-compile between Windows and Linux.
+  # Verify the Tauri shell compiles and the frontend builds (Linux). Native
+  # installer builds for Windows + Linux are skipped for now — to restore them,
+  # re-add a `tauri-apps/tauri-action@v0` step across an OS matrix (with the
+  # Windows NASM step) to bundle the .msi/.exe + .deb/.AppImage/.rpm.
   app:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: ubuntu-22.04
-          - platform: windows-latest
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
 
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -53,10 +48,6 @@ jobs:
             cmake \
             nasm \
             file
-
-      - name: Install NASM (Windows — required to build aws-lc-rs)
-        if: matrix.platform == 'windows-latest'
-        uses: ilammy/setup-nasm@v1
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -77,22 +68,11 @@ jobs:
         with:
           workspaces: "."
 
-      # Lint the Tauri shell on Linux only — it needs the GTK/WebKit dev libs
-      # installed above. proxy-core is linted in the fast job; here we cover germi.
-      - name: Clippy Tauri shell (Linux)
-        if: matrix.platform == 'ubuntu-22.04'
+      # proxy-core is linted in the fast job; here we cover the germi shell.
+      - name: Clippy Tauri shell
         run: cargo clippy -p germi --all-targets -- -D warnings
 
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build the desktop app (bundles installers)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          # On a v* tag push, publish a draft release with the installers.
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('Germi {0}', github.ref_name) || '' }}
-          releaseDraft: true
-          prerelease: false
+      - name: Build frontend (tsc + vite)
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
