@@ -79,6 +79,15 @@ impl CertAuthority {
         Ok(ca)
     }
 
+    /// Persist the CA material (cert PEM, key PEM, cert DER) under `dir`.
+    pub fn save(&self, dir: &Path) -> Result<()> {
+        fs::create_dir_all(dir).context("create CA dir")?;
+        fs::write(dir.join("germi-ca.pem"), &self.cert_pem).context("write CA cert")?;
+        fs::write(dir.join("germi-ca.key"), &self.key_pem).context("write CA key")?;
+        fs::write(dir.join("germi-ca.der"), &self.cert_der).context("write CA der")?;
+        Ok(())
+    }
+
     /// Build the hudsucker authority that mints per-host leaf certs.
     pub fn to_authority(&self) -> Result<RcgenAuthority> {
         let key_pair = KeyPair::from_pem(&self.key_pem).context("parse CA key pem")?;

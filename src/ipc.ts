@@ -16,7 +16,8 @@ import type {
 /** Typed wrappers around the Tauri commands in `src-tauri/src/commands.rs`. */
 export const api = {
   proxyStatus: () => invoke<boolean>("proxy_status"),
-  startProxy: (port: number) => invoke<number>("start_proxy", { port }),
+  startProxy: (port: number, allowRemote: boolean) =>
+    invoke<number>("start_proxy", { port, allowRemote }),
   stopProxy: () => invoke<void>("stop_proxy"),
 
   listFlows: () => invoke<FlowSummary[]>("list_flows"),
@@ -52,6 +53,8 @@ export const api = {
   ) => invoke<string[]>("search_bodies", { pattern, side, regex, candidates }),
 
   caInfo: () => invoke<CaInfo>("ca_info"),
+  exportCa: () => invoke<boolean>("export_ca"),
+  regenerateCa: () => invoke<void>("regenerate_ca"),
   setSystemProxy: (port: number) => invoke<void>("set_system_proxy", { port }),
   clearSystemProxy: () => invoke<void>("clear_system_proxy"),
 };

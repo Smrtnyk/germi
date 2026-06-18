@@ -12,6 +12,8 @@ interface SectionProps {
 interface SectionCtx extends SectionProps {
   columnOrder: string[];
   onColumnOrderChange: (order: string[]) => void;
+  running: boolean;
+  onCaChanged: () => void;
 }
 
 interface Section {
@@ -24,9 +26,29 @@ interface Section {
 // component below. The nav and content area are driven entirely by this list.
 const SECTIONS: Section[] = [
   {
+    id: "connections",
+    label: "Connections",
+    render: (c) => <ConnectionsSection settings={c.settings} onChange={c.onChange} />,
+  },
+  {
+    id: "certificates",
+    label: "Certificates",
+    render: (c) => <CertificatesSection running={c.running} onCaChanged={c.onCaChanged} />,
+  },
+  {
     id: "interception",
     label: "Interception",
     render: (c) => <InterceptionSection settings={c.settings} onChange={c.onChange} />,
+  },
+  {
+    id: "capture",
+    label: "Capture",
+    render: (c) => <CaptureSection settings={c.settings} onChange={c.onChange} />,
+  },
+  {
+    id: "throttling",
+    label: "Throttling",
+    render: (c) => <ThrottlingSection settings={c.settings} onChange={c.onChange} />,
   },
   {
     id: "columns",
@@ -41,6 +63,242 @@ const SECTIONS: Section[] = [
     ),
   },
 ];
+
+function ConnectionsSection({ settings, onChange }: SectionProps) {
+  return (
+    <div className="settings-pane">
+      <h4>Connections</h4>
+      <div className="row">
+        <label>Listen port</label>
+        <input
+          type="number"
+          min={1}
+          max={65535}
+          style={{ width: 90 }}
+          value={settings.port}
+          onChange={(e) =>
+            onChange({ ...settings, port: Number(e.target.value) || 8080 })
+          }
+        />
+        <span className="muted small">applied on next Start</span>
+      </div>
+      <label className="check-row">
+        <input
+          type="checkbox"
+          checked={settings.allowRemote}
+          onChange={(e) => onChange({ ...settings, allowRemote: e.target.checked })}
+        />
+        Allow remote devices to connect (bind 0.0.0.0)
+      </label>
+      {settings.allowRemote && (
+        <p className="warn small">
+          ⚠ Any device on your network can route traffic through this proxy. Only
+          enable on trusted networks.
+        </p>
+      )}
+      <p className="muted small">
+        To capture from a phone or another machine, point its HTTP proxy at{" "}
+        <code>your-ip:{settings.port}</code> and trust the Germi CA there.
+      </p>
+    </div>
+  );
+}
+
+function CaptureSection({ settings, onChange }: SectionProps) {
+  const [draft, setDraft] = useState("");
+  const filter = settings.captureFilter;
+
+  function addFilter() {
+    const h = normalizeHost(draft);
+    if (!h || filter.includes(h)) {
+      setDraft("");
+      return;
+    }
+    onChange({ ...settings, captureFilter: [...filter, h] });
+    setDraft("");
+  }
+
+  return (
+    <div className="settings-pane">
+      <h4>Capture</h4>
+      <div className="row">
+        <label>Keep last</label>
+        <input
+          type="number"
+          min={100}
+          step={100}
+          style={{ width: 100 }}
+          value={settings.maxFlows}
+          onChange={(e) =>
+            onChange({
+              ...settings,
+              maxFlows: Math.max(100, Number(e.target.value) || 5000),
+            })
+          }
+        />
+        <span className="muted small">flows in memory (oldest evicted)</span>
+      </div>
+      <label className="check-row">
+        <input
+          type="checkbox"
+          checked={settings.captureOnStart}
+          onChange={(e) => onChange({ ...settings, captureOnStart: e.target.checked })}
+        />
+        Start capturing automatically on launch
+      </label>
+
+      <div className="col-section-label">Capture filter (record only these hosts)</div>
+      <p className="muted small">
+        When set, only matching hosts are intercepted &amp; recorded — everything
+        else is tunneled. Same subdomain matching as exclusions.
+      </p>
+      <div className="excluded-add">
+        <input
+          value={draft}
+          placeholder="api.example.com"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              addFilter();
+            }
+          }}
+        />
+        <button className="btn" onClick={addFilter} disabled={!draft.trim()}>
+          Add
+        </button>
+      </div>
+      {filter.length === 0 ? (
+        <div className="muted small excluded-empty">
+          No filter — capturing all non-excluded hosts.
+        </div>
+      ) : (
+        <ul className="excluded-list">
+          {filter.map((h) => (
+            <li key={h}>
+              <span className="ehost">{h}</span>
+              <button
+                className="x"
+                title={`Remove ${h}`}
+                onClick={() =>
+                  onChange({
+                    ...settings,
+                    captureFilter: filter.filter((x) => x !== h),
+                  })
+                }
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function ThrottlingSection({ settings, onChange }: SectionProps) {
+  const presets = [0, 200, 500, 1000, 2000, 5000];
+  return (
+    <div className="settings-pane">
+      <h4>Throttling</h4>
+      <p className="muted small">
+        Add an artificial delay before each response to simulate a slow network.
+        Applies to live captured responses (not mocked ones).
+      </p>
+      <div className="row">
+        <label>Response delay</label>
+        <input
+          type="number"
+          min={0}
+          step={100}
+          style={{ width: 100 }}
+          value={settings.responseDelayMs}
+          onChange={(e) =>
+            onChange({
+              ...settings,
+              responseDelayMs: Math.max(0, Number(e.target.value) || 0),
+            })
+          }
+        />
+        <span className="muted small">
+          ms {settings.responseDelayMs === 0 ? "(off)" : ""}
+        </span>
+      </div>
+      <div className="col-add-list">
+        {presets.map((p) => (
+          <button
+            key={p}
+            className={`btn small ${settings.responseDelayMs === p ? "active" : ""}`}
+            onClick={() => onChange({ ...settings, responseDelayMs: p })}
+          >
+            {p === 0 ? "Off" : `${p} ms`}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CertificatesSection({
+  running,
+  onCaChanged,
+}: {
+  running: boolean;
+  onCaChanged: () => void;
+}) {
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function doExport() {
+    setErr(null);
+    setMsg(null);
+    try {
+      await api.exportCa();
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+  async function doRegenerate() {
+    setErr(null);
+    setMsg(null);
+    try {
+      await api.regenerateCa();
+      onCaChanged();
+      setMsg("New CA generated — re-trust it (CA certificate button) and restart apps.");
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
+  return (
+    <div className="settings-pane">
+      <h4>Certificates</h4>
+      <p className="muted small">
+        Germi signs intercepted HTTPS with its own root CA. Trust it once — the
+        <strong> CA certificate</strong> toolbar button has the instructions.
+      </p>
+      <div className="col-add-list">
+        <button className="btn" onClick={doExport}>
+          Export CA to file…
+        </button>
+        <button
+          className="btn danger"
+          onClick={doRegenerate}
+          disabled={running}
+          title={running ? "Stop the proxy first" : undefined}
+        >
+          Regenerate CA
+        </button>
+      </div>
+      {running && (
+        <p className="muted small">Stop the proxy to regenerate the CA.</p>
+      )}
+      {msg && <p className="small settings-ok">{msg}</p>}
+      {err && <p className="settings-err">{err}</p>}
+    </div>
+  );
+}
 
 /** Normalize user input to a bare host: strip scheme, path, port, whitespace. */
 function normalizeHost(input: string): string {
@@ -127,6 +385,8 @@ interface Props {
   onChange: (s: ProxySettings) => void;
   columnOrder: string[];
   onColumnOrderChange: (order: string[]) => void;
+  running: boolean;
+  onCaChanged: () => void;
   onClose: () => void;
 }
 
@@ -135,6 +395,8 @@ export function SettingsDialog({
   onChange,
   columnOrder,
   onColumnOrderChange,
+  running,
+  onCaChanged,
   onClose,
 }: Props) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -210,7 +472,14 @@ export function SettingsDialog({
           ))}
         </nav>
         <div className="settings-content">
-          {section.render({ settings, onChange, columnOrder, onColumnOrderChange })}
+          {section.render({
+            settings,
+            onChange,
+            columnOrder,
+            onColumnOrderChange,
+            running,
+            onCaChanged,
+          })}
         </div>
       </div>
 

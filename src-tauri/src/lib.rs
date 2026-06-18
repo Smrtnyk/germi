@@ -63,6 +63,8 @@ pub fn run() {
             commands::test_rules,
             commands::mock_flows,
             commands::ca_info,
+            commands::export_ca,
+            commands::regenerate_ca,
             commands::set_system_proxy,
             commands::clear_system_proxy,
             commands::import_archive,

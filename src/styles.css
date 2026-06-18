@@ -1210,6 +1210,23 @@ textarea {
   color: #f87171;
   font-size: 12px;
 }
+.settings-ok {
+  color: var(--accent);
+}
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+  font-size: 13px;
+  cursor: pointer;
+}
+.check-row input {
+  cursor: pointer;
+}
+.warn {
+  color: #fbbf24;
+}
 
 /* ---- columns settings ---- */
 .col-presets {

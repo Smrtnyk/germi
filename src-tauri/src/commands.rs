@@ -35,9 +35,15 @@ pub async fn proxy_status(state: State<'_, AppState>) -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub async fn start_proxy(state: State<'_, AppState>, port: u16) -> Result<u16, String> {
+pub async fn start_proxy(
+    state: State<'_, AppState>,
+    port: u16,
+    allow_remote: bool,
+) -> Result<u16, String> {
     let controller = state.controller.clone();
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    // Bind 0.0.0.0 (LAN-reachable) only when explicitly allowed; loopback otherwise.
+    let ip = if allow_remote { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
+    let addr = SocketAddr::from((ip, port));
     controller.start(addr).await.map_err(|e| e.to_string())?;
     Ok(port)
 }
@@ -163,6 +169,44 @@ pub fn ca_info(state: State<'_, AppState>) -> CaInfo {
             .into_owned(),
         dir: state.ca_dir.to_string_lossy().into_owned(),
     }
+}
+
+/// Export the root CA certificate to a user-chosen file (PEM, or DER by extension).
+#[tauri::command]
+pub async fn export_ca(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .add_filter("Certificate", &["pem", "crt", "cer", "der"])
+        .set_file_name("germi-ca.pem")
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let is_der = path
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("der"))
+        .unwrap_or(false);
+    if is_der {
+        std::fs::write(&path, state.controller.ca_cert_der()).map_err(|e| e.to_string())?;
+    } else {
+        std::fs::write(&path, state.controller.ca_cert_pem()).map_err(|e| e.to_string())?;
+    }
+    Ok(true)
+}
+
+/// Generate a fresh root CA (proxy must be stopped). The user must re-trust it.
+#[tauri::command]
+pub async fn regenerate_ca(state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .controller
+        .regenerate_ca(&state.ca_dir)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Route the OS system proxy through Germi (Windows WinINET / GNOME / KDE).

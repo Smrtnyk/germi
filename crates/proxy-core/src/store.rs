@@ -26,6 +26,16 @@ impl FlowStore {
         }
     }
 
+    /// Change the retention cap, evicting the oldest flows if it shrank.
+    pub fn set_max(&mut self, max: usize) {
+        self.max = max.max(1);
+        while self.order.len() > self.max {
+            if let Some(old) = self.order.pop_front() {
+                self.flows.remove(&old);
+            }
+        }
+    }
+
     /// Insert a freshly-captured flow (response may still be pending).
     pub fn insert(&mut self, flow: Flow) {
         if self.flows.insert(flow.id.clone(), flow.clone()).is_none() {

@@ -127,6 +127,15 @@ export interface ProxySettings {
   excludedHosts: string[];
   /** Pinned header columns: a header name (response) or `req:<name>` (request). */
   headerColumns: string[];
+  // Connections
+  port: number;
+  allowRemote: boolean;
+  // Capture
+  maxFlows: number;
+  captureFilter: string[];
+  captureOnStart: boolean;
+  // Throttling
+  responseDelayMs: number;
 }
 
 export interface CaInfo {

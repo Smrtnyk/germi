@@ -35,7 +35,7 @@ mod tester;
 
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, bail, Result};
 use hudsucker::rustls::crypto::aws_lc_rs;
@@ -75,7 +75,8 @@ pub enum SearchSide {
 /// Owns the proxy lifecycle, the captured-flow store and the rules.
 pub struct ProxyController {
     shared: Arc<Shared>,
-    ca: CertAuthority,
+    /// Behind a lock so the CA can be regenerated at runtime.
+    ca: RwLock<CertAuthority>,
     /// `Some(shutdown_sender)` while the proxy is running.
     running: Mutex<Option<oneshot::Sender<()>>>,
 }
@@ -85,7 +86,7 @@ impl ProxyController {
     pub fn new(ca: CertAuthority) -> Self {
         Self {
             shared: Shared::new(MAX_FLOWS, AutoResponder::example(), ProxySettings::default()),
-            ca,
+            ca: RwLock::new(ca),
             running: Mutex::new(None),
         }
     }
@@ -101,11 +102,25 @@ impl ProxyController {
     }
 
     pub fn ca_cert_pem(&self) -> String {
-        self.ca.cert_pem.clone()
+        self.ca.read().map(|c| c.cert_pem.clone()).unwrap_or_default()
     }
 
     pub fn ca_cert_der(&self) -> Vec<u8> {
-        self.ca.cert_der.clone()
+        self.ca.read().map(|c| c.cert_der.clone()).unwrap_or_default()
+    }
+
+    /// Generate a fresh root CA, persist it under `dir`, and swap it in. The
+    /// proxy must be stopped (the running proxy holds the old authority); the
+    /// user must re-trust the new CA afterwards.
+    pub async fn regenerate_ca(&self, dir: &Path) -> Result<()> {
+        if self.is_running().await {
+            bail!("stop the proxy before regenerating the CA");
+        }
+        let new_ca = CertAuthority::generate()?;
+        new_ca.save(dir)?;
+        let mut guard = self.ca.write().map_err(|_| anyhow!("CA lock poisoned"))?;
+        *guard = new_ca;
+        Ok(())
     }
 
     pub async fn is_running(&self) -> bool {
@@ -122,7 +137,10 @@ impl ProxyController {
         // Install a default crypto provider once (ignored if already set).
         let _ = aws_lc_rs::default_provider().install_default();
 
-        let authority = self.ca.to_authority()?;
+        let authority = {
+            let ca = self.ca.read().map_err(|_| anyhow!("CA lock poisoned"))?;
+            ca.to_authority()?
+        };
         let handler = CaptureHandler::new(self.shared.clone());
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
@@ -323,10 +341,15 @@ impl ProxyController {
     }
 
     /// Replace the live settings. Takes effect immediately for new connections
-    /// (excluded hosts begin tunneling without restarting the proxy).
+    /// (excluded hosts begin tunneling without restarting the proxy); the flow
+    /// retention cap is re-applied to the store.
     pub fn set_settings(&self, settings: ProxySettings) {
+        let max = settings.max_flows;
         if let Ok(mut guard) = self.shared.settings.write() {
             *guard = settings;
+        }
+        if let Ok(mut store) = self.shared.store.lock() {
+            store.set_max(max);
         }
     }
 

@@ -32,7 +32,6 @@ type RightTab = "inspector" | "autoresponder";
 
 export function App() {
   const [running, setRunning] = useState(false);
-  const [port, setPort] = useState(8080);
   const [systemProxy, setSystemProxy] = useState(false);
   const [rightTab, setRightTab] = useState<RightTab>("inspector");
   const [decode, setDecode] = useState(true);
@@ -56,6 +55,12 @@ export function App() {
   const [settings, setSettings] = useState<ProxySettings>({
     excludedHosts: [],
     headerColumns: [],
+    port: 8080,
+    allowRemote: false,
+    maxFlows: 5000,
+    captureFilter: [],
+    captureOnStart: false,
+    responseDelayMs: 0,
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [columnOrder, setColumnOrder] = useState<string[]>(() => {
@@ -109,9 +114,11 @@ export function App() {
   useEffect(() => {
     void (async () => {
       try {
-        setRunning(await api.proxyStatus());
+        const isRunning = await api.proxyStatus();
+        setRunning(isRunning);
         setAutoresponder(await api.getAutoresponder());
-        setSettings(await api.getSettings());
+        const loaded = await api.getSettings();
+        setSettings(loaded);
         setCaInfo(await api.caInfo());
         const initial = await api.listFlows();
         const map = flowsRef.current;
@@ -121,6 +128,11 @@ export function App() {
           map.set(s.id, s);
         }
         bump();
+        // Auto-start capture if configured.
+        if (loaded.captureOnStart && !isRunning) {
+          await api.startProxy(loaded.port, loaded.allowRemote);
+          setRunning(true);
+        }
       } catch (e) {
         setError(String(e));
       }
@@ -312,7 +324,7 @@ export function App() {
         await api.stopProxy();
         setRunning(false);
       } else {
-        await api.startProxy(port);
+        await api.startProxy(settings.port, settings.allowRemote);
         setRunning(true);
       }
     } catch (e) {
@@ -327,7 +339,7 @@ export function App() {
         await api.clearSystemProxy();
         setSystemProxy(false);
       } else {
-        await api.setSystemProxy(port);
+        await api.setSystemProxy(settings.port);
         setSystemProxy(true);
       }
     } catch (e) {
@@ -426,8 +438,8 @@ export function App() {
     <div className="app">
       <Toolbar
         running={running}
-        port={port}
-        onPortChange={setPort}
+        port={settings.port}
+        onPortChange={(p) => saveSettings({ ...settings, port: p })}
         onToggleProxy={toggleProxy}
         systemProxy={systemProxy}
         onToggleSystemProxy={toggleSystemProxy}
@@ -548,7 +560,7 @@ export function App() {
 
       <StatusBar
         running={running}
-        port={port}
+        port={settings.port}
         flowCount={orderRef.current.length}
         activeScenario={activeScenario}
       />
@@ -563,6 +575,8 @@ export function App() {
           onChange={saveSettings}
           columnOrder={columnOrder}
           onColumnOrderChange={setColumnOrder}
+          running={running}
+          onCaChanged={() => void api.caInfo().then(setCaInfo)}
           onClose={() => setSettingsOpen(false)}
         />
       )}

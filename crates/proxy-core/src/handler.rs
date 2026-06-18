@@ -6,7 +6,7 @@
 //! `self` in `handle_request` and read them back in `handle_response`.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use http_body_util::BodyExt;
 use hudsucker::hyper::header::{HeaderName, HeaderValue, HOST};
@@ -58,9 +58,9 @@ impl HttpHandler for CaptureHandler {
             .or_else(|| parts.uri.host().map(|s| s.to_string()))
             .unwrap_or_default();
 
-        // Excluded hosts: forward plain HTTP without recording. (Excluded HTTPS
-        // is tunneled at CONNECT via `should_intercept`, so never reaches here.)
-        if self.shared.is_excluded(&host) {
+        // Bypassed hosts (excluded, or filtered out): forward plain HTTP without
+        // recording. (Bypassed HTTPS is tunneled at CONNECT via `should_intercept`.)
+        if self.shared.should_bypass(&host) {
             self.inflight = None;
             return Request::from_parts(parts, Body::from(body_bytes)).into();
         }
@@ -182,14 +182,21 @@ impl HttpHandler for CaptureHandler {
                 .record_complete(&inflight.id, captured, duration, ttfb, matched);
         }
 
+        // Throttling: simulate a slow response. Applied after recording, so the
+        // captured duration stays real while the client experiences the delay.
+        let delay = self.shared.response_delay_ms();
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+
         out
     }
 
-    /// Decide whether to MITM a CONNECT. Excluded hosts return `false`, so
+    /// Decide whether to MITM a CONNECT. Bypassed hosts return `false`, so
     /// hudsucker blind-tunnels them (no certificate, decryption, or capture).
     async fn should_intercept(&mut self, _ctx: &HttpContext, req: &Request<Body>) -> bool {
         let host = req.uri().host().unwrap_or_default();
-        !self.shared.is_excluded(host)
+        !self.shared.should_bypass(host)
     }
 }
 

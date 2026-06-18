@@ -201,6 +201,22 @@ You can also **pin any header as a column** (e.g. `cf-ray`, `content-encoding`, 
 `req:referer` for a request header) — the value is extracted in Rust so it rides
 the existing summary stream cheaply.
 
+### Settings
+
+The **⚙ Settings** panel (extensible, with Import/Export of the config as JSON):
+
+- **Connections** — listen port (remembered across launches) and **Allow remote
+  devices to connect** (bind `0.0.0.0`) so a phone/another machine can route
+  through Germi. Loopback-only by default.
+- **Certificates** — **Export CA** to a `.pem`/`.der` file, and **Regenerate CA**
+  (proxy must be stopped; re-trust afterwards).
+- **Interception** — host exclusions (tunneled, never decrypted/captured).
+- **Capture** — max retained flows, **capture filter** (record only matching
+  hosts), and **start capturing on launch**.
+- **Throttling** — an artificial **response delay** (3G/slow presets) on live
+  responses.
+- **Columns** — the traffic-list column configuration (above).
+
 ### Sessions
 
 Captured/imported traffic lives in memory and is **not** auto-persisted (so
