@@ -128,7 +128,14 @@ Engine (proxy-core — these work without the GUI system libs):
 
 ## Project state
 
-MVP is feature-complete: capture/inspect, scenarios + rules + tester, HAR/SAZ
-import, multi-select → mock, persistence, a CodeMirror-based mock editor.
+Feature-rich and usable: capture/inspect (content-aware, decoded bodies),
+scenarios + rules + offline tester, HAR/SAZ import, multi-select → mock,
+CodeMirror mock editor, rich filtering + backend body search, configurable
+traffic columns (timing/TTFB, per-flow comments, pinned-header columns), a
+multi-section Settings panel (Connections incl. allow-remote, Certificates
+export+regenerate, host exclusion, Capture filter + max-flows + capture-on-start,
+response-delay throttling), settings import/export, and `.germi` session
+save/open. Provenance is partially covered by the **Mocked-by** column.
+
 Deferred (not started): repeater (edit & resend), breakpoints, WebSocket frame
-editing, HTTP/2, response-delay simulation, rule provenance links.
+editing, HTTP/2, upstream/parent-proxy chaining, SQLite-backed persistent store.
