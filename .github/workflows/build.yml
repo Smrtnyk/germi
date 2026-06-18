@@ -72,7 +72,11 @@ jobs:
       - name: Clippy Tauri shell
         run: cargo clippy -p germi --all-targets -- -D warnings
 
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint frontend (oxlint)
+        run: pnpm lint
+
       - name: Build frontend (tsc + vite)
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm build
+        run: pnpm build
