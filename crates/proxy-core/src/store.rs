@@ -44,14 +44,23 @@ impl FlowStore {
         id: &str,
         resp: CapturedResponse,
         duration_ms: u64,
+        ttfb_ms: Option<u64>,
         matched_rule: Option<String>,
     ) {
         if let Some(flow) = self.flows.get_mut(id) {
             flow.response = Some(resp);
             flow.duration_ms = Some(duration_ms);
+            flow.ttfb_ms = ttfb_ms;
             if matched_rule.is_some() {
                 flow.matched_rule = matched_rule;
             }
+        }
+    }
+
+    /// Set or clear a flow's user comment.
+    pub fn set_comment(&mut self, id: &str, comment: Option<String>) {
+        if let Some(flow) = self.flows.get_mut(id) {
+            flow.comment = comment;
         }
     }
 
@@ -63,12 +72,17 @@ impl FlowStore {
         self.flows.get(id).map(|f| f.detail(decode, full))
     }
 
-    /// All summaries in capture order (oldest first).
-    pub fn summaries(&self) -> Vec<FlowSummary> {
+    /// All summaries in capture order (oldest first), with pinned header columns.
+    pub fn summaries(&self, header_cols: &[String]) -> Vec<FlowSummary> {
         self.order
             .iter()
             .filter_map(|id| self.flows.get(id))
-            .map(|f| f.summary())
+            .map(|f| {
+                let mut s = f.summary();
+                s.extra =
+                    crate::flow::extract_header_columns(&f.request, f.response.as_ref(), header_cols);
+                s
+            })
             .collect()
     }
 

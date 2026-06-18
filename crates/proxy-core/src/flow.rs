@@ -8,6 +8,7 @@
 //! Keeping bodies *out* of the live stream is deliberate: the IPC bridge — not
 //! the proxy — is the bottleneck, so we stream summaries and lazy-load detail.
 
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -54,6 +55,10 @@ pub struct Flow {
     /// Name of the rule that fired on this flow, if any.
     pub matched_rule: Option<String>,
     pub duration_ms: Option<u64>,
+    /// Time-to-first-byte: ms from request-buffered to response-headers received.
+    pub ttfb_ms: Option<u64>,
+    /// User-entered note/tag for triage (shown in the Comment column).
+    pub comment: Option<String>,
 }
 
 impl Flow {
@@ -78,8 +83,13 @@ impl Flow {
             req_size: self.request.body.len() as u64,
             resp_size,
             duration_ms: self.duration_ms,
+            ttfb_ms: self.ttfb_ms,
             matched_rule: self.matched_rule.clone(),
             timestamp_ms: self.request.timestamp_ms,
+            comment: self.comment.clone(),
+            // Filled by the summary-building call sites that have settings access
+            // (which header columns the user pinned). See `extract_header_columns`.
+            extra: BTreeMap::new(),
         }
     }
 
@@ -123,8 +133,47 @@ pub struct FlowSummary {
     pub req_size: u64,
     pub resp_size: u64,
     pub duration_ms: Option<u64>,
+    /// Time-to-first-byte in ms (request-buffered → response-headers).
+    pub ttfb_ms: Option<u64>,
     pub matched_rule: Option<String>,
     pub timestamp_ms: u64,
+    /// User note/tag for triage.
+    pub comment: Option<String>,
+    /// Pinned header-column values, keyed by the column spec (e.g. `cf-ray` or
+    /// `req:referer`). Only present headers are included.
+    pub extra: BTreeMap<String, String>,
+}
+
+/// Extract the user-pinned header columns from a flow's headers. A spec is a
+/// header name, optionally prefixed `req:` to read the request side (default is
+/// the response). Keyed by the spec so the frontend can map column → value.
+pub(crate) fn extract_header_columns(
+    req: &CapturedRequest,
+    resp: Option<&CapturedResponse>,
+    specs: &[String],
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for spec in specs {
+        let trimmed = spec.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (from_req, name) = match trimmed.strip_prefix("req:") {
+            Some(n) => (true, n.trim()),
+            None => (false, trimmed),
+        };
+        let headers = if from_req {
+            Some(&req.headers)
+        } else {
+            resp.map(|r| &r.headers)
+        };
+        if let Some(headers) = headers {
+            if let Some(v) = header(headers, name) {
+                out.insert(spec.clone(), v.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Inferred resource type for the traffic-list type chips.
@@ -453,5 +502,21 @@ mod tests {
             classify_kind(&req(&[("upgrade", "websocket")], "/ws"), None),
             ResourceKind::Ws
         );
+    }
+
+    #[test]
+    fn extracts_pinned_header_columns() {
+        let request = req(&[("referer", "https://app")], "/x");
+        let mut response = resp("text/html");
+        response.headers.push(("cf-ray".into(), "abc123".into()));
+        let specs = vec![
+            "cf-ray".to_string(),    // response side (default)
+            "req:referer".to_string(), // request side
+            "x-missing".to_string(), // absent → skipped
+        ];
+        let extra = extract_header_columns(&request, Some(&response), &specs);
+        assert_eq!(extra.get("cf-ray").map(String::as_str), Some("abc123"));
+        assert_eq!(extra.get("req:referer").map(String::as_str), Some("https://app"));
+        assert!(!extra.contains_key("x-missing"));
     }
 }

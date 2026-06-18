@@ -105,6 +105,12 @@ pub fn clear_flows(state: State<'_, AppState>) {
     state.controller.clear_flows();
 }
 
+/// Set or clear a flow's user comment (re-emits the row to the live stream).
+#[tauri::command]
+pub fn set_flow_comment(state: State<'_, AppState>, id: String, comment: Option<String>) {
+    state.controller.set_flow_comment(&id, comment);
+}
+
 #[tauri::command]
 pub fn get_autoresponder(state: State<'_, AppState>) -> AutoResponder {
     state.controller.get_autoresponder()

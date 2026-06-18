@@ -9,52 +9,30 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import type { FlowSummary } from "../types";
+import { FLEX_PREFERENCE, type ColumnDef } from "../columns";
 
 interface Props {
   flows: FlowSummary[];
-  /** Ids matching the active filter (null = no filter; nothing dimmed). */
+  columns: ColumnDef[];
   matchedIds: Set<string> | null;
   selectedId: string | null;
   selectedIds: Set<string>;
   onRowClick: (id: string, e: ReactMouseEvent) => void;
-  /** Reports the px width the columns currently need, so the panel divider can
-   *  floor to it and never let the list be squeezed into the right panel. */
   onContentWidth?: (w: number) => void;
+  onCommentEdit: (id: string, comment: string | null) => void;
 }
 
-// Path is the flexible (1fr) column that absorbs every resize; the rest are
-// fixed widths the user can drag. Keys match the `c-<key>` cell classes.
-type ColKey = "method" | "host" | "status" | "mime" | "size" | "time";
-const COLUMNS: { key: ColKey | "path"; label: string }[] = [
-  { key: "method", label: "Method" },
-  { key: "host", label: "Host" },
-  { key: "path", label: "Path" },
-  { key: "status", label: "Status" },
-  { key: "mime", label: "Type" },
-  { key: "size", label: "Size" },
-  { key: "time", label: "ms" },
-];
-const DEFAULT_W: Record<ColKey, number> = {
-  method: 62,
-  host: 150,
-  status: 52,
-  mime: 116,
-  size: 74,
-  time: 46,
-};
 const MIN_W = 38;
 const STORE_KEY = "germi.colWidths";
-const FLEX_INDEX = COLUMNS.findIndex((c) => c.key === "path");
-const PATH_MIN = 60; // matches the minmax(60px, 1fr) path track
-const GAP = 8; // .flow-row column gap
-const ROW_PAD = 20; // .flow-row left+right padding
+const GAP = 8;
+const ROW_PAD = 20;
+const FLEX_MIN = 60;
 
-function loadWidths(): Record<ColKey, number> {
+function loadWidths(): Record<string, number> {
   try {
-    const saved = JSON.parse(localStorage.getItem(STORE_KEY) ?? "{}");
-    return { ...DEFAULT_W, ...saved };
+    return JSON.parse(localStorage.getItem(STORE_KEY) ?? "{}");
   } catch {
-    return { ...DEFAULT_W };
+    return {};
   }
 }
 
@@ -66,61 +44,58 @@ function statusClass(status: number | null): string {
   return "s2";
 }
 
-function fmtSize(n: number): string {
-  if (n === 0) return "";
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
-
 export function TrafficList({
   flows,
+  columns,
   matchedIds,
   selectedId,
   selectedIds,
   onRowClick,
   onContentWidth,
+  onCommentEdit,
 }: Props) {
   const parentRef = useRef<HTMLDivElement>(null);
-  const [widths, setWidths] = useState<Record<ColKey, number>>(loadWidths);
+  const [widths, setWidths] = useState<Record<string, number>>(loadWidths);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const cancelEdit = useRef(false);
 
   useEffect(() => {
     localStorage.setItem(STORE_KEY, JSON.stringify(widths));
   }, [widths]);
 
-  // The minimum width the columns occupy (path collapsed to its 60px min). The
-  // parent uses this to floor the panel divider so the list can't be clipped.
+  const widthOf = (c: ColumnDef) => widths[c.id] ?? c.width;
+
+  // The visible column that flexes to fill leftover width (first present wins).
+  const flexId = FLEX_PREFERENCE.find((id) => columns.some((c) => c.id === id));
+  const flexIndex = flexId ? columns.findIndex((c) => c.id === flexId) : -1;
+  const hasFlex = flexIndex >= 0;
+
+  const tracks = columns.map((c, i) =>
+    i === flexIndex ? "minmax(60px, 1fr)" : `${widthOf(c)}px`,
+  );
+  // With no flexible column, a trailing spacer lets columns left-pack cleanly.
+  const cols = hasFlex ? tracks.join(" ") : `${tracks.join(" ")} minmax(0, 1fr)`;
+
   const contentWidth =
-    widths.method +
-    widths.host +
-    widths.status +
-    widths.mime +
-    widths.size +
-    widths.time +
-    PATH_MIN +
-    GAP * (COLUMNS.length - 1) +
+    columns.reduce((acc, c, i) => acc + (i === flexIndex ? FLEX_MIN : widthOf(c)), 0) +
+    GAP * Math.max(0, columns.length - 1) +
     ROW_PAD;
   useEffect(() => {
     onContentWidth?.(contentWidth);
   }, [contentWidth, onContentWidth]);
 
-  const cols = `${widths.method}px ${widths.host}px minmax(60px, 1fr) ${widths.status}px ${widths.mime}px ${widths.size}px ${widths.time}px`;
-
-  // `sign` is +1 for columns left of the flex (Path) column — they grow as you
-  // drag their right edge right — and -1 for columns to its right, whose left
-  // edge tracks the cursor as the flex column absorbs the change on that side.
-  function startResize(e: ReactPointerEvent, key: ColKey, sign: number) {
+  function startResize(e: ReactPointerEvent, c: ColumnDef, sign: number) {
     e.preventDefault();
     e.stopPropagation();
     const startX = e.clientX;
-    const startW = widths[key];
+    const startW = widthOf(c);
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture(e.pointerId);
     document.body.style.cursor = "col-resize";
-
     const move = (ev: PointerEvent) => {
       const w = Math.max(MIN_W, Math.round(startW + sign * (ev.clientX - startX)));
-      setWidths((prev) => (prev[key] === w ? prev : { ...prev, [key]: w }));
+      setWidths((prev) => (prev[c.id] === w ? prev : { ...prev, [c.id]: w }));
     };
     const up = () => {
       el.releasePointerCapture(e.pointerId);
@@ -130,6 +105,11 @@ export function TrafficList({
     };
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", up);
+  }
+
+  function commitComment(id: string) {
+    onCommentEdit(id, draft.trim() || null);
+    setEditingId(null);
   }
 
   const virtualizer = useVirtualizer({
@@ -142,26 +122,24 @@ export function TrafficList({
   return (
     <div className="flow-list" style={{ "--cols": cols } as CSSProperties}>
       <div className="flow-row flow-head">
-        {COLUMNS.map((c, i) => {
-          if (c.key === "path") {
+        {columns.map((c, i) => {
+          const alignCls = c.align === "right" ? "cell-right" : "";
+          if (i === flexIndex) {
             return (
-              <span key={c.key} className="c-path">
+              <span key={c.id} className={alignCls}>
                 {c.label}
               </span>
             );
           }
-          const key = c.key as ColKey;
-          const side = i < FLEX_INDEX ? "right" : "left";
-          const sign = i < FLEX_INDEX ? 1 : -1;
+          const side = hasFlex && i > flexIndex ? "left" : "right";
+          const sign = hasFlex && i > flexIndex ? -1 : 1;
           return (
-            <span key={c.key} className={`c-${c.key}`}>
+            <span key={c.id} className={alignCls}>
               {c.label}
               <span
                 className={`col-resize ${side}`}
-                onPointerDown={(e) => startResize(e, key, sign)}
-                onDoubleClick={() =>
-                  setWidths((prev) => ({ ...prev, [key]: DEFAULT_W[key] }))
-                }
+                onPointerDown={(e) => startResize(e, c, sign)}
+                onDoubleClick={() => setWidths((prev) => ({ ...prev, [c.id]: c.width }))}
                 title="Drag to resize · double-click to reset"
               />
             </span>
@@ -170,10 +148,7 @@ export function TrafficList({
       </div>
 
       <div className="flow-scroll" ref={parentRef}>
-        <div
-          className="flow-canvas"
-          style={{ height: virtualizer.getTotalSize() }}
-        >
+        <div className="flow-canvas" style={{ height: virtualizer.getTotalSize() }}>
           {virtualizer.getVirtualItems().map((item) => {
             const f = flows[item.index];
             const selected = f.id === selectedId;
@@ -188,30 +163,11 @@ export function TrafficList({
                 } ${f.matchedRule ? "ruled" : ""} ${matched ? "match" : ""} ${
                   dimmed ? "dim" : ""
                 }`}
-                style={{
-                  transform: `translateY(${item.start}px)`,
-                  height: item.size,
-                }}
+                style={{ transform: `translateY(${item.start}px)`, height: item.size }}
                 onClick={(e) => onRowClick(f.id, e)}
                 title={f.matchedRule ? `rule: ${f.matchedRule}` : undefined}
               >
-                <span className={`c-method m-${f.method.toLowerCase()}`}>
-                  {f.method}
-                </span>
-                <span className="c-host" title={f.host}>
-                  {f.host}
-                </span>
-                <span className="c-path" title={f.path}>
-                  {f.path}
-                </span>
-                <span className={`c-status ${statusClass(f.status)}`}>
-                  {f.status ?? "···"}
-                </span>
-                <span className="c-mime">{f.mime ?? ""}</span>
-                <span className="c-size">{fmtSize(f.respSize)}</span>
-                <span className="c-time">
-                  {f.durationMs !== null ? f.durationMs : ""}
-                </span>
+                {columns.map((c) => renderCell(c, f))}
               </div>
             );
           })}
@@ -226,4 +182,79 @@ export function TrafficList({
       </div>
     </div>
   );
+
+  function renderCell(c: ColumnDef, f: FlowSummary) {
+    if (c.special === "method") {
+      return (
+        <span key={c.id} className={`c-method m-${f.method.toLowerCase()}`}>
+          {f.method}
+        </span>
+      );
+    }
+    if (c.special === "status") {
+      return (
+        <span key={c.id} className={`c-status ${statusClass(f.status)}`}>
+          {f.status ?? "···"}
+        </span>
+      );
+    }
+    if (c.special === "kind") {
+      return (
+        <span key={c.id} className="c-kind">
+          {f.kind}
+        </span>
+      );
+    }
+    if (c.special === "comment") {
+      const editing = editingId === f.id;
+      return (
+        <span
+          key={c.id}
+          className="c-comment"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (!editing) {
+              setEditingId(f.id);
+              setDraft(f.comment ?? "");
+            }
+          }}
+        >
+          {editing ? (
+            <input
+              className="comment-input"
+              autoFocus
+              value={draft}
+              placeholder="note…"
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitComment(f.id);
+                else if (e.key === "Escape") {
+                  cancelEdit.current = true;
+                  setEditingId(null);
+                }
+              }}
+              onBlur={() => {
+                if (cancelEdit.current) {
+                  cancelEdit.current = false;
+                  return;
+                }
+                commitComment(f.id);
+              }}
+            />
+          ) : f.comment ? (
+            <span className="comment-text">{f.comment}</span>
+          ) : (
+            <span className="comment-add">+ note</span>
+          )}
+        </span>
+      );
+    }
+    const txt = c.text(f);
+    return (
+      <span key={c.id} className={c.align === "right" ? "cell-right" : ""} title={txt || undefined}>
+        {txt}
+      </span>
+    );
+  }
 }

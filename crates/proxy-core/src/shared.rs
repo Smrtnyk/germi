@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::sync::broadcast;
 
-use crate::flow::{CapturedRequest, CapturedResponse, Flow, FlowEvent};
+use crate::flow::{
+    extract_header_columns, CapturedRequest, CapturedResponse, Flow, FlowEvent,
+};
 use crate::rules::AutoResponder;
 use crate::settings::ProxySettings;
 use crate::store::FlowStore;
@@ -52,9 +54,19 @@ impl Shared {
         format!("f{}", self.counter.fetch_add(1, Ordering::Relaxed))
     }
 
+    /// The header-column specs the user has pinned (for `extract_header_columns`).
+    pub(crate) fn header_cols(&self) -> Vec<String> {
+        self.settings
+            .read()
+            .map(|s| s.header_columns.clone())
+            .unwrap_or_default()
+    }
+
     /// Record a freshly-captured request (response pending) and emit `New`.
     pub fn record_new(&self, flow: Flow) {
-        let summary = flow.summary();
+        let cols = self.header_cols();
+        let mut summary = flow.summary();
+        summary.extra = extract_header_columns(&flow.request, flow.response.as_ref(), &cols);
         if let Ok(mut store) = self.store.lock() {
             store.insert(flow);
         }
@@ -67,14 +79,20 @@ impl Shared {
         id: &str,
         resp: CapturedResponse,
         duration_ms: u64,
+        ttfb_ms: Option<u64>,
         matched_rule: Option<String>,
     ) {
+        let cols = self.header_cols();
         let summary = {
             let Ok(mut store) = self.store.lock() else {
                 return;
             };
-            store.set_response(id, resp, duration_ms, matched_rule);
-            store.get(id).map(|f| f.summary())
+            store.set_response(id, resp, duration_ms, ttfb_ms, matched_rule);
+            store.get(id).map(|f| {
+                let mut s = f.summary();
+                s.extra = extract_header_columns(&f.request, f.response.as_ref(), &cols);
+                s
+            })
         };
         if let Some(summary) = summary {
             let _ = self.events.send(FlowEvent::Completed { summary });
@@ -84,11 +102,32 @@ impl Shared {
     /// Insert an already-complete imported flow and emit it as `Completed`
     /// (the frontend upserts by id, so a single Completed adds the row).
     pub fn record_imported(&self, flow: Flow) {
-        let summary = flow.summary();
+        let cols = self.header_cols();
+        let mut summary = flow.summary();
+        summary.extra = extract_header_columns(&flow.request, flow.response.as_ref(), &cols);
         if let Ok(mut store) = self.store.lock() {
             store.insert(flow);
         }
         let _ = self.events.send(FlowEvent::Completed { summary });
+    }
+
+    /// Set (or clear) a flow's user comment and emit the updated row.
+    pub fn set_comment(&self, id: &str, comment: Option<String>) {
+        let cols = self.header_cols();
+        let summary = {
+            let Ok(mut store) = self.store.lock() else {
+                return;
+            };
+            store.set_comment(id, comment);
+            store.get(id).map(|f| {
+                let mut s = f.summary();
+                s.extra = extract_header_columns(&f.request, f.response.as_ref(), &cols);
+                s
+            })
+        };
+        if let Some(summary) = summary {
+            let _ = self.events.send(FlowEvent::Completed { summary });
+        }
     }
 
     /// Clone of a recorded request, for response-phase rule evaluation.

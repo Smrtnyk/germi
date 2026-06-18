@@ -166,6 +166,8 @@ pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
             } else {
                 None
             },
+            ttfb_ms: None,
+            comment: None,
         });
     }
 
@@ -229,6 +231,8 @@ pub fn parse_saz(bytes: &[u8]) -> Result<Vec<Flow>> {
             response,
             matched_rule: None,
             duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
         });
     }
     Ok(flows)

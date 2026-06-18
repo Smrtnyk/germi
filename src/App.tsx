@@ -10,6 +10,7 @@ import {
 import { api, subscribeFlows } from "./ipc";
 import { useResizable } from "./useResizable";
 import { parseFilter, statusClass } from "./filter";
+import { resolveColumns, DEFAULT_COLUMNS } from "./columns";
 import type {
   AutoResponder,
   CaInfo,
@@ -52,8 +53,19 @@ export function App() {
   const [pickScenarioId, setPickScenarioId] = useState("");
   const [caInfo, setCaInfo] = useState<CaInfo | null>(null);
   const [caOpen, setCaOpen] = useState(false);
-  const [settings, setSettings] = useState<ProxySettings>({ excludedHosts: [] });
+  const [settings, setSettings] = useState<ProxySettings>({
+    excludedHosts: [],
+    headerColumns: [],
+  });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [columnOrder, setColumnOrder] = useState<string[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("germi.columns") ?? "null");
+      return Array.isArray(saved) && saved.length ? saved : DEFAULT_COLUMNS;
+    } catch {
+      return DEFAULT_COLUMNS;
+    }
+  });
   const [error, setError] = useState<string | null>(null);
 
   const flowsRef = useRef<Map<string, FlowSummary>>(new Map());
@@ -223,6 +235,42 @@ export function App() {
       else n.add(c);
       return n;
     });
+  }
+
+  useEffect(() => {
+    localStorage.setItem("germi.columns", JSON.stringify(columnOrder));
+  }, [columnOrder]);
+
+  const visibleColumns = useMemo(
+    () => resolveColumns(columnOrder, settings.headerColumns),
+    [columnOrder, settings.headerColumns],
+  );
+
+  function editComment(id: string, comment: string | null) {
+    const s = flowsRef.current.get(id);
+    if (s) {
+      flowsRef.current.set(id, { ...s, comment });
+      bump();
+    }
+    void api.setFlowComment(id, comment).catch((e) => setError(String(e)));
+  }
+
+  // Persist + apply settings; when the pinned header columns change, re-list so
+  // already-captured rows pick up (or drop) those header values.
+  function saveSettings(next: ProxySettings) {
+    const headersChanged =
+      JSON.stringify(next.headerColumns) !== JSON.stringify(settings.headerColumns);
+    setSettings(next);
+    void api
+      .setSettings(next)
+      .then(async () => {
+        if (headersChanged) {
+          const fresh = await api.listFlows();
+          for (const fs of fresh) flowsRef.current.set(fs.id, fs);
+          bump();
+        }
+      })
+      .catch((e) => setError(String(e)));
   }
 
   function onRowClick(id: string, e: ReactMouseEvent) {
@@ -443,11 +491,13 @@ export function App() {
           )}
           <TrafficList
             flows={allFlows}
+            columns={visibleColumns}
             matchedIds={matchedIds}
             selectedId={selectedId}
             selectedIds={selectedIds}
             onRowClick={onRowClick}
             onContentWidth={setTrafficMin}
+            onCommentEdit={editComment}
           />
         </div>
 
@@ -510,10 +560,9 @@ export function App() {
       {settingsOpen && (
         <SettingsDialog
           settings={settings}
-          onChange={(s) => {
-            setSettings(s);
-            void api.setSettings(s).catch((e) => setError(String(e)));
-          }}
+          onChange={saveSettings}
+          columnOrder={columnOrder}
+          onColumnOrderChange={setColumnOrder}
           onClose={() => setSettingsOpen(false)}
         />
       )}

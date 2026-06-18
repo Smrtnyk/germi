@@ -622,6 +622,8 @@ mod tests {
             }),
             matched_rule: None,
             duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
         };
         let rule = respond_rule_from_flow(&flow, "r1".into());
         assert_eq!(rule.matcher.method.as_deref(), Some("GET"));
@@ -660,6 +662,8 @@ mod tests {
             response: None,
             matched_rule: None,
             duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
         };
         // Host-specific full URL preserved (no collapsing) — one rule per request.
         let rule = respond_rule_from_flow(&flow, "r".into());
@@ -687,6 +691,8 @@ mod tests {
             response: None,
             matched_rule: None,
             duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
         };
         let rule = respond_rule_from_flow(&flow, "r".into());
 

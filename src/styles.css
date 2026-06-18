@@ -605,10 +605,36 @@ textarea {
 .c-status.pending {
   color: var(--muted);
 }
-.c-size,
-.c-time {
+.cell-right {
   text-align: right;
   color: var(--muted);
+}
+.c-kind {
+  color: var(--muted);
+}
+.c-comment {
+  cursor: text;
+}
+.comment-text {
+  color: var(--text);
+}
+.comment-add {
+  color: var(--muted);
+  opacity: 0.4;
+}
+.flow-row:hover .comment-add {
+  opacity: 0.85;
+}
+.comment-input {
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  background: var(--bg-3);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: var(--text);
+  padding: 0 4px;
+  height: 19px;
 }
 
 .m-get {
@@ -1088,8 +1114,8 @@ textarea {
 
 /* ---- settings panel ---- */
 .settings-modal {
-  width: min(720px, 94vw);
-  height: min(560px, 86vh);
+  width: min(900px, 90vw);
+  height: min(680px, 88vh);
   padding: 0;
   overflow: hidden;
   display: flex;
@@ -1183,6 +1209,71 @@ textarea {
 .settings-err {
   color: #f87171;
   font-size: 12px;
+}
+
+/* ---- columns settings ---- */
+.col-presets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.col-section-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+  margin: 14px 0 6px;
+}
+.col-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.col-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+.col-name {
+  font-size: 13px;
+}
+.col-actions {
+  display: inline-flex;
+  gap: 2px;
+}
+.col-actions .x {
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.col-actions .x:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-3);
+}
+.col-actions .x:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.col-add-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.columns-settings select {
+  font: inherit;
 }
 .excluded-add {
   display: flex;

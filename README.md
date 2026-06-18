@@ -183,6 +183,24 @@ non-matching rows dim, and an `N of M` count shows up top. Nothing is hidden.
   backend — the one filter that scans content. Combine freely, e.g.
   `kind:xhr status:5xx body:timeout`.
 
+### Columns
+
+The traffic list's columns are configurable in **Settings → Columns**: show/hide,
+reorder (↑/↓), and **presets** (Minimal / Default / Timing / Sizes / Mocking).
+Drag the header dividers to resize; double-click a divider to reset.
+
+Beyond the basics (method, host, path, status, type) you can add: **scheme, kind,
+request/response/total size, start time, Mocked-by** (which rule fired), an
+inline-editable **Comment** (per-flow note — click to edit; saved with sessions),
+and **timing** — **TTFB** (time-to-first-byte), **Time** (overall), and
+**Download** (Time − TTFB). Timing is honest about its limits: a proxy can't see
+the browser's DNS/TCP/TLS phases, so there's no full Fiddler waterfall — just the
+request → first-byte → complete split Germi can actually measure.
+
+You can also **pin any header as a column** (e.g. `cf-ray`, `content-encoding`, or
+`req:referer` for a request header) — the value is extracted in Rust so it rides
+the existing summary stream cheaply.
+
 ### Sessions
 
 Captured/imported traffic lives in memory and is **not** auto-persisted (so

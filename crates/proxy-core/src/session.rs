@@ -42,9 +42,13 @@ struct SessionFlow {
     #[serde(default)]
     duration_ms: Option<u64>,
     #[serde(default)]
+    ttfb_ms: Option<u64>,
+    #[serde(default)]
     matched_rule: Option<String>,
     #[serde(default)]
     timestamp_ms: u64,
+    #[serde(default)]
+    comment: Option<String>,
 }
 
 fn b64e(bytes: &[u8]) -> String {
@@ -89,8 +93,10 @@ pub fn export_session(flows: &[Flow]) -> Vec<u8> {
                     resp_body,
                     has_response,
                     duration_ms: f.duration_ms,
+                    ttfb_ms: f.ttfb_ms,
                     matched_rule: f.matched_rule.clone(),
                     timestamp_ms: f.request.timestamp_ms,
+                    comment: f.comment.clone(),
                 }
             })
             .collect(),
@@ -138,6 +144,8 @@ pub fn import_session(bytes: &[u8]) -> Result<Vec<Flow>> {
                 response,
                 matched_rule: sf.matched_rule,
                 duration_ms: sf.duration_ms,
+                ttfb_ms: sf.ttfb_ms,
+                comment: sf.comment,
             }
         })
         .collect();
@@ -172,6 +180,8 @@ mod tests {
             }),
             matched_rule: Some("r".into()),
             duration_ms: Some(7),
+            ttfb_ms: Some(3),
+            comment: Some("note".into()),
         };
         let bytes = export_session(&[flow]);
         let back = import_session(&bytes).unwrap();

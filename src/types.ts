@@ -25,8 +25,14 @@ export interface FlowSummary {
   reqSize: number;
   respSize: number;
   durationMs: number | null;
+  /** Time-to-first-byte in ms (request-buffered → response-headers). */
+  ttfbMs: number | null;
   matchedRule: string | null;
   timestampMs: number;
+  /** User note/tag for triage. */
+  comment: string | null;
+  /** Pinned header-column values, keyed by column spec (e.g. `cf-ray`, `req:referer`). */
+  extra: Record<string, string>;
 }
 
 export interface MessageDetail {
@@ -119,6 +125,8 @@ export interface AutoResponder {
 export interface ProxySettings {
   /** Host patterns tunneled without interception (no decrypt, no capture). */
   excludedHosts: string[];
+  /** Pinned header columns: a header name (response) or `req:<name>` (request). */
+  headerColumns: string[];
 }
 
 export interface CaInfo {

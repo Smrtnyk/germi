@@ -158,11 +158,17 @@ impl ProxyController {
     // ---- captured-flow access (for IPC commands) ----
 
     pub fn list_flows(&self) -> Vec<FlowSummary> {
+        let cols = self.shared.header_cols();
         self.shared
             .store
             .lock()
-            .map(|s| s.summaries())
+            .map(|s| s.summaries(&cols))
             .unwrap_or_default()
+    }
+
+    /// Set or clear a flow's user comment (emits the updated row to subscribers).
+    pub fn set_flow_comment(&self, id: &str, comment: Option<String>) {
+        self.shared.set_comment(id, comment);
     }
 
     pub fn get_flow(&self, id: &str, decode: bool, full: bool) -> Option<FlowDetail> {

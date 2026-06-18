@@ -13,6 +13,13 @@ pub struct ProxySettings {
     /// `spotify.com` also excludes `api.spotify.com`.
     #[serde(default)]
     pub excluded_hosts: Vec<String>,
+
+    /// Header-column specs the user pinned to the traffic list. Each is a header
+    /// name read from the response, or `req:<name>` for the request side. The
+    /// engine extracts these into each row's `extra` map (see
+    /// `extract_header_columns`) so they ride the existing summary stream.
+    #[serde(default)]
+    pub header_columns: Vec<String>,
 }
 
 impl ProxySettings {
@@ -47,6 +54,7 @@ mod tests {
     fn settings(hosts: &[&str]) -> ProxySettings {
         ProxySettings {
             excluded_hosts: hosts.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
         }
     }
 

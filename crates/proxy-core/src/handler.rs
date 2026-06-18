@@ -107,6 +107,8 @@ impl HttpHandler for CaptureHandler {
             response: None,
             matched_rule: None,
             duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
         });
 
         match outcome {
@@ -148,6 +150,11 @@ impl HttpHandler for CaptureHandler {
     ) -> Response<Body> {
         let inflight = self.inflight.take();
         let (parts, body) = res.into_parts();
+        // Response headers are in hand now; the body still streams. This instant
+        // is the time-to-first-byte (request-buffered → response-headers).
+        let ttfb = inflight
+            .as_ref()
+            .map(|i| i.start.elapsed().as_millis() as u64);
         let body_bytes = read_body(body).await;
 
         let mut captured = CapturedResponse {
@@ -172,7 +179,7 @@ impl HttpHandler for CaptureHandler {
         if let Some(inflight) = inflight {
             let duration = inflight.start.elapsed().as_millis() as u64;
             self.shared
-                .record_complete(&inflight.id, captured, duration, matched);
+                .record_complete(&inflight.id, captured, duration, ttfb, matched);
         }
 
         out
@@ -196,7 +203,7 @@ impl CaptureHandler {
             timestamp_ms: now_ms(),
         };
         self.shared
-            .record_complete(id, captured, 0, Some(rule.to_string()));
+            .record_complete(id, captured, 0, Some(0), Some(rule.to_string()));
     }
 }
 

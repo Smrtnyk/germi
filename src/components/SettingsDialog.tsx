@@ -2,16 +2,22 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { api } from "../ipc";
 import type { ProxySettings } from "../types";
+import { ColumnsSettings } from "./ColumnsSettings";
 
 interface SectionProps {
   settings: ProxySettings;
   onChange: (s: ProxySettings) => void;
 }
 
+interface SectionCtx extends SectionProps {
+  columnOrder: string[];
+  onColumnOrderChange: (order: string[]) => void;
+}
+
 interface Section {
   id: string;
   label: string;
-  render: (p: SectionProps) => ReactNode;
+  render: (ctx: SectionCtx) => ReactNode;
 }
 
 // Extensible registry: to add a settings category, append a section here and a
@@ -20,7 +26,19 @@ const SECTIONS: Section[] = [
   {
     id: "interception",
     label: "Interception",
-    render: (p) => <InterceptionSection {...p} />,
+    render: (c) => <InterceptionSection settings={c.settings} onChange={c.onChange} />,
+  },
+  {
+    id: "columns",
+    label: "Columns",
+    render: (c) => (
+      <ColumnsSettings
+        order={c.columnOrder}
+        onOrderChange={c.onColumnOrderChange}
+        settings={c.settings}
+        onSettingsChange={c.onChange}
+      />
+    ),
   },
 ];
 
@@ -107,10 +125,18 @@ function InterceptionSection({ settings, onChange }: SectionProps) {
 interface Props {
   settings: ProxySettings;
   onChange: (s: ProxySettings) => void;
+  columnOrder: string[];
+  onColumnOrderChange: (order: string[]) => void;
   onClose: () => void;
 }
 
-export function SettingsDialog({ settings, onChange, onClose }: Props) {
+export function SettingsDialog({
+  settings,
+  onChange,
+  columnOrder,
+  onColumnOrderChange,
+  onClose,
+}: Props) {
   const ref = useRef<HTMLDialogElement>(null);
   const [active, setActive] = useState(SECTIONS[0].id);
   const [err, setErr] = useState<string | null>(null);
@@ -183,7 +209,9 @@ export function SettingsDialog({ settings, onChange, onClose }: Props) {
             </button>
           ))}
         </nav>
-        <div className="settings-content">{section.render({ settings, onChange })}</div>
+        <div className="settings-content">
+          {section.render({ settings, onChange, columnOrder, onColumnOrderChange })}
+        </div>
       </div>
 
       <div className="settings-foot">

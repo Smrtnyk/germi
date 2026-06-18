@@ -53,6 +53,7 @@ pub fn run() {
             commands::list_flows,
             commands::get_flow,
             commands::clear_flows,
+            commands::set_flow_comment,
             commands::get_autoresponder,
             commands::set_autoresponder,
             commands::get_settings,
