@@ -55,28 +55,34 @@ function safeDecode(s: string): string {
   }
 }
 
-/** Cookies for a side: request `Cookie` pairs, or response `Set-Cookie` names. */
-export function parseCookies(headers: [string, string][], side: "request" | "response"): KV[] {
+function requestCookies(headers: [string, string][]): KV[] {
+  const cookie = headers.find(([k]) => k.toLowerCase() === "cookie")?.[1];
+  if (!cookie) return [];
   const out: KV[] = [];
-  if (side === "request") {
-    const cookie = headers.find(([k]) => k.toLowerCase() === "cookie")?.[1];
-    if (!cookie) return [];
-    for (const pair of cookie.split(";")) {
-      const t = pair.trim();
-      if (!t) continue;
-      const eq = t.indexOf("=");
-      out.push({ key: eq === -1 ? t : t.slice(0, eq), value: eq === -1 ? "" : t.slice(eq + 1) });
-    }
-  } else {
-    for (const [k, v] of headers) {
-      if (k.toLowerCase() !== "set-cookie") continue;
-      const first = v.split(";")[0];
-      const eq = first.indexOf("=");
-      out.push({
-        key: eq === -1 ? first : first.slice(0, eq),
-        value: eq === -1 ? "" : first.slice(eq + 1),
-      });
-    }
+  for (const pair of cookie.split(";")) {
+    const t = pair.trim();
+    if (!t) continue;
+    const eq = t.indexOf("=");
+    out.push({ key: eq === -1 ? t : t.slice(0, eq), value: eq === -1 ? "" : t.slice(eq + 1) });
   }
   return out;
+}
+
+function responseCookies(headers: [string, string][]): KV[] {
+  const out: KV[] = [];
+  for (const [k, v] of headers) {
+    if (k.toLowerCase() !== "set-cookie") continue;
+    const first = v.split(";")[0];
+    const eq = first.indexOf("=");
+    out.push({
+      key: eq === -1 ? first : first.slice(0, eq),
+      value: eq === -1 ? "" : first.slice(eq + 1),
+    });
+  }
+  return out;
+}
+
+/** Cookies for a side: request `Cookie` pairs, or response `Set-Cookie` names. */
+export function parseCookies(headers: [string, string][], side: "request" | "response"): KV[] {
+  return side === "request" ? requestCookies(headers) : responseCookies(headers);
 }

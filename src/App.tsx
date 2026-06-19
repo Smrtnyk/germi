@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
 import { useAppState, type RightMode, type RightTab } from "./appState";
 import type { AutoResponder, CaInfo, FlowDetail, FlowSummary, ProxySettings } from "./types";
@@ -131,6 +131,56 @@ function isTyping(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
 }
 
+function runModShortcut(
+  k: string,
+  s: AppStateValue,
+  setPaletteOpen: Dispatch<SetStateAction<boolean>>,
+): boolean {
+  switch (k) {
+    case "k":
+      setPaletteOpen((o) => !o);
+      return true;
+    case "f":
+      s.filterInputRef.current?.focus();
+      return true;
+    case "s":
+      void s.session.saveSession();
+      return true;
+    case "o":
+      void s.session.openSession();
+      return true;
+    case "1":
+      s.setRightTab("inspector");
+      return true;
+    case "2":
+      s.setRightTab("autoresponder");
+      return true;
+    default:
+      return false;
+  }
+}
+
+function handleShortcut(
+  e: KeyboardEvent,
+  s: AppStateValue,
+  setPaletteOpen: Dispatch<SetStateAction<boolean>>,
+  setCheatOpen: (v: boolean) => void,
+) {
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod) {
+    if (runModShortcut(e.key.toLowerCase(), s, setPaletteOpen)) e.preventDefault();
+    return;
+  }
+  if (isTyping(e.target)) return;
+  if (e.key === "/") {
+    e.preventDefault();
+    s.filterInputRef.current?.focus();
+  } else if (e.key === "?") {
+    e.preventDefault();
+    setCheatOpen(true);
+  }
+}
+
 function SelectionBar({
   flows,
   selectedIds,
@@ -186,105 +236,104 @@ function SelectionBar({
   );
 }
 
+function RightPanelHeader({
+  rightTab,
+  setRightTab,
+  split,
+  setRightMode,
+  activeScenario,
+}: {
+  rightTab: RightTab;
+  setRightTab: (tab: RightTab) => void;
+  split: boolean;
+  setRightMode: (mode: RightMode) => void;
+  activeScenario: string | null;
+}) {
+  return (
+    <div className="right-header">
+      {!split && (
+        <div className="tabs">
+          <button
+            className={rightTab === "inspector" ? "tab active" : "tab"}
+            onClick={() => setRightTab("inspector")}
+          >
+            Inspector
+          </button>
+          <button
+            className={rightTab === "autoresponder" ? "tab active" : "tab"}
+            onClick={() => setRightTab("autoresponder")}
+          >
+            Autoresponder
+            {activeScenario && <span className="live-dot" />}
+          </button>
+        </div>
+      )}
+      {split && <span className="split-label">Inspector + Autoresponder</span>}
+      <div className="spacer" />
+      <button
+        className={split ? "btn active small" : "btn ghost small"}
+        title={split ? "Show one panel at a time" : "Show Inspector and Autoresponder together"}
+        onClick={() => setRightMode(split ? "single" : "split")}
+      >
+        ⊟ Split
+      </button>
+    </div>
+  );
+}
+
 function RightPanel({
   rightTab,
   setRightTab,
   rightMode,
   setRightMode,
   activeScenario,
-  detail,
-  summary,
-  loading,
-  decode,
-  onMock,
-  onLoadFull,
-  autoresponder,
-  onAutoresponderChange,
-  selectRuleId,
-  onResetState,
-  ruleHits,
-  onExportRules,
-  onImportRules,
+  inspector,
+  auto,
 }: {
   rightTab: RightTab;
   setRightTab: (tab: RightTab) => void;
   rightMode: RightMode;
   setRightMode: (mode: RightMode) => void;
   activeScenario: string | null;
-  detail: FlowDetail | null;
-  summary: FlowSummary | undefined;
-  loading: boolean;
-  decode: boolean;
-  onMock: (detail: FlowDetail) => void;
-  onLoadFull: () => void;
-  autoresponder: AutoResponder;
-  onAutoresponderChange: (ar: AutoResponder) => void;
-  selectRuleId: string | null;
-  onResetState: (scenarioId: string | null) => void;
-  ruleHits: Record<string, number>;
-  onExportRules: (scenarioId: string | null) => void;
-  onImportRules: (replace: boolean) => void;
+  inspector: {
+    detail: FlowDetail | null;
+    summary: FlowSummary | undefined;
+    loading: boolean;
+    decode: boolean;
+    onMock: (detail: FlowDetail) => void;
+    onLoadFull: () => void;
+  };
+  auto: {
+    ar: AutoResponder;
+    onChange: (ar: AutoResponder) => void;
+    selectRuleId: string | null;
+    onResetState: (scenarioId: string | null) => void;
+    ruleHits: Record<string, number>;
+    onExportRules: (scenarioId: string | null) => void;
+    onImportRules: (replace: boolean) => void;
+  };
 }) {
   const split = rightMode === "split";
   const inspectorVisible = split || rightTab === "inspector";
   const autoVisible = split || rightTab === "autoresponder";
 
-  const inspectorEl = (
-    <FlowInspector
-      detail={detail}
-      summary={summary}
-      loading={loading}
-      onMock={onMock}
-      decode={decode}
-      onLoadFull={onLoadFull}
-    />
-  );
-  const autoEl = (
-    <AutoresponderPanel
-      ar={autoresponder}
-      onChange={onAutoresponderChange}
-      selectRuleId={selectRuleId}
-      onResetState={onResetState}
-      ruleHits={ruleHits}
-      onExportRules={onExportRules}
-      onImportRules={onImportRules}
-    />
-  );
-
   return (
     <div className="right-panel">
-      <div className="right-header">
-        {!split && (
-          <div className="tabs">
-            <button
-              className={rightTab === "inspector" ? "tab active" : "tab"}
-              onClick={() => setRightTab("inspector")}
-            >
-              Inspector
-            </button>
-            <button
-              className={rightTab === "autoresponder" ? "tab active" : "tab"}
-              onClick={() => setRightTab("autoresponder")}
-            >
-              Autoresponder
-              {activeScenario && <span className="live-dot" />}
-            </button>
-          </div>
-        )}
-        {split && <span className="split-label">Inspector + Autoresponder</span>}
-        <div className="spacer" />
-        <button
-          className={split ? "btn active small" : "btn ghost small"}
-          title={split ? "Show one panel at a time" : "Show Inspector and Autoresponder together"}
-          onClick={() => setRightMode(split ? "single" : "split")}
-        >
-          ⊟ Split
-        </button>
-      </div>
+      <RightPanelHeader
+        rightTab={rightTab}
+        setRightTab={setRightTab}
+        split={split}
+        setRightMode={setRightMode}
+        activeScenario={activeScenario}
+      />
 
       <div className={`right-content ${split ? "split" : ""}`}>
-        <div className={inspectorVisible ? "pane" : "pane hidden"}>{inspectorEl}</div>
-        <div className={autoVisible ? "pane" : "pane hidden"}>{autoEl}</div>
+        <div className={inspectorVisible ? "pane" : "pane hidden"}>
+          <FlowInspector {...inspector} />
+        </div>
+        <div className={autoVisible ? "pane" : "pane hidden"}>
+          <AutoresponderPanel {...auto} />
+        </div>
       </div>
     </div>
   );
@@ -344,49 +393,7 @@ export function App() {
   const actions = useMemo(() => buildActions(s), [s]);
 
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => {});
-  keyRef.current = (e: KeyboardEvent) => {
-    const mod = e.metaKey || e.ctrlKey;
-    const k = e.key.toLowerCase();
-    if (mod && k === "k") {
-      e.preventDefault();
-      setPaletteOpen((o) => !o);
-      return;
-    }
-    if (mod && k === "f") {
-      e.preventDefault();
-      s.filterInputRef.current?.focus();
-      return;
-    }
-    if (mod && k === "s") {
-      e.preventDefault();
-      void s.session.saveSession();
-      return;
-    }
-    if (mod && k === "o") {
-      e.preventDefault();
-      void s.session.openSession();
-      return;
-    }
-    if (mod && k === "1") {
-      e.preventDefault();
-      s.setRightTab("inspector");
-      return;
-    }
-    if (mod && k === "2") {
-      e.preventDefault();
-      s.setRightTab("autoresponder");
-      return;
-    }
-    if (mod) return;
-    if (isTyping(e.target)) return;
-    if (e.key === "/") {
-      e.preventDefault();
-      s.filterInputRef.current?.focus();
-    } else if (e.key === "?") {
-      e.preventDefault();
-      setCheatOpen(true);
-    }
-  };
+  keyRef.current = (e: KeyboardEvent) => handleShortcut(e, s, setPaletteOpen, setCheatOpen);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => keyRef.current(e);
@@ -480,19 +487,23 @@ export function App() {
               rightMode={s.rightMode}
               setRightMode={s.setRightMode}
               activeScenario={s.activeScenario}
-              detail={s.inspector.detail}
-              summary={s.selectedSummary}
-              loading={s.inspector.loading}
-              decode={s.decode}
-              onMock={(d) => void s.ar.mockFlows([d.id], s.ar.autoresponder.activeScenarioId)}
-              onLoadFull={() => s.setFullBody(true)}
-              autoresponder={s.ar.autoresponder}
-              onAutoresponderChange={s.ar.saveAutoresponder}
-              selectRuleId={s.ar.selectRuleId}
-              onResetState={s.ar.resetRuleState}
-              ruleHits={s.ar.ruleHits}
-              onExportRules={s.ar.exportRules}
-              onImportRules={s.ar.importRules}
+              inspector={{
+                detail: s.inspector.detail,
+                summary: s.selectedSummary,
+                loading: s.inspector.loading,
+                decode: s.decode,
+                onMock: (d) => void s.ar.mockFlows([d.id], s.ar.autoresponder.activeScenarioId),
+                onLoadFull: () => s.setFullBody(true),
+              }}
+              auto={{
+                ar: s.ar.autoresponder,
+                onChange: s.ar.saveAutoresponder,
+                selectRuleId: s.ar.selectRuleId,
+                onResetState: s.ar.resetRuleState,
+                ruleHits: s.ar.ruleHits,
+                onExportRules: s.ar.exportRules,
+                onImportRules: s.ar.importRules,
+              }}
             />
           </main>
 

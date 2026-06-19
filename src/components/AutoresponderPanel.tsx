@@ -245,40 +245,26 @@ function RuleListItem({
   );
 }
 
-function ScenarioView({
-  active,
-  onPatch,
-  onRequestDelete,
-  selectRuleId,
-  onResetState,
-  ruleHits,
-  onExport,
-}: {
-  active: Scenario;
-  onPatch: (patch: Partial<Scenario>) => void;
-  onRequestDelete: () => void;
-  selectRuleId?: string | null;
-  onResetState: () => void;
-  ruleHits: Record<string, number>;
-  onExport: () => void;
-}) {
-  const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
-  const [dragId, setDragId] = useState<string | null>(null);
-  const [overId, setOverId] = useState<string | null>(null);
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
-  const saveTimer = useRef<number | null>(null);
-  const rulesRef = useRef<HTMLDivElement>(null);
-  const listResize = useResizable({
-    initial: 240,
-    min: 170,
-    getMax: () => (rulesRef.current?.clientWidth ?? 700) - 280,
-    storageKey: "germi.ruleListWidth",
-  });
+type SaveState = "idle" | "saving" | "saved";
 
-  useEffect(() => {
-    if (selectRuleId) setSelectedRuleId(selectRuleId);
-  }, [selectRuleId]);
+interface ScenarioRules {
+  saveState: SaveState;
+  patch: (p: Partial<Scenario>) => void;
+  addRule: () => void;
+  patchRule: (id: string, p: Partial<Rule>) => void;
+  deleteRule: (id: string) => void;
+  duplicateRule: (id: string) => void;
+  reorder: (dragId: string | null, toId: string) => void;
+}
+
+function useScenarioRules(
+  active: Scenario,
+  onPatch: (patch: Partial<Scenario>) => void,
+  selectedRuleId: string | null,
+  setSelectedRuleId: (id: string | null) => void,
+): ScenarioRules {
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const saveTimer = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
@@ -321,7 +307,7 @@ function ScenarioView({
     setRules([...active.rules.slice(0, idx + 1), copy, ...active.rules.slice(idx + 1)]);
     setSelectedRuleId(copy.id);
   }
-  function reorder(toId: string) {
+  function reorder(dragId: string | null, toId: string) {
     if (!dragId || dragId === toId) return;
     const arr = [...active.rules];
     const from = arr.findIndex((r) => r.id === dragId);
@@ -332,13 +318,190 @@ function ScenarioView({
     setRules(arr);
   }
 
+  return { saveState, patch, addRule, patchRule, deleteRule, duplicateRule, reorder };
+}
+
+function useRuleSelection(selectRuleId?: string | null) {
+  const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (selectRuleId) setSelectedRuleId(selectRuleId);
+  }, [selectRuleId]);
+
+  return {
+    selectedRuleId,
+    setSelectedRuleId,
+    query,
+    setQuery,
+    dragId,
+    setDragId,
+    overId,
+    setOverId,
+  };
+}
+
+function RuleList({
+  rules,
+  shownRules,
+  query,
+  setQuery,
+  selectedRuleId,
+  setSelectedRuleId,
+  canReorder,
+  dragId,
+  setDragId,
+  overId,
+  setOverId,
+  ruleHits,
+  onAdd,
+  onToggle,
+  onDuplicate,
+  onReorder,
+}: {
+  rules: Rule[];
+  shownRules: Rule[];
+  query: string;
+  setQuery: (q: string) => void;
+  selectedRuleId: string | null;
+  setSelectedRuleId: (id: string | null) => void;
+  canReorder: boolean;
+  dragId: string | null;
+  setDragId: (id: string | null) => void;
+  overId: string | null;
+  setOverId: (id: string | null) => void;
+  ruleHits: Record<string, number>;
+  onAdd: () => void;
+  onToggle: (id: string, enabled: boolean) => void;
+  onDuplicate: (id: string) => void;
+  onReorder: (toId: string) => void;
+}) {
+  return (
+    <aside className="rule-list">
+      <button className="btn primary block" onClick={onAdd}>
+        + Add rule
+      </button>
+      {rules.length > 4 && (
+        <input
+          className="rule-search"
+          placeholder="Search rules…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      )}
+      {rules.length === 0 && <div className="muted pad">No rules in this scenario yet.</div>}
+      {rules.length > 0 && shownRules.length === 0 && (
+        <div className="muted pad small">No rules match “{query}”.</div>
+      )}
+      {shownRules.map((r) => (
+        <RuleListItem
+          key={r.id}
+          rule={r}
+          selected={r.id === selectedRuleId}
+          hits={ruleHits[r.id] ?? 0}
+          draggable={canReorder}
+          dragOver={overId === r.id && dragId !== r.id}
+          onSelect={() => setSelectedRuleId(r.id)}
+          onToggle={(enabled) => onToggle(r.id, enabled)}
+          onDuplicate={() => onDuplicate(r.id)}
+          onDragStart={() => setDragId(r.id)}
+          onDragOver={() => setOverId(r.id)}
+          onDrop={() => {
+            onReorder(r.id);
+            setDragId(null);
+            setOverId(null);
+          }}
+          onDragEnd={() => {
+            setDragId(null);
+            setOverId(null);
+          }}
+        />
+      ))}
+    </aside>
+  );
+}
+
+function RuleEditorPane({
+  rules,
+  selectedRule,
+  ruleHits,
+  onPatchRule,
+  onDeleteRule,
+}: {
+  rules: Rule[];
+  selectedRule: Rule | null;
+  ruleHits: Record<string, number>;
+  onPatchRule: (id: string, p: Partial<Rule>) => void;
+  onDeleteRule: (id: string) => void;
+}) {
+  return (
+    <section className="rule-editor">
+      {!selectedRule ? (
+        <div className="muted pad">Select a rule to edit it, or add one.</div>
+      ) : (
+        <RuleEditor
+          key={selectedRule.id}
+          rule={selectedRule}
+          hits={ruleHits[selectedRule.id] ?? 0}
+          onPatch={(p) => onPatchRule(selectedRule.id, p)}
+          onDelete={() => onDeleteRule(selectedRule.id)}
+        />
+      )}
+
+      <RuleTester
+        rules={{ rules }}
+        seedMethod={selectedRule?.matcher.method ?? undefined}
+        seedUrl={selectedRule?.matcher.url || undefined}
+      />
+    </section>
+  );
+}
+
+function ScenarioView({
+  active,
+  onPatch,
+  onRequestDelete,
+  selectRuleId,
+  onResetState,
+  ruleHits,
+  onExport,
+}: {
+  active: Scenario;
+  onPatch: (patch: Partial<Scenario>) => void;
+  onRequestDelete: () => void;
+  selectRuleId?: string | null;
+  onResetState: () => void;
+  ruleHits: Record<string, number>;
+  onExport: () => void;
+}) {
+  const sel = useRuleSelection(selectRuleId);
+  const {
+    selectedRuleId,
+    setSelectedRuleId,
+    query,
+    setQuery,
+    dragId,
+    setDragId,
+    overId,
+    setOverId,
+  } = sel;
+  const rules = useScenarioRules(active, onPatch, selectedRuleId, setSelectedRuleId);
+  const rulesRef = useRef<HTMLDivElement>(null);
+  const listResize = useResizable({
+    initial: 240,
+    min: 170,
+    getMax: () => (rulesRef.current?.clientWidth ?? 700) - 280,
+    storageKey: "germi.ruleListWidth",
+  });
+
   const q = query.trim().toLowerCase();
   const shownRules = q
     ? active.rules.filter(
         (r) => r.name.toLowerCase().includes(q) || r.matcher.url.toLowerCase().includes(q),
       )
     : active.rules;
-  const canReorder = !q;
   const selectedRule = active.rules.find((r) => r.id === selectedRuleId) ?? null;
 
   return (
@@ -347,12 +510,12 @@ function ScenarioView({
         <input
           className="scenario-name"
           value={active.name}
-          onChange={(e) => patch({ name: e.target.value })}
+          onChange={(e) => rules.patch({ name: e.target.value })}
         />
         <span className="muted small scenario-status">
           {active.rules.filter((r) => r.enabled).length}/{active.rules.length} active
-          {saveState === "saving" && <span className="save-state"> · saving…</span>}
-          {saveState === "saved" && <span className="save-state ok"> · saved ✓</span>}
+          {rules.saveState === "saving" && <span className="save-state"> · saving…</span>}
+          {rules.saveState === "saved" && <span className="save-state ok"> · saved ✓</span>}
         </span>
         <div className="scenario-actions">
           <button
@@ -382,71 +545,34 @@ function ScenarioView({
           gridTemplateColumns: `minmax(0, ${listResize.size}px) 6px minmax(280px, 1fr)`,
         }}
       >
-        <aside className="rule-list">
-          <button className="btn primary block" onClick={addRule}>
-            + Add rule
-          </button>
-          {active.rules.length > 4 && (
-            <input
-              className="rule-search"
-              placeholder="Search rules…"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-          )}
-          {active.rules.length === 0 && (
-            <div className="muted pad">No rules in this scenario yet.</div>
-          )}
-          {active.rules.length > 0 && shownRules.length === 0 && (
-            <div className="muted pad small">No rules match “{query}”.</div>
-          )}
-          {shownRules.map((r) => (
-            <RuleListItem
-              key={r.id}
-              rule={r}
-              selected={r.id === selectedRuleId}
-              hits={ruleHits[r.id] ?? 0}
-              draggable={canReorder}
-              dragOver={overId === r.id && dragId !== r.id}
-              onSelect={() => setSelectedRuleId(r.id)}
-              onToggle={(enabled) => patchRule(r.id, { enabled })}
-              onDuplicate={() => duplicateRule(r.id)}
-              onDragStart={() => setDragId(r.id)}
-              onDragOver={() => setOverId(r.id)}
-              onDrop={() => {
-                reorder(r.id);
-                setDragId(null);
-                setOverId(null);
-              }}
-              onDragEnd={() => {
-                setDragId(null);
-                setOverId(null);
-              }}
-            />
-          ))}
-        </aside>
+        <RuleList
+          rules={active.rules}
+          shownRules={shownRules}
+          query={query}
+          setQuery={setQuery}
+          selectedRuleId={selectedRuleId}
+          setSelectedRuleId={setSelectedRuleId}
+          canReorder={!q}
+          dragId={dragId}
+          setDragId={setDragId}
+          overId={overId}
+          setOverId={setOverId}
+          ruleHits={ruleHits}
+          onAdd={rules.addRule}
+          onToggle={(id, enabled) => rules.patchRule(id, { enabled })}
+          onDuplicate={rules.duplicateRule}
+          onReorder={(toId) => rules.reorder(dragId, toId)}
+        />
 
         <div className="resizer" onPointerDown={listResize.onPointerDown} title="Drag to resize" />
 
-        <section className="rule-editor">
-          {!selectedRule ? (
-            <div className="muted pad">Select a rule to edit it, or add one.</div>
-          ) : (
-            <RuleEditor
-              key={selectedRule.id}
-              rule={selectedRule}
-              hits={ruleHits[selectedRule.id] ?? 0}
-              onPatch={(p) => patchRule(selectedRule.id, p)}
-              onDelete={() => deleteRule(selectedRule.id)}
-            />
-          )}
-
-          <RuleTester
-            rules={{ rules: active.rules }}
-            seedMethod={selectedRule?.matcher.method ?? undefined}
-            seedUrl={selectedRule?.matcher.url || undefined}
-          />
-        </section>
+        <RuleEditorPane
+          rules={active.rules}
+          selectedRule={selectedRule}
+          ruleHits={ruleHits}
+          onPatchRule={rules.patchRule}
+          onDeleteRule={rules.deleteRule}
+        />
       </div>
     </div>
   );

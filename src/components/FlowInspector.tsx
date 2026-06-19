@@ -52,32 +52,16 @@ function highlight(line: string, query: string): ReactNode {
   return nodes;
 }
 
-/** Virtualized text viewer with optional find bar and word-wrap. */
-function VirtualText({
-  text,
-  hex,
-  wrap,
-  findOpen,
-  onCloseFind,
-}: {
-  text: string;
-  hex?: boolean;
-  wrap?: boolean;
-  findOpen?: boolean;
-  onCloseFind?: () => void;
-}) {
-  const rows = useMemo(() => toRows(text), [text]);
-  const parentRef = useRef<HTMLDivElement>(null);
-  const findRef = useRef<HTMLInputElement>(null);
-  const [query, setQuery] = useState("");
-  const [idx, setIdx] = useState(0);
+type Virtualizer = ReturnType<typeof useVirtualizer<HTMLDivElement, Element>>;
 
-  const virtualizer = useVirtualizer({
-    count: rows.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => ROW_H,
-    overscan: 40,
-  });
+function useFind(
+  rows: string[],
+  query: string,
+  findOpen: boolean | undefined,
+  virtualizer: Virtualizer,
+) {
+  const findRef = useRef<HTMLInputElement>(null);
+  const [idx, setIdx] = useState(0);
 
   const matches = useMemo(() => {
     if (query.length < 1) return [];
@@ -106,69 +90,159 @@ function VirtualText({
     if (matches.length) setIdx((i) => (i + dir + matches.length) % matches.length);
   };
 
+  return { findRef, idx, matches, activeLine, step };
+}
+
+function FindBar({
+  findRef,
+  query,
+  setQuery,
+  idx,
+  matches,
+  step,
+  onCloseFind,
+}: {
+  findRef: React.RefObject<HTMLInputElement | null>;
+  query: string;
+  setQuery: (q: string) => void;
+  idx: number;
+  matches: number[];
+  step: (dir: number) => void;
+  onCloseFind?: () => void;
+}) {
+  return (
+    <div className="vfind">
+      <input
+        ref={findRef}
+        value={query}
+        placeholder="Find in body"
+        onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") step(e.shiftKey ? -1 : 1);
+          else if (e.key === "Escape") onCloseFind?.();
+        }}
+      />
+      <span className="vfind-count">
+        {query
+          ? matches.length
+            ? `${Math.min(idx + 1, matches.length)}/${matches.length}`
+            : "0/0"
+          : ""}
+      </span>
+      <button
+        className="btn ghost"
+        title="Previous (Shift+Enter)"
+        onClick={() => step(-1)}
+        disabled={!matches.length}
+      >
+        ↑
+      </button>
+      <button
+        className="btn ghost"
+        title="Next (Enter)"
+        onClick={() => step(1)}
+        disabled={!matches.length}
+      >
+        ↓
+      </button>
+      <button className="btn ghost" title="Close (Esc)" onClick={onCloseFind}>
+        ✕
+      </button>
+    </div>
+  );
+}
+
+function VLine({
+  line,
+  index,
+  start,
+  size,
+  query,
+  wrap,
+  activeLine,
+  measureElement,
+}: {
+  line: string;
+  index: number;
+  start: number;
+  size: number;
+  query: string;
+  wrap: boolean | undefined;
+  activeLine: number;
+  measureElement: Virtualizer["measureElement"];
+}) {
+  const isHit = query.length > 0 && line.toLowerCase().includes(query.toLowerCase());
+  return (
+    <div
+      data-index={index}
+      ref={wrap ? measureElement : undefined}
+      className={`vline ${isHit ? "hit" : ""} ${index === activeLine ? "active" : ""}`}
+      style={
+        wrap
+          ? { transform: `translateY(${start}px)` }
+          : { transform: `translateY(${start}px)`, height: size }
+      }
+    >
+      {query ? highlight(line, query) : line === "" ? " " : line}
+    </div>
+  );
+}
+
+/** Virtualized text viewer with optional find bar and word-wrap. */
+function VirtualText({
+  text,
+  hex,
+  wrap,
+  findOpen,
+  onCloseFind,
+}: {
+  text: string;
+  hex?: boolean;
+  wrap?: boolean;
+  findOpen?: boolean;
+  onCloseFind?: () => void;
+}) {
+  const rows = useMemo(() => toRows(text), [text]);
+  const parentRef = useRef<HTMLDivElement>(null);
+  const [query, setQuery] = useState("");
+
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => ROW_H,
+    overscan: 40,
+  });
+
+  const { findRef, idx, matches, activeLine, step } = useFind(rows, query, findOpen, virtualizer);
+
   return (
     <div className={`vtext ${hex ? "hex" : ""} ${wrap ? "wrap" : ""}`}>
       {findOpen && (
-        <div className="vfind">
-          <input
-            ref={findRef}
-            value={query}
-            placeholder="Find in body"
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") step(e.shiftKey ? -1 : 1);
-              else if (e.key === "Escape") onCloseFind?.();
-            }}
-          />
-          <span className="vfind-count">
-            {query
-              ? matches.length
-                ? `${Math.min(idx + 1, matches.length)}/${matches.length}`
-                : "0/0"
-              : ""}
-          </span>
-          <button
-            className="btn ghost"
-            title="Previous (Shift+Enter)"
-            onClick={() => step(-1)}
-            disabled={!matches.length}
-          >
-            ↑
-          </button>
-          <button
-            className="btn ghost"
-            title="Next (Enter)"
-            onClick={() => step(1)}
-            disabled={!matches.length}
-          >
-            ↓
-          </button>
-          <button className="btn ghost" title="Close (Esc)" onClick={onCloseFind}>
-            ✕
-          </button>
-        </div>
+        <FindBar
+          findRef={findRef}
+          query={query}
+          setQuery={setQuery}
+          idx={idx}
+          matches={matches}
+          step={step}
+          onCloseFind={onCloseFind}
+        />
       )}
       <div ref={parentRef} className="vtext-scroll">
         <div className="vtext-canvas" style={{ height: virtualizer.getTotalSize() }}>
-          {virtualizer.getVirtualItems().map((item) => {
-            const line = rows[item.index];
-            const isHit = query.length > 0 && line.toLowerCase().includes(query.toLowerCase());
-            return (
-              <div
-                key={item.index}
-                data-index={item.index}
-                ref={wrap ? virtualizer.measureElement : undefined}
-                className={`vline ${isHit ? "hit" : ""} ${item.index === activeLine ? "active" : ""}`}
-                style={
-                  wrap
-                    ? { transform: `translateY(${item.start}px)` }
-                    : { transform: `translateY(${item.start}px)`, height: item.size }
-                }
-              >
-                {query ? highlight(line, query) : line === "" ? " " : line}
-              </div>
-            );
-          })}
+          {virtualizer.getVirtualItems().map((item) => (
+            <VLine
+              key={item.index}
+              line={rows[item.index]}
+              index={item.index}
+              start={item.start}
+              size={item.size}
+              query={query}
+              wrap={wrap}
+              activeLine={activeLine}
+              measureElement={virtualizer.measureElement}
+            />
+          ))}
         </div>
       </div>
     </div>
@@ -319,6 +393,51 @@ function MessageHeaders({ headers }: { headers: [string, string][] }) {
   );
 }
 
+function ImageBody({ msg, ct }: { msg: MessageDetail; ct: string }) {
+  if (msg.truncated) {
+    return (
+      <div className="binary-note">
+        <span className="muted">
+          Image · {fmtSize(msg.size)} — too large to preview. Load the full body to view it.
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="img-wrap">
+      <img
+        className="img-preview"
+        src={`data:${ct || "image/png"};base64,${msg.bodyBase64}`}
+        alt="response preview"
+      />
+    </div>
+  );
+}
+
+function BinaryBody({
+  msg,
+  ct,
+  isRawEncoded,
+  showHex,
+}: {
+  msg: MessageDetail;
+  ct: string;
+  isRawEncoded: boolean;
+  showHex: boolean;
+}) {
+  const hex = useMemo(() => hexDump(msg.bodyBase64), [msg.bodyBase64]);
+  return (
+    <div className="binary-note">
+      <span className="muted">
+        {isRawEncoded
+          ? `Raw ${msg.encoding} body · ${fmtSize(msg.size)} — turn Decode on to read it.`
+          : `Binary content${ct ? ` · ${ct}` : ""} · ${fmtSize(msg.size)} — not shown as text.`}
+      </span>
+      {showHex && <VirtualText text={hex} hex />}
+    </div>
+  );
+}
+
 function MessageBody({
   msg,
   kind,
@@ -340,7 +459,6 @@ function MessageBody({
   isRawEncoded: boolean;
   showHex: boolean;
 }) {
-  const hex = useMemo(() => hexDump(msg.bodyBase64), [msg.bodyBase64]);
   if (msg.size === 0) {
     return (
       <pre className="body">
@@ -348,39 +466,171 @@ function MessageBody({
       </pre>
     );
   }
-  if (kind === "image" && msg.truncated) {
-    return (
-      <div className="binary-note">
-        <span className="muted">
-          Image · {fmtSize(msg.size)} — too large to preview. Load the full body to view it.
-        </span>
-      </div>
-    );
-  }
-  if (kind === "image") {
-    return (
-      <div className="img-wrap">
-        <img
-          className="img-preview"
-          src={`data:${ct || "image/png"};base64,${msg.bodyBase64}`}
-          alt="response preview"
-        />
-      </div>
-    );
-  }
+  if (kind === "image") return <ImageBody msg={msg} ct={ct} />;
   if (kind === "binary") {
-    return (
-      <div className="binary-note">
-        <span className="muted">
-          {isRawEncoded
-            ? `Raw ${msg.encoding} body · ${fmtSize(msg.size)} — turn Decode on to read it.`
-            : `Binary content${ct ? ` · ${ct}` : ""} · ${fmtSize(msg.size)} — not shown as text.`}
-        </span>
-        {showHex && <VirtualText text={hex} hex />}
-      </div>
-    );
+    return <BinaryBody msg={msg} ct={ct} isRawEncoded={isRawEncoded} showHex={showHex} />;
   }
   return <VirtualText text={text} wrap={wrap} findOpen={findOpen} onCloseFind={onCloseFind} />;
+}
+
+function useBodyState() {
+  const [view, setView] = useState<BodyView>("pretty");
+  const [showHex, setShowHex] = useState(false);
+  const [wrap, setWrap] = useState(false);
+  const [findOpen, setFindOpen] = useState(false);
+  return { view, setView, showHex, setShowHex, wrap, setWrap, findOpen, setFindOpen };
+}
+
+function MetaPanel({
+  msg,
+  side,
+  query,
+  cookies,
+  copy,
+}: {
+  msg: MessageDetail;
+  side: Side;
+  query: KV[];
+  cookies: KV[];
+  copy: (label: string, value: string) => void;
+}) {
+  return (
+    <div className="meta-scroll">
+      <KvTable label="Query string" rows={query} />
+      <KvTable label={side === "request" ? "Cookies" : "Set-Cookie"} rows={cookies} />
+      <div className="kv-block">
+        <div className="kv-label">
+          Headers <span className="muted">· {msg.headers.length}</span>
+          <button
+            className="btn ghost small kv-copy"
+            title="Copy headers"
+            onClick={() => copy("Headers", headersToText(msg.headers))}
+          >
+            ⧉
+          </button>
+        </div>
+        <MessageHeaders headers={msg.headers} />
+      </div>
+    </div>
+  );
+}
+
+function PrettyRawToggle({ view, setView }: { view: BodyView; setView: (v: BodyView) => void }) {
+  return (
+    <div className="seg">
+      <button className={view === "pretty" ? "on" : ""} onClick={() => setView("pretty")}>
+        Pretty
+      </button>
+      <button className={view === "raw" ? "on" : ""} onClick={() => setView("raw")}>
+        Raw
+      </button>
+    </div>
+  );
+}
+
+function HexToggle({
+  showHex,
+  setShowHex,
+}: {
+  showHex: boolean;
+  setShowHex: React.Dispatch<React.SetStateAction<boolean>>;
+}) {
+  return (
+    <div className="seg">
+      <button className={showHex ? "on" : ""} onClick={() => setShowHex((s) => !s)}>
+        Hex
+      </button>
+    </div>
+  );
+}
+
+function TextActions({
+  wrap,
+  setWrap,
+  findOpen,
+  setFindOpen,
+}: {
+  wrap: boolean;
+  setWrap: React.Dispatch<React.SetStateAction<boolean>>;
+  findOpen: boolean;
+  setFindOpen: React.Dispatch<React.SetStateAction<boolean>>;
+}) {
+  return (
+    <>
+      <button
+        className={wrap ? "btn active small" : "btn ghost small"}
+        title="Toggle word wrap"
+        onClick={() => setWrap((w) => !w)}
+      >
+        Wrap
+      </button>
+      <button
+        className={findOpen ? "btn active small" : "btn ghost small"}
+        title="Find in body"
+        onClick={() => setFindOpen((f) => !f)}
+      >
+        Find
+      </button>
+    </>
+  );
+}
+
+function BodyBar({
+  msg,
+  kind,
+  encLabel,
+  canPretty,
+  view,
+  setView,
+  showHex,
+  setShowHex,
+  wrap,
+  setWrap,
+  findOpen,
+  setFindOpen,
+  copy,
+}: {
+  msg: MessageDetail;
+  kind: "image" | "text" | "binary";
+  encLabel: string | null;
+  canPretty: boolean;
+  view: BodyView;
+  setView: (v: BodyView) => void;
+  showHex: boolean;
+  setShowHex: React.Dispatch<React.SetStateAction<boolean>>;
+  wrap: boolean;
+  setWrap: React.Dispatch<React.SetStateAction<boolean>>;
+  findOpen: boolean;
+  setFindOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  copy: (label: string, value: string) => void;
+}) {
+  return (
+    <div className="body-bar">
+      <span className="body-meta">
+        <span className="muted">Body · {fmtSize(msg.size)}</span>
+        {encLabel && <span className="enc-chip">{encLabel}</span>}
+      </span>
+      <div className="body-actions">
+        {kind === "text" && canPretty && <PrettyRawToggle view={view} setView={setView} />}
+        {kind === "binary" && <HexToggle showHex={showHex} setShowHex={setShowHex} />}
+        {kind === "text" && (
+          <TextActions
+            wrap={wrap}
+            setWrap={setWrap}
+            findOpen={findOpen}
+            setFindOpen={setFindOpen}
+          />
+        )}
+        <button
+          className="btn ghost small"
+          title="Copy body"
+          onClick={() => copy("Body", msg.bodyText)}
+        >
+          Copy body
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function MessageView({
@@ -397,10 +647,8 @@ function MessageView({
   onLoadFull: () => void;
 }) {
   const notify = useToast();
-  const [view, setView] = useState<BodyView>("pretty");
-  const [showHex, setShowHex] = useState(false);
-  const [wrap, setWrap] = useState(false);
-  const [findOpen, setFindOpen] = useState(false);
+  const { view, setView, showHex, setShowHex, wrap, setWrap, findOpen, setFindOpen } =
+    useBodyState();
 
   const ct = contentType(msg.headers);
   const isRawEncoded = !decode && !!msg.encoding;
@@ -424,74 +672,23 @@ function MessageView({
 
   return (
     <div className="message">
-      <div className="meta-scroll">
-        <KvTable label="Query string" rows={query} />
-        <KvTable label={side === "request" ? "Cookies" : "Set-Cookie"} rows={cookies} />
-        <div className="kv-block">
-          <div className="kv-label">
-            Headers <span className="muted">· {msg.headers.length}</span>
-            <button
-              className="btn ghost small kv-copy"
-              title="Copy headers"
-              onClick={() => copy("Headers", headersToText(msg.headers))}
-            >
-              ⧉
-            </button>
-          </div>
-          <MessageHeaders headers={msg.headers} />
-        </div>
-      </div>
+      <MetaPanel msg={msg} side={side} query={query} cookies={cookies} copy={copy} />
 
-      <div className="body-bar">
-        <span className="body-meta">
-          <span className="muted">Body · {fmtSize(msg.size)}</span>
-          {encLabel && <span className="enc-chip">{encLabel}</span>}
-        </span>
-        <div className="body-actions">
-          {kind === "text" && canPretty && (
-            <div className="seg">
-              <button className={view === "pretty" ? "on" : ""} onClick={() => setView("pretty")}>
-                Pretty
-              </button>
-              <button className={view === "raw" ? "on" : ""} onClick={() => setView("raw")}>
-                Raw
-              </button>
-            </div>
-          )}
-          {kind === "binary" && (
-            <div className="seg">
-              <button className={showHex ? "on" : ""} onClick={() => setShowHex((s) => !s)}>
-                Hex
-              </button>
-            </div>
-          )}
-          {kind === "text" && (
-            <>
-              <button
-                className={wrap ? "btn active small" : "btn ghost small"}
-                title="Toggle word wrap"
-                onClick={() => setWrap((w) => !w)}
-              >
-                Wrap
-              </button>
-              <button
-                className={findOpen ? "btn active small" : "btn ghost small"}
-                title="Find in body"
-                onClick={() => setFindOpen((f) => !f)}
-              >
-                Find
-              </button>
-            </>
-          )}
-          <button
-            className="btn ghost small"
-            title="Copy body"
-            onClick={() => copy("Body", msg.bodyText)}
-          >
-            Copy body
-          </button>
-        </div>
-      </div>
+      <BodyBar
+        msg={msg}
+        kind={kind}
+        encLabel={encLabel}
+        canPretty={canPretty}
+        view={view}
+        setView={setView}
+        showHex={showHex}
+        setShowHex={setShowHex}
+        wrap={wrap}
+        setWrap={setWrap}
+        findOpen={findOpen}
+        setFindOpen={setFindOpen}
+        copy={copy}
+      />
 
       {msg.truncated && (
         <div className="trunc-banner">
@@ -523,6 +720,54 @@ function MessageView({
   );
 }
 
+function RequestHead({
+  detail,
+  ttfb,
+  onMock,
+  url,
+  copy,
+}: {
+  detail: FlowDetail;
+  ttfb: number | null;
+  onMock: (detail: FlowDetail) => void;
+  url: string;
+  copy: (label: string, value: string) => void;
+}) {
+  return (
+    <div className="req-head">
+      <div className="req-line">
+        <span className={`badge m-${detail.method.toLowerCase()}`}>{detail.method}</span>
+        {detail.status !== null && <span className="badge status">{detail.status}</span>}
+        {detail.matchedRule && <span className="badge rule">⚡ {detail.matchedRule}</span>}
+        {ttfb !== null && <span className="muted timing">TTFB {ttfb} ms</span>}
+        {detail.durationMs !== null && <span className="muted timing">{detail.durationMs} ms</span>}
+        <button
+          className="btn primary mock-btn"
+          onClick={() => onMock(detail)}
+          title="Create an autoresponder rule seeded from this response"
+        >
+          ⚡ Mock this →
+        </button>
+      </div>
+      <div className="req-url">
+        <span className="url-text">{url}</span>
+        <div className="url-actions">
+          <button className="btn ghost url-copy" title="Copy URL" onClick={() => copy("URL", url)}>
+            ⧉ URL
+          </button>
+          <button
+            className="btn ghost url-copy"
+            title="Copy as cURL"
+            onClick={() => copy("cURL command", toCurl(detail))}
+          >
+            cURL
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function FlowInspector({ detail, summary, loading, onMock, decode, onLoadFull }: Props) {
   const notify = useToast();
   const [side, setSide] = useState<Side>("response");
@@ -546,43 +791,7 @@ export function FlowInspector({ detail, summary, loading, onMock, decode, onLoad
 
   return (
     <div className="inspector">
-      <div className="req-head">
-        <div className="req-line">
-          <span className={`badge m-${detail.method.toLowerCase()}`}>{detail.method}</span>
-          {detail.status !== null && <span className="badge status">{detail.status}</span>}
-          {detail.matchedRule && <span className="badge rule">⚡ {detail.matchedRule}</span>}
-          {ttfb !== null && <span className="muted timing">TTFB {ttfb} ms</span>}
-          {detail.durationMs !== null && (
-            <span className="muted timing">{detail.durationMs} ms</span>
-          )}
-          <button
-            className="btn primary mock-btn"
-            onClick={() => onMock(detail)}
-            title="Create an autoresponder rule seeded from this response"
-          >
-            ⚡ Mock this →
-          </button>
-        </div>
-        <div className="req-url">
-          <span className="url-text">{url}</span>
-          <div className="url-actions">
-            <button
-              className="btn ghost url-copy"
-              title="Copy URL"
-              onClick={() => copy("URL", url)}
-            >
-              ⧉ URL
-            </button>
-            <button
-              className="btn ghost url-copy"
-              title="Copy as cURL"
-              onClick={() => copy("cURL command", toCurl(detail))}
-            >
-              cURL
-            </button>
-          </div>
-        </div>
-      </div>
+      <RequestHead detail={detail} ttfb={ttfb} onMock={onMock} url={url} copy={copy} />
 
       <div className="seg sides">
         <button className={side === "request" ? "on" : ""} onClick={() => setSide("request")}>
