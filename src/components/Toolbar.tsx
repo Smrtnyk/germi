@@ -1,7 +1,10 @@
+import type { RefObject } from "react";
+
 import { FilterHelp } from "./FilterHelp";
 
 interface ToolbarProps {
   running: boolean;
+  busy: boolean;
   port: number;
   onPortChange: (port: number) => void;
   onToggleProxy: () => void;
@@ -17,11 +20,15 @@ interface ToolbarProps {
   onClear: () => void;
   filter: string;
   onFilterChange: (value: string) => void;
+  filterInputRef: RefObject<HTMLInputElement | null>;
+  theme: "dark" | "light";
+  onToggleTheme: () => void;
 }
 
 export function Toolbar(props: ToolbarProps) {
   const {
     running,
+    busy,
     port,
     onPortChange,
     onToggleProxy,
@@ -37,6 +44,9 @@ export function Toolbar(props: ToolbarProps) {
     onClear,
     filter,
     onFilterChange,
+    filterInputRef,
+    theme,
+    onToggleTheme,
   } = props;
 
   return (
@@ -46,59 +56,106 @@ export function Toolbar(props: ToolbarProps) {
         Germi
       </div>
 
-      <button className={running ? "btn danger" : "btn primary"} onClick={onToggleProxy}>
-        {running ? "■ Stop" : "▶ Start"}
-      </button>
+      <div className="tb-group" role="group" aria-label="Proxy">
+        <button
+          className={running ? "btn danger" : "btn primary"}
+          onClick={onToggleProxy}
+          disabled={busy}
+          title={running ? "Stop the proxy" : "Start the proxy"}
+        >
+          {busy ? (running ? "Stopping…" : "Starting…") : running ? "■ Stop" : "▶ Start"}
+        </button>
 
-      <label className="port">
-        :
-        <input
-          type="number"
-          min={1}
-          max={65535}
-          value={port}
-          disabled={running}
-          onChange={(e) => onPortChange(Number(e.target.value) || 8080)}
-        />
-      </label>
+        <label className="port">
+          :
+          <input
+            type="number"
+            min={1}
+            max={65535}
+            value={port}
+            disabled={running || busy}
+            onChange={(e) => onPortChange(Number(e.target.value) || 8080)}
+          />
+        </label>
 
-      <button
-        className={systemProxy ? "btn active" : "btn"}
-        onClick={onToggleSystemProxy}
-        disabled={!running}
-        title="Route the OS system proxy through Germi"
-      >
-        {systemProxy ? "System proxy: ON" : "System proxy: off"}
-      </button>
+        <button
+          className={systemProxy ? "btn active" : "btn"}
+          onClick={onToggleSystemProxy}
+          disabled={!running}
+          title="Route the OS system proxy through Germi"
+        >
+          {systemProxy ? "System proxy: ON" : "System proxy: off"}
+        </button>
+      </div>
 
-      <button className="btn" onClick={onInstallCa}>
-        CA certificate
-      </button>
+      <div className="tb-sep" />
 
-      <button className="btn" onClick={onImport} title="Import a HAR or Fiddler SAZ archive">
-        Import
-      </button>
+      <div className="tb-group" role="group" aria-label="Session">
+        <button
+          className="btn ghost"
+          onClick={onOpenSession}
+          title="Open a saved .germi session (replaces current traffic)"
+        >
+          Open
+        </button>
+        <button
+          className="btn ghost"
+          onClick={onSaveSession}
+          title="Save current traffic to a .germi session"
+        >
+          Save
+        </button>
+        <button
+          className="btn ghost"
+          onClick={onImport}
+          title="Import a HAR or Fiddler SAZ archive"
+        >
+          Import
+        </button>
+        <button className="btn ghost danger" onClick={onClear} title="Clear captured traffic">
+          Clear
+        </button>
+      </div>
 
-      <button
-        className={decode ? "btn active" : "btn"}
-        onClick={onToggleDecode}
-        title="Decompress gzip / brotli / deflate response bodies"
-      >
-        Decode
-      </button>
+      <div className="tb-sep" />
 
-      <button
-        className="btn"
-        onClick={onOpenSettings}
-        title="Settings — exclude hosts from interception"
-      >
-        ⚙ Settings
-      </button>
+      <div className="tb-group" role="group" aria-label="View">
+        <button
+          className={decode ? "btn active" : "btn ghost"}
+          onClick={onToggleDecode}
+          title="Decompress gzip / brotli / deflate response bodies"
+        >
+          Decode
+        </button>
+        <button
+          className="btn ghost"
+          onClick={onInstallCa}
+          title="Trust the Germi root CA for HTTPS"
+        >
+          CA cert
+        </button>
+        <button
+          className="btn ghost"
+          onClick={onToggleTheme}
+          title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          aria-label="Toggle color theme"
+        >
+          {theme === "dark" ? "☀" : "☾"}
+        </button>
+        <button
+          className="btn ghost"
+          onClick={onOpenSettings}
+          title="Settings — connections, certificates, interception, capture"
+        >
+          ⚙ Settings
+        </button>
+      </div>
 
       <div className="spacer" />
 
       <div className="filter-wrap">
         <input
+          ref={filterInputRef}
           className="filter"
           placeholder="Filter — host: status:4xx kind:xhr body:… -negate /regex/"
           value={filter}
@@ -116,24 +173,7 @@ export function Toolbar(props: ToolbarProps) {
           </button>
         )}
       </div>
-      <FilterHelp />
-      <button
-        className="btn"
-        onClick={onOpenSession}
-        title="Open a saved .germi session (replaces current traffic)"
-      >
-        Open
-      </button>
-      <button
-        className="btn"
-        onClick={onSaveSession}
-        title="Save current traffic to a .germi session"
-      >
-        Save
-      </button>
-      <button className="btn" onClick={onClear} title="Clear captured traffic">
-        Clear
-      </button>
+      <FilterHelp filter={filter} onPick={onFilterChange} inputRef={filterInputRef} />
     </header>
   );
 }

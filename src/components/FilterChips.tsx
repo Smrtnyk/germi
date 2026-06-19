@@ -6,6 +6,7 @@ interface Props {
   statusChips: Set<string>;
   onToggleType: (k: ResourceKind) => void;
   onToggleStatus: (c: string) => void;
+  onClearAll: () => void;
   searching: boolean;
   /** Number of matching rows, or null when no filter is active. */
   matchCount: number | null;
@@ -17,10 +18,12 @@ export function FilterChips({
   statusChips,
   onToggleType,
   onToggleStatus,
+  onClearAll,
   searching,
   matchCount,
   total,
 }: Props) {
+  const active = matchCount !== null;
   return (
     <div className="filter-chips">
       {KIND_CHIPS.map(({ kind, label }) => (
@@ -44,10 +47,21 @@ export function FilterChips({
       ))}
       <div className="filter-status">
         {searching && <span className="searching">searching…</span>}
-        {matchCount !== null && (
-          <span className="match-count">
-            <strong>{matchCount}</strong> of {total} match
+        {active && (
+          <span className={`match-count ${matchCount === 0 ? "zero" : ""}`}>
+            {matchCount === 0 ? (
+              <>no matches of {total}</>
+            ) : (
+              <>
+                <strong>{matchCount}</strong> of {total} match
+              </>
+            )}
           </span>
+        )}
+        {active && (
+          <button className="chips-clear" onClick={onClearAll} title="Clear all filters">
+            Clear filters
+          </button>
         )}
       </div>
     </div>

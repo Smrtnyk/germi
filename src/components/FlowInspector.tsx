@@ -1,14 +1,14 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import type { FlowDetail, MessageDetail } from "../types";
+import type { FlowDetail, FlowSummary, MessageDetail } from "../types";
+import { useToast } from "../toast";
+import { headersToText, parseCookies, parseQuery, toCurl, type KV } from "../curl";
 
 const ROW_H = 18;
 const MAX_ROW = 2000;
 const PRETTY_CAP = 512 * 1024;
 
-/** Split body text into bounded-width rows (also chunking single giant lines,
- *  e.g. minified JSON/HTML) so they can be virtualized at a fixed row height. */
 function toRows(text: string): string[] {
   const rows: string[] = [];
   for (const line of text.split("\n")) {
@@ -18,7 +18,6 @@ function toRows(text: string): string[] {
   return rows.length ? rows : [""];
 }
 
-/** Chunk one over-long line at MAX_ROW, never splitting a surrogate pair. */
 function pushChunks(line: string, rows: string[]): void {
   let i = 0;
   while (i < line.length) {
@@ -30,29 +29,147 @@ function pushChunks(line: string, rows: string[]): void {
   }
 }
 
-/** Virtualized text viewer — renders only visible lines, so multi-MB bodies
- *  scroll smoothly. No wrapping (fixed row height); long lines scroll across. */
-function VirtualText({ text, hex }: { text: string; hex?: boolean }) {
+function highlight(line: string, query: string): ReactNode {
+  if (!query) return line === "" ? " " : line;
+  const lc = line.toLowerCase();
+  const q = query.toLowerCase();
+  const nodes: ReactNode[] = [];
+  let from = 0;
+  let key = 0;
+  let i = lc.indexOf(q, from);
+  if (i === -1) return line;
+  while (i !== -1) {
+    if (i > from) nodes.push(line.slice(from, i));
+    nodes.push(
+      <mark key={key++} className="vmatch">
+        {line.slice(i, i + query.length)}
+      </mark>,
+    );
+    from = i + query.length;
+    i = lc.indexOf(q, from);
+  }
+  if (from < line.length) nodes.push(line.slice(from));
+  return nodes;
+}
+
+/** Virtualized text viewer with optional find bar and word-wrap. */
+function VirtualText({
+  text,
+  hex,
+  wrap,
+  findOpen,
+  onCloseFind,
+}: {
+  text: string;
+  hex?: boolean;
+  wrap?: boolean;
+  findOpen?: boolean;
+  onCloseFind?: () => void;
+}) {
   const rows = useMemo(() => toRows(text), [text]);
   const parentRef = useRef<HTMLDivElement>(null);
+  const findRef = useRef<HTMLInputElement>(null);
+  const [query, setQuery] = useState("");
+  const [idx, setIdx] = useState(0);
+
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_H,
     overscan: 40,
   });
+
+  const matches = useMemo(() => {
+    if (query.length < 1) return [];
+    const q = query.toLowerCase();
+    const res: number[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].toLowerCase().includes(q)) res.push(i);
+      if (res.length >= 5000) break;
+    }
+    return res;
+  }, [rows, query]);
+
+  useEffect(() => setIdx(0), [query]);
+  useEffect(() => {
+    if (findOpen) findRef.current?.focus();
+  }, [findOpen]);
+  useEffect(() => {
+    if (findOpen && matches.length) {
+      virtualizer.scrollToIndex(matches[Math.min(idx, matches.length - 1)], { align: "center" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idx, matches, findOpen]);
+
+  const activeLine = matches.length ? matches[Math.min(idx, matches.length - 1)] : -1;
+  const step = (dir: number) => {
+    if (matches.length) setIdx((i) => (i + dir + matches.length) % matches.length);
+  };
+
   return (
-    <div ref={parentRef} className={`vtext ${hex ? "hex" : ""}`}>
-      <div className="vtext-canvas" style={{ height: virtualizer.getTotalSize() }}>
-        {virtualizer.getVirtualItems().map((item) => (
-          <div
-            key={item.index}
-            className="vline"
-            style={{ transform: `translateY(${item.start}px)`, height: item.size }}
+    <div className={`vtext ${hex ? "hex" : ""} ${wrap ? "wrap" : ""}`}>
+      {findOpen && (
+        <div className="vfind">
+          <input
+            ref={findRef}
+            value={query}
+            placeholder="Find in body"
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") step(e.shiftKey ? -1 : 1);
+              else if (e.key === "Escape") onCloseFind?.();
+            }}
+          />
+          <span className="vfind-count">
+            {query
+              ? matches.length
+                ? `${Math.min(idx + 1, matches.length)}/${matches.length}`
+                : "0/0"
+              : ""}
+          </span>
+          <button
+            className="btn ghost"
+            title="Previous (Shift+Enter)"
+            onClick={() => step(-1)}
+            disabled={!matches.length}
           >
-            {rows[item.index] === "" ? " " : rows[item.index]}
-          </div>
-        ))}
+            ↑
+          </button>
+          <button
+            className="btn ghost"
+            title="Next (Enter)"
+            onClick={() => step(1)}
+            disabled={!matches.length}
+          >
+            ↓
+          </button>
+          <button className="btn ghost" title="Close (Esc)" onClick={onCloseFind}>
+            ✕
+          </button>
+        </div>
+      )}
+      <div ref={parentRef} className="vtext-scroll">
+        <div className="vtext-canvas" style={{ height: virtualizer.getTotalSize() }}>
+          {virtualizer.getVirtualItems().map((item) => {
+            const line = rows[item.index];
+            const isHit = query.length > 0 && line.toLowerCase().includes(query.toLowerCase());
+            return (
+              <div
+                key={item.index}
+                data-index={item.index}
+                ref={wrap ? virtualizer.measureElement : undefined}
+                className={`vline ${isHit ? "hit" : ""} ${item.index === activeLine ? "active" : ""}`}
+                style={
+                  wrap
+                    ? { transform: `translateY(${item.start}px)` }
+                    : { transform: `translateY(${item.start}px)`, height: item.size }
+                }
+              >
+                {query ? highlight(line, query) : line === "" ? " " : line}
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
@@ -60,6 +177,8 @@ function VirtualText({ text, hex }: { text: string; hex?: boolean }) {
 
 interface Props {
   detail: FlowDetail | null;
+  summary: FlowSummary | undefined;
+  loading: boolean;
   onMock: (detail: FlowDetail) => void;
   decode: boolean;
   onLoadFull: () => void;
@@ -81,10 +200,7 @@ function fmtSize(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-/** Decide whether a body should be shown as text, an image, or binary/hex. */
 function classify(ct: string, text: string): "image" | "text" | "binary" {
-  // SVG is XML text — the backend treats it as textual (no base64), so render it
-  // from bodyText rather than as an <img> with an empty data URL.
   if (ct.startsWith("image/")) return ct.includes("svg") ? "text" : "image";
   if (
     ct.startsWith("text/") ||
@@ -100,7 +216,6 @@ function classify(ct: string, text: string): "image" | "text" | "binary" {
   ) {
     return "binary";
   }
-  // Unknown content-type — sniff by replacement-character ratio.
   const sample = text.slice(0, 2000);
   if (!sample) return "text";
   let bad = 0;
@@ -110,8 +225,6 @@ function classify(ct: string, text: string): "image" | "text" | "binary" {
   return bad / sample.length > 0.08 ? "binary" : "text";
 }
 
-/** Produce a "pretty" rendering for formats that have one. `canPretty` is false
- *  when pretty would be identical to raw (so the toggle can be hidden). */
 function prettify(ct: string, text: string): { pretty: string; canPretty: boolean } {
   if (text.length > PRETTY_CAP) return { pretty: text, canPretty: false };
   if (ct.includes("json")) {
@@ -137,7 +250,6 @@ function prettify(ct: string, text: string): { pretty: string; canPretty: boolea
   return { pretty: text, canPretty: false };
 }
 
-/** Hex + ASCII dump of (a prefix of) a base64-encoded body. */
 function hexDump(b64: string, maxBytes = 64 * 1024): string {
   let bin: string;
   try {
@@ -174,6 +286,25 @@ function encodingLabel(msg: MessageDetail, decode: boolean): string | null {
   return `${msg.encoding}${decode ? " · failed" : " · raw"}`;
 }
 
+function KvTable({ label, rows }: { label: string; rows: KV[] }) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="kv-block">
+      <div className="kv-label">
+        {label} <span className="muted">· {rows.length}</span>
+      </div>
+      <div className="headers">
+        {rows.map((r, i) => (
+          <div className="hrow" key={`${r.key}-${i}`}>
+            <span className="hkey">{r.key}</span>
+            <span className="hval">{r.value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function MessageHeaders({ headers }: { headers: [string, string][] }) {
   return (
     <div className="headers">
@@ -193,6 +324,9 @@ function MessageBody({
   kind,
   ct,
   text,
+  wrap,
+  findOpen,
+  onCloseFind,
   isRawEncoded,
   showHex,
 }: {
@@ -200,6 +334,9 @@ function MessageBody({
   kind: "image" | "text" | "binary";
   ct: string;
   text: string;
+  wrap: boolean;
+  findOpen: boolean;
+  onCloseFind: () => void;
   isRawEncoded: boolean;
   showHex: boolean;
 }) {
@@ -243,20 +380,27 @@ function MessageBody({
       </div>
     );
   }
-  return <VirtualText text={text} />;
+  return <VirtualText text={text} wrap={wrap} findOpen={findOpen} onCloseFind={onCloseFind} />;
 }
 
 function MessageView({
   msg,
+  side,
+  path,
   decode,
   onLoadFull,
 }: {
   msg: MessageDetail;
+  side: Side;
+  path: string;
   decode: boolean;
   onLoadFull: () => void;
 }) {
+  const notify = useToast();
   const [view, setView] = useState<BodyView>("pretty");
   const [showHex, setShowHex] = useState(false);
+  const [wrap, setWrap] = useState(false);
+  const [findOpen, setFindOpen] = useState(false);
 
   const ct = contentType(msg.headers);
   const isRawEncoded = !decode && !!msg.encoding;
@@ -266,32 +410,87 @@ function MessageView({
   const { pretty, canPretty } = useMemo(() => prettify(ct, msg.bodyText), [ct, msg.bodyText]);
   const text = view === "pretty" && canPretty ? pretty : msg.bodyText;
 
+  const query = side === "request" ? parseQuery(path) : [];
+  const cookies = parseCookies(msg.headers, side);
+
+  const copy = (label: string, value: string) => {
+    if (!value) {
+      notify("info", `No ${label.toLowerCase()} to copy`);
+      return;
+    }
+    void navigator.clipboard.writeText(value);
+    notify("success", `${label} copied`);
+  };
+
   return (
     <div className="message">
-      <MessageHeaders headers={msg.headers} />
+      <div className="meta-scroll">
+        <KvTable label="Query string" rows={query} />
+        <KvTable label={side === "request" ? "Cookies" : "Set-Cookie"} rows={cookies} />
+        <div className="kv-block">
+          <div className="kv-label">
+            Headers <span className="muted">· {msg.headers.length}</span>
+            <button
+              className="btn ghost small kv-copy"
+              title="Copy headers"
+              onClick={() => copy("Headers", headersToText(msg.headers))}
+            >
+              ⧉
+            </button>
+          </div>
+          <MessageHeaders headers={msg.headers} />
+        </div>
+      </div>
 
       <div className="body-bar">
         <span className="body-meta">
           <span className="muted">Body · {fmtSize(msg.size)}</span>
           {encLabel && <span className="enc-chip">{encLabel}</span>}
         </span>
-        {kind === "text" && canPretty && (
-          <div className="seg">
-            <button className={view === "pretty" ? "on" : ""} onClick={() => setView("pretty")}>
-              Pretty
-            </button>
-            <button className={view === "raw" ? "on" : ""} onClick={() => setView("raw")}>
-              Raw
-            </button>
-          </div>
-        )}
-        {kind === "binary" && (
-          <div className="seg">
-            <button className={showHex ? "on" : ""} onClick={() => setShowHex((s) => !s)}>
-              Hex
-            </button>
-          </div>
-        )}
+        <div className="body-actions">
+          {kind === "text" && canPretty && (
+            <div className="seg">
+              <button className={view === "pretty" ? "on" : ""} onClick={() => setView("pretty")}>
+                Pretty
+              </button>
+              <button className={view === "raw" ? "on" : ""} onClick={() => setView("raw")}>
+                Raw
+              </button>
+            </div>
+          )}
+          {kind === "binary" && (
+            <div className="seg">
+              <button className={showHex ? "on" : ""} onClick={() => setShowHex((s) => !s)}>
+                Hex
+              </button>
+            </div>
+          )}
+          {kind === "text" && (
+            <>
+              <button
+                className={wrap ? "btn active small" : "btn ghost small"}
+                title="Toggle word wrap"
+                onClick={() => setWrap((w) => !w)}
+              >
+                Wrap
+              </button>
+              <button
+                className={findOpen ? "btn active small" : "btn ghost small"}
+                title="Find in body"
+                onClick={() => setFindOpen((f) => !f)}
+              >
+                Find
+              </button>
+            </>
+          )}
+          <button
+            className="btn ghost small"
+            title="Copy body"
+            onClick={() => copy("Body", msg.bodyText)}
+          >
+            Copy body
+          </button>
+        </div>
       </div>
 
       {msg.truncated && (
@@ -314,6 +513,9 @@ function MessageView({
         kind={kind}
         ct={ct}
         text={text}
+        wrap={wrap}
+        findOpen={findOpen}
+        onCloseFind={() => setFindOpen(false)}
         isRawEncoded={isRawEncoded}
         showHex={showHex}
       />
@@ -321,19 +523,26 @@ function MessageView({
   );
 }
 
-export function FlowInspector({ detail, onMock, decode, onLoadFull }: Props) {
+export function FlowInspector({ detail, summary, loading, onMock, decode, onLoadFull }: Props) {
+  const notify = useToast();
   const [side, setSide] = useState<Side>("response");
 
   if (!detail) {
     return (
       <div className="inspector empty-pane">
-        <span className="muted">Select a request to inspect.</span>
+        <span className="muted">{loading ? "Loading…" : "Select a request to inspect."}</span>
       </div>
     );
   }
 
   const showResponse = side === "response" && detail.response;
   const url = `${detail.scheme}://${detail.host}${detail.path}`;
+  const ttfb = summary?.ttfbMs ?? null;
+
+  const copy = (label: string, value: string) => {
+    void navigator.clipboard.writeText(value);
+    notify("success", `${label} copied`);
+  };
 
   return (
     <div className="inspector">
@@ -342,7 +551,10 @@ export function FlowInspector({ detail, onMock, decode, onLoadFull }: Props) {
           <span className={`badge m-${detail.method.toLowerCase()}`}>{detail.method}</span>
           {detail.status !== null && <span className="badge status">{detail.status}</span>}
           {detail.matchedRule && <span className="badge rule">⚡ {detail.matchedRule}</span>}
-          {detail.durationMs !== null && <span className="muted">{detail.durationMs} ms</span>}
+          {ttfb !== null && <span className="muted timing">TTFB {ttfb} ms</span>}
+          {detail.durationMs !== null && (
+            <span className="muted timing">{detail.durationMs} ms</span>
+          )}
           <button
             className="btn primary mock-btn"
             onClick={() => onMock(detail)}
@@ -353,13 +565,22 @@ export function FlowInspector({ detail, onMock, decode, onLoadFull }: Props) {
         </div>
         <div className="req-url">
           <span className="url-text">{url}</span>
-          <button
-            className="btn ghost url-copy"
-            title="Copy URL"
-            onClick={() => void navigator.clipboard.writeText(url)}
-          >
-            ⧉
-          </button>
+          <div className="url-actions">
+            <button
+              className="btn ghost url-copy"
+              title="Copy URL"
+              onClick={() => copy("URL", url)}
+            >
+              ⧉ URL
+            </button>
+            <button
+              className="btn ghost url-copy"
+              title="Copy as cURL"
+              onClick={() => copy("cURL command", toCurl(detail))}
+            >
+              cURL
+            </button>
+          </div>
         </div>
       </div>
 
@@ -376,12 +597,12 @@ export function FlowInspector({ detail, onMock, decode, onLoadFull }: Props) {
         </button>
       </div>
 
-      {/* key on flow id + side so switching selection or side remounts with fresh
-          Pretty/Raw/Hex toggle state and scroll position (no stale carry-over). */}
       {showResponse && detail.response ? (
         <MessageView
           key={`${detail.id}-response`}
           msg={detail.response}
+          side="response"
+          path={detail.path}
           decode={decode}
           onLoadFull={onLoadFull}
         />
@@ -389,6 +610,8 @@ export function FlowInspector({ detail, onMock, decode, onLoadFull }: Props) {
         <MessageView
           key={`${detail.id}-request`}
           msg={detail.request}
+          side="request"
+          path={detail.path}
           decode={decode}
           onLoadFull={onLoadFull}
         />

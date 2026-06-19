@@ -2,7 +2,9 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import { api } from "../ipc";
 import type { ProxySettings } from "../types";
+import { useToast } from "../toast";
 import { ColumnsSettings } from "./ColumnsSettings";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { useModalDialog } from "./useModalDialog";
 
 interface SectionProps {
@@ -283,27 +285,25 @@ function CertificatesSection({
   running: boolean;
   onCaChanged: () => void;
 }) {
-  const [msg, setMsg] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const notify = useToast();
+  const [pendingRegen, setPendingRegen] = useState(false);
 
   async function doExport() {
-    setErr(null);
-    setMsg(null);
     try {
-      await api.exportCa();
+      const ok = await api.exportCa();
+      if (ok) notify("success", "CA certificate exported");
     } catch (e) {
-      setErr(String(e));
+      notify("error", String(e));
     }
   }
   async function doRegenerate() {
-    setErr(null);
-    setMsg(null);
+    setPendingRegen(false);
     try {
       await api.regenerateCa();
       onCaChanged();
-      setMsg("New CA generated — re-trust it (CA certificate button) and restart apps.");
+      notify("success", "New CA generated — re-trust it (CA cert button) and restart apps.");
     } catch (e) {
-      setErr(String(e));
+      notify("error", String(e));
     }
   }
 
@@ -312,7 +312,7 @@ function CertificatesSection({
       <h4>Certificates</h4>
       <p className="muted small">
         Germi signs intercepted HTTPS with its own root CA. Trust it once — the
-        <strong> CA certificate</strong> toolbar button has the instructions.
+        <strong> CA cert</strong> toolbar button has the instructions.
       </p>
       <div className="col-add-list">
         <button className="btn" onClick={doExport}>
@@ -320,7 +320,7 @@ function CertificatesSection({
         </button>
         <button
           className="btn danger"
-          onClick={doRegenerate}
+          onClick={() => setPendingRegen(true)}
           disabled={running}
           title={running ? "Stop the proxy first" : undefined}
         >
@@ -328,8 +328,16 @@ function CertificatesSection({
         </button>
       </div>
       {running && <p className="muted small">Stop the proxy to regenerate the CA.</p>}
-      {msg && <p className="small settings-ok">{msg}</p>}
-      {err && <p className="settings-err">{err}</p>}
+      {pendingRegen && (
+        <ConfirmDialog
+          title="Regenerate the root CA?"
+          message="This replaces the current CA with a new one. Every machine that trusted the old CA must re-trust the new one, and running apps must restart. This can't be undone."
+          confirmLabel="Regenerate CA"
+          danger
+          onConfirm={doRegenerate}
+          onCancel={() => setPendingRegen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -422,6 +430,15 @@ interface Props {
   onClose: () => void;
 }
 
+function loadSection(): string {
+  try {
+    const saved = localStorage.getItem("germi.settingsSection");
+    return saved && SECTIONS.some((s) => s.id === saved) ? saved : SECTIONS[0].id;
+  } catch {
+    return SECTIONS[0].id;
+  }
+}
+
 export function SettingsDialog({
   settings,
   onChange,
@@ -432,25 +449,35 @@ export function SettingsDialog({
   onCaChanged,
   onClose,
 }: Props) {
+  const notify = useToast();
   const ref = useModalDialog(onClose);
-  const [active, setActive] = useState(SECTIONS[0].id);
-  const [err, setErr] = useState<string | null>(null);
+  const [active, setActive] = useState(loadSection);
+  const [pendingImport, setPendingImport] = useState(false);
   const section = SECTIONS.find((s) => s.id === active) ?? SECTIONS[0];
 
-  async function exportSettings() {
-    setErr(null);
+  useEffect(() => {
     try {
-      await api.exportSettings();
+      localStorage.setItem("germi.settingsSection", active);
+    } catch {
+      /* ignore quota / privacy-mode errors */
+    }
+  }, [active]);
+
+  async function exportSettings() {
+    try {
+      const ok = await api.exportSettings();
+      if (ok) notify("success", "Settings exported");
     } catch (e) {
-      setErr(String(e));
+      notify("error", String(e));
     }
   }
   async function importSettings() {
-    setErr(null);
+    setPendingImport(false);
     try {
       onImportApplied(await api.importSettings());
+      notify("success", "Settings imported");
     } catch (e) {
-      setErr(String(e));
+      notify("error", String(e));
     }
   }
 
@@ -493,18 +520,31 @@ export function SettingsDialog({
 
       <div className="settings-foot">
         <div className="settings-foot-left">
-          <button className="btn" onClick={importSettings} title="Import settings from a JSON file">
+          <button
+            className="btn"
+            onClick={() => setPendingImport(true)}
+            title="Import settings from a JSON file (overwrites current settings)"
+          >
             Import…
           </button>
           <button className="btn" onClick={exportSettings} title="Export settings to a JSON file">
             Export…
           </button>
         </div>
-        {err && <span className="settings-err">{err}</span>}
         <button className="btn primary" onClick={() => ref.current?.close()}>
           Done
         </button>
       </div>
+
+      {pendingImport && (
+        <ConfirmDialog
+          title="Import settings?"
+          message="This overwrites all current proxy settings (port, exclusions, capture filter, throttling, columns) with the contents of the file you pick. This can't be undone."
+          confirmLabel="Choose file & import"
+          onConfirm={importSettings}
+          onCancel={() => setPendingImport(false)}
+        />
+      )}
     </dialog>
   );
 }

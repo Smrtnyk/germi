@@ -1,4 +1,6 @@
-import { useAppState, type RightTab } from "./appState";
+import { useEffect, useMemo, useRef, useState } from "react";
+
+import { useAppState, type RightMode, type RightTab } from "./appState";
 import type { AutoResponder, CaInfo, FlowDetail, FlowSummary, ProxySettings } from "./types";
 import { Toolbar } from "./components/Toolbar";
 import { FilterChips } from "./components/FilterChips";
@@ -8,14 +10,124 @@ import { AutoresponderPanel } from "./components/AutoresponderPanel";
 import { CaDialog } from "./components/CaDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { StatusBar } from "./components/StatusBar";
+import { ConfirmDialog } from "./components/ConfirmDialog";
+import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
+import { Shortcuts } from "./components/Shortcuts";
+import { ToastHost, ToastProvider } from "./toast";
 
-function ErrorBar({ error, onDismiss }: { error: string | null; onDismiss: () => void }) {
-  if (!error) return null;
-  return (
-    <div className="error-bar" onClick={onDismiss}>
-      {error} <span className="dismiss">(dismiss)</span>
-    </div>
-  );
+type AppStateValue = ReturnType<typeof useAppState>;
+
+function buildActions(s: AppStateValue): PaletteAction[] {
+  const ar = s.ar.autoresponder;
+  const actions: PaletteAction[] = [
+    {
+      id: "proxy",
+      group: "Proxy",
+      label: s.proxy.running ? "Stop proxy" : "Start proxy",
+      disabled: s.proxy.busy,
+      run: s.proxy.toggleProxy,
+    },
+    {
+      id: "system-proxy",
+      group: "Proxy",
+      label: s.proxy.systemProxy ? "Disable system proxy" : "Enable system proxy",
+      disabled: !s.proxy.running,
+      run: s.proxy.toggleSystemProxy,
+    },
+    {
+      id: "focus-filter",
+      group: "Traffic",
+      label: "Focus filter",
+      shortcut: "/",
+      run: () => s.filterInputRef.current?.focus(),
+    },
+    { id: "clear", group: "Traffic", label: "Clear traffic", run: s.requestClearTraffic },
+    {
+      id: "clear-selection",
+      group: "Traffic",
+      label: "Clear selection",
+      run: s.selection.clearSelection,
+    },
+    {
+      id: "save",
+      group: "Session",
+      label: "Save session…",
+      shortcut: "Ctrl/⌘ S",
+      run: s.session.saveSession,
+    },
+    {
+      id: "open",
+      group: "Session",
+      label: "Open session…",
+      shortcut: "Ctrl/⌘ O",
+      run: s.session.openSession,
+    },
+    { id: "import", group: "Session", label: "Import HAR / SAZ…", run: s.session.importArchive },
+    {
+      id: "show-inspector",
+      group: "View",
+      label: "Show Inspector",
+      shortcut: "Ctrl/⌘ 1",
+      run: () => s.setRightTab("inspector"),
+    },
+    {
+      id: "show-auto",
+      group: "View",
+      label: "Show Autoresponder",
+      shortcut: "Ctrl/⌘ 2",
+      run: () => s.setRightTab("autoresponder"),
+    },
+    {
+      id: "split",
+      group: "View",
+      label: s.rightMode === "split" ? "Use single panel" : "Split panels",
+      run: () => s.setRightMode(s.rightMode === "split" ? "single" : "split"),
+    },
+    {
+      id: "decode",
+      group: "View",
+      label: s.decode ? "Disable body decode" : "Enable body decode",
+      run: () => s.setDecode((d) => !d),
+    },
+    {
+      id: "theme",
+      group: "View",
+      label: s.theme === "dark" ? "Switch to light theme" : "Switch to dark theme",
+      run: s.toggleTheme,
+    },
+    {
+      id: "settings",
+      group: "App",
+      label: "Open Settings…",
+      run: () => s.settings.setSettingsOpen(true),
+    },
+    { id: "ca", group: "App", label: "CA certificate…", run: () => s.setCaOpen(true) },
+  ];
+  for (const sc of ar.scenarios) {
+    actions.push({
+      id: `scenario-${sc.id}`,
+      group: "Scenarios",
+      label: `Activate scenario: ${sc.name}`,
+      disabled: sc.id === ar.activeScenarioId,
+      run: () => s.ar.saveAutoresponder({ ...ar, activeScenarioId: sc.id }),
+    });
+  }
+  if (ar.activeScenarioId !== null) {
+    actions.push({
+      id: "scenario-off",
+      group: "Scenarios",
+      label: "Autoresponder: turn off",
+      run: () => s.ar.saveAutoresponder({ ...ar, activeScenarioId: null }),
+    });
+  }
+  return actions;
+}
+
+function isTyping(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
 }
 
 function SelectionBar({
@@ -76,8 +188,12 @@ function SelectionBar({
 function RightPanel({
   rightTab,
   setRightTab,
+  rightMode,
+  setRightMode,
   activeScenario,
   detail,
+  summary,
+  loading,
   decode,
   onMock,
   onLoadFull,
@@ -91,8 +207,12 @@ function RightPanel({
 }: {
   rightTab: RightTab;
   setRightTab: (tab: RightTab) => void;
+  rightMode: RightMode;
+  setRightMode: (mode: RightMode) => void;
   activeScenario: string | null;
   detail: FlowDetail | null;
+  summary: FlowSummary | undefined;
+  loading: boolean;
   decode: boolean;
   onMock: (detail: FlowDetail) => void;
   onLoadFull: () => void;
@@ -104,41 +224,66 @@ function RightPanel({
   onExportRules: (scenarioId: string | null) => void;
   onImportRules: (replace: boolean) => void;
 }) {
+  const split = rightMode === "split";
+  const inspectorVisible = split || rightTab === "inspector";
+  const autoVisible = split || rightTab === "autoresponder";
+
+  const inspectorEl = (
+    <FlowInspector
+      detail={detail}
+      summary={summary}
+      loading={loading}
+      onMock={onMock}
+      decode={decode}
+      onLoadFull={onLoadFull}
+    />
+  );
+  const autoEl = (
+    <AutoresponderPanel
+      ar={autoresponder}
+      onChange={onAutoresponderChange}
+      selectRuleId={selectRuleId}
+      onResetState={onResetState}
+      ruleHits={ruleHits}
+      onExportRules={onExportRules}
+      onImportRules={onImportRules}
+    />
+  );
+
   return (
     <div className="right-panel">
       <div className="right-header">
-        <div className="tabs">
-          <button
-            className={rightTab === "inspector" ? "tab active" : "tab"}
-            onClick={() => setRightTab("inspector")}
-          >
-            Inspector
-          </button>
-          <button
-            className={rightTab === "autoresponder" ? "tab active" : "tab"}
-            onClick={() => setRightTab("autoresponder")}
-          >
-            Autoresponder
-            {activeScenario && <span className="live-dot" />}
-          </button>
-        </div>
+        {!split && (
+          <div className="tabs">
+            <button
+              className={rightTab === "inspector" ? "tab active" : "tab"}
+              onClick={() => setRightTab("inspector")}
+            >
+              Inspector
+            </button>
+            <button
+              className={rightTab === "autoresponder" ? "tab active" : "tab"}
+              onClick={() => setRightTab("autoresponder")}
+            >
+              Autoresponder
+              {activeScenario && <span className="live-dot" />}
+            </button>
+          </div>
+        )}
+        {split && <span className="split-label">Inspector + Autoresponder</span>}
+        <div className="spacer" />
+        <button
+          className={split ? "btn active small" : "btn ghost small"}
+          title={split ? "Show one panel at a time" : "Show Inspector and Autoresponder together"}
+          onClick={() => setRightMode(split ? "single" : "split")}
+        >
+          ⊟ Split
+        </button>
       </div>
 
-      <div className="right-content">
-        <div className={rightTab === "inspector" ? "pane" : "pane hidden"}>
-          <FlowInspector detail={detail} onMock={onMock} decode={decode} onLoadFull={onLoadFull} />
-        </div>
-        <div className={rightTab === "autoresponder" ? "pane" : "pane hidden"}>
-          <AutoresponderPanel
-            ar={autoresponder}
-            onChange={onAutoresponderChange}
-            selectRuleId={selectRuleId}
-            onResetState={onResetState}
-            ruleHits={ruleHits}
-            onExportRules={onExportRules}
-            onImportRules={onImportRules}
-          />
-        </div>
+      <div className={`right-content ${split ? "split" : ""}`}>
+        <div className={inspectorVisible ? "pane" : "pane hidden"}>{inspectorEl}</div>
+        <div className={autoVisible ? "pane" : "pane hidden"}>{autoEl}</div>
       </div>
     </div>
   );
@@ -192,113 +337,202 @@ function AppDialogs({
 
 export function App() {
   const s = useAppState();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [cheatOpen, setCheatOpen] = useState(false);
+
+  const actions = useMemo(() => buildActions(s), [s]);
+
+  const keyRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  keyRef.current = (e: KeyboardEvent) => {
+    const mod = e.metaKey || e.ctrlKey;
+    const k = e.key.toLowerCase();
+    if (mod && k === "k") {
+      e.preventDefault();
+      setPaletteOpen((o) => !o);
+      return;
+    }
+    if (mod && k === "f") {
+      e.preventDefault();
+      s.filterInputRef.current?.focus();
+      return;
+    }
+    if (mod && k === "s") {
+      e.preventDefault();
+      void s.session.saveSession();
+      return;
+    }
+    if (mod && k === "o") {
+      e.preventDefault();
+      void s.session.openSession();
+      return;
+    }
+    if (mod && k === "1") {
+      e.preventDefault();
+      s.setRightTab("inspector");
+      return;
+    }
+    if (mod && k === "2") {
+      e.preventDefault();
+      s.setRightTab("autoresponder");
+      return;
+    }
+    if (mod) return;
+    if (isTyping(e.target)) return;
+    if (e.key === "/") {
+      e.preventDefault();
+      s.filterInputRef.current?.focus();
+    } else if (e.key === "?") {
+      e.preventDefault();
+      setCheatOpen(true);
+    }
+  };
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => keyRef.current(e);
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   return (
-    <div className="app">
-      <Toolbar
-        running={s.proxy.running}
-        port={s.settings.settings.port}
-        onPortChange={(p) => s.saveSettings({ ...s.settings.settings, port: p })}
-        onToggleProxy={s.proxy.toggleProxy}
-        systemProxy={s.proxy.systemProxy}
-        onToggleSystemProxy={s.proxy.toggleSystemProxy}
-        onInstallCa={() => s.setCaOpen(true)}
-        onImport={s.session.importArchive}
-        decode={s.decode}
-        onToggleDecode={() => s.setDecode((d) => !d)}
-        onOpenSettings={() => s.settings.setSettingsOpen(true)}
-        onOpenSession={s.session.openSession}
-        onSaveSession={s.session.saveSession}
-        onClear={s.clearTraffic}
-        filter={s.filtering.filter}
-        onFilterChange={s.filtering.setFilter}
-      />
-
-      <ErrorBar error={s.error} onDismiss={() => s.setError(null)} />
-
-      <main
-        className="body workbench"
-        style={{
-          gridTemplateColumns: `minmax(0, ${s.trafficResize.size}px) 6px minmax(440px, 1fr)`,
-        }}
-      >
-        <div className="traffic-col">
-          <FilterChips
-            typeChips={s.filtering.typeChips}
-            statusChips={s.filtering.statusChips}
-            onToggleType={s.filtering.toggleTypeChip}
-            onToggleStatus={s.filtering.toggleStatusChip}
-            searching={s.filtering.searching}
-            matchCount={s.matchCount}
-            total={s.flowStore.flows.length}
-          />
-          <SelectionBar
-            flows={s.flowStore.flows}
-            selectedIds={s.selection.selectedIds}
-            setSelectedIds={s.selection.setSelectedIds}
-            autoresponder={s.ar.autoresponder}
-            pickScenarioId={s.ar.pickScenarioId}
-            setPickScenarioId={s.ar.setPickScenarioId}
-            onMock={s.ar.mockFlows}
-          />
-          <TrafficList
-            flows={s.flowStore.flows}
-            columns={s.columns.visibleColumns}
-            matchedIds={s.filtering.matchedIds}
-            selectedId={s.selection.selectedId}
-            selectedIds={s.selection.selectedIds}
-            onRowClick={s.handleRowClick}
-            onContentWidth={s.setTrafficMin}
-            onCommentEdit={s.flowStore.editComment}
-          />
-        </div>
-
-        <div
-          className="resizer"
-          onPointerDown={s.trafficResize.onPointerDown}
-          title="Drag to resize"
-        />
-
-        <RightPanel
-          rightTab={s.rightTab}
-          setRightTab={s.setRightTab}
-          activeScenario={s.activeScenario}
-          detail={s.inspector.detail}
+    <ToastProvider value={s.notify}>
+      <div className="app">
+        <Toolbar
+          running={s.proxy.running}
+          busy={s.proxy.busy}
+          port={s.settings.settings.port}
+          onPortChange={(p) => s.saveSettings({ ...s.settings.settings, port: p })}
+          onToggleProxy={s.proxy.toggleProxy}
+          systemProxy={s.proxy.systemProxy}
+          onToggleSystemProxy={s.proxy.toggleSystemProxy}
+          onInstallCa={() => s.setCaOpen(true)}
+          onImport={s.session.importArchive}
           decode={s.decode}
-          onMock={(d) => void s.ar.mockFlows([d.id], s.ar.autoresponder.activeScenarioId)}
-          onLoadFull={() => s.setFullBody(true)}
-          autoresponder={s.ar.autoresponder}
-          onAutoresponderChange={s.ar.saveAutoresponder}
-          selectRuleId={s.ar.selectRuleId}
-          onResetState={s.ar.resetRuleState}
-          ruleHits={s.ar.ruleHits}
-          onExportRules={s.ar.exportRules}
-          onImportRules={s.ar.importRules}
+          onToggleDecode={() => s.setDecode((d) => !d)}
+          onOpenSettings={() => s.settings.setSettingsOpen(true)}
+          onOpenSession={s.session.openSession}
+          onSaveSession={s.session.saveSession}
+          onClear={s.requestClearTraffic}
+          filter={s.filtering.filter}
+          onFilterChange={s.filtering.setFilter}
+          filterInputRef={s.filterInputRef}
+          theme={s.theme}
+          onToggleTheme={s.toggleTheme}
         />
-      </main>
 
-      <StatusBar
-        running={s.proxy.running}
-        port={s.settings.settings.port}
-        allowRemote={s.settings.settings.allowRemote}
-        flowCount={s.flowStore.orderRef.current.length}
-        activeScenario={s.activeScenario}
-      />
+        <main
+          className="body workbench"
+          style={{
+            gridTemplateColumns: `minmax(0, ${s.trafficResize.size}px) 6px minmax(440px, 1fr)`,
+          }}
+        >
+          <div className="traffic-col">
+            <FilterChips
+              typeChips={s.filtering.typeChips}
+              statusChips={s.filtering.statusChips}
+              onToggleType={s.filtering.toggleTypeChip}
+              onToggleStatus={s.filtering.toggleStatusChip}
+              onClearAll={s.filtering.resetFilter}
+              searching={s.filtering.searching}
+              matchCount={s.matchCount}
+              total={s.flowStore.flows.length}
+            />
+            <SelectionBar
+              flows={s.flowStore.flows}
+              selectedIds={s.selection.selectedIds}
+              setSelectedIds={s.selection.setSelectedIds}
+              autoresponder={s.ar.autoresponder}
+              pickScenarioId={s.ar.pickScenarioId}
+              setPickScenarioId={s.ar.setPickScenarioId}
+              onMock={s.ar.mockFlows}
+            />
+            <TrafficList
+              flows={s.flowStore.flows}
+              columns={s.columns.visibleColumns}
+              matchedIds={s.filtering.matchedIds}
+              selectedId={s.selection.selectedId}
+              selectedIds={s.selection.selectedIds}
+              onRowClick={s.handleRowClick}
+              onKeySelect={s.handleKeySelect}
+              onClearSelection={s.selection.clearSelection}
+              onContentWidth={s.setTrafficMin}
+              onCommentEdit={s.flowStore.editComment}
+              onMockFlow={s.mockFlow}
+              onFilterToHost={s.filterToHost}
+              onExcludeHost={s.excludeHost}
+              onCopyCurl={s.copyFlowAsCurl}
+              onCopyBody={s.copyFlowBody}
+            />
+          </div>
 
-      <AppDialogs
-        caOpen={s.caOpen}
-        caInfo={s.caInfo}
-        onCaClose={() => s.setCaOpen(false)}
-        settingsOpen={s.settings.settingsOpen}
-        settings={s.settings.settings}
-        onSettingsChange={s.saveSettings}
-        onSettingsImported={s.applyImportedSettings}
-        columnOrder={s.columns.columnOrder}
-        onColumnOrderChange={s.columns.setColumnOrder}
-        running={s.proxy.running}
-        onCaChanged={s.refreshCa}
-        onSettingsClose={() => s.settings.setSettingsOpen(false)}
-      />
-    </div>
+          <div
+            className="resizer"
+            onPointerDown={s.trafficResize.onPointerDown}
+            title="Drag to resize"
+          />
+
+          <RightPanel
+            rightTab={s.rightTab}
+            setRightTab={s.setRightTab}
+            rightMode={s.rightMode}
+            setRightMode={s.setRightMode}
+            activeScenario={s.activeScenario}
+            detail={s.inspector.detail}
+            summary={s.selectedSummary}
+            loading={s.inspector.loading}
+            decode={s.decode}
+            onMock={(d) => void s.ar.mockFlows([d.id], s.ar.autoresponder.activeScenarioId)}
+            onLoadFull={() => s.setFullBody(true)}
+            autoresponder={s.ar.autoresponder}
+            onAutoresponderChange={s.ar.saveAutoresponder}
+            selectRuleId={s.ar.selectRuleId}
+            onResetState={s.ar.resetRuleState}
+            ruleHits={s.ar.ruleHits}
+            onExportRules={s.ar.exportRules}
+            onImportRules={s.ar.importRules}
+          />
+        </main>
+
+        <StatusBar
+          running={s.proxy.running}
+          port={s.settings.settings.port}
+          allowRemote={s.settings.settings.allowRemote}
+          flowCount={s.flowStore.orderRef.current.length}
+          activeScenario={s.activeScenario}
+          onOpenPalette={() => setPaletteOpen(true)}
+          onShowShortcuts={() => setCheatOpen(true)}
+        />
+
+        <AppDialogs
+          caOpen={s.caOpen}
+          caInfo={s.caInfo}
+          onCaClose={() => s.setCaOpen(false)}
+          settingsOpen={s.settings.settingsOpen}
+          settings={s.settings.settings}
+          onSettingsChange={s.saveSettings}
+          onSettingsImported={s.applyImportedSettings}
+          columnOrder={s.columns.columnOrder}
+          onColumnOrderChange={s.columns.setColumnOrder}
+          running={s.proxy.running}
+          onCaChanged={s.refreshCa}
+          onSettingsClose={() => s.settings.setSettingsOpen(false)}
+        />
+
+        {s.confirmClear && (
+          <ConfirmDialog
+            title="Clear all captured traffic?"
+            message={`Permanently discard all ${s.flowStore.orderRef.current.length} captured flow(s)? Traffic is never auto-saved, so this can't be undone — use Save first if you want to keep it.`}
+            confirmLabel="Clear traffic"
+            danger
+            onConfirm={s.confirmClearTraffic}
+            onCancel={() => s.setConfirmClear(false)}
+          />
+        )}
+
+        {paletteOpen && <CommandPalette actions={actions} onClose={() => setPaletteOpen(false)} />}
+        {cheatOpen && <Shortcuts onClose={() => setCheatOpen(false)} />}
+      </div>
+
+      <ToastHost toasts={s.toasts} onDismiss={s.dismissToast} />
+    </ToastProvider>
   );
 }

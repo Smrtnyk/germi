@@ -5,9 +5,19 @@ interface Props {
   allowRemote: boolean;
   flowCount: number;
   activeScenario: string | null;
+  onOpenPalette: () => void;
+  onShowShortcuts: () => void;
 }
 
-export function StatusBar({ running, port, allowRemote, flowCount, activeScenario }: Props) {
+export function StatusBar({
+  running,
+  port,
+  allowRemote,
+  flowCount,
+  activeScenario,
+  onOpenPalette,
+  onShowShortcuts,
+}: Props) {
   const host = allowRemote ? "0.0.0.0" : "127.0.0.1";
   return (
     <footer className="statusbar">
@@ -26,6 +36,13 @@ export function StatusBar({ running, port, allowRemote, flowCount, activeScenari
           <span className="muted">Off</span>
         )}
       </span>
+      <span className="sep">·</span>
+      <button className="status-key" onClick={onOpenPalette} title="Command palette (Ctrl/⌘ K)">
+        ⌘K
+      </button>
+      <button className="status-key" onClick={onShowShortcuts} title="Keyboard shortcuts (?)">
+        ?
+      </button>
     </footer>
   );
 }

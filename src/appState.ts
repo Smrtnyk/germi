@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useDeferredValue,
   useEffect,
   useMemo,
@@ -12,6 +13,8 @@ import { api, subscribeFlows } from "./ipc";
 import { parseFilter, statusClass, type BodyTerm, type ParsedFilter } from "./filter";
 import { resolveColumns, DEFAULT_COLUMNS } from "./columns";
 import { useResizable } from "./useResizable";
+import { useToasts, type Notify } from "./toast";
+import { toCurl } from "./curl";
 import type {
   AutoResponder,
   CaInfo,
@@ -23,8 +26,26 @@ import type {
 } from "./types";
 
 export type RightTab = "inspector" | "autoresponder";
+export type RightMode = "single" | "split";
 
 type SetError = (value: string | null) => void;
+
+function loadString<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  try {
+    const v = localStorage.getItem(key);
+    return v && (allowed as readonly string[]).includes(v) ? (v as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function persist(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* ignore quota / privacy-mode errors */
+  }
+}
 
 function applyFlowEvents(
   map: Map<string, FlowSummary>,
@@ -335,6 +356,12 @@ function useTrafficFilter(flows: FlowSummary[], setError: SetError) {
     [hasFilter, summaryMatched, bodyMatchIds, deferredFilter],
   );
 
+  function resetFilter() {
+    setFilter("");
+    setTypeChips(new Set());
+    setStatusChips(new Set());
+  }
+
   return {
     filter,
     setFilter,
@@ -342,6 +369,7 @@ function useTrafficFilter(flows: FlowSummary[], setError: SetError) {
     statusChips,
     toggleTypeChip: (k: ResourceKind) => setTypeChips((prev) => toggledSet(prev, k)),
     toggleStatusChip: (c: string) => setStatusChips((prev) => toggledSet(prev, c)),
+    resetFilter,
     matchedIds,
     searching,
   };
@@ -372,6 +400,22 @@ function useSelection(flows: FlowSummary[]) {
     }
   }
 
+  function selectByKeyboard(id: string, extend: boolean) {
+    if (extend && anchorRef.current) {
+      const range = rangeSelection(
+        flows.map((f) => f.id),
+        anchorRef.current,
+        id,
+      );
+      if (range) setSelectedIds(range);
+      setSelectedId(id);
+    } else {
+      setSelectedIds(new Set([id]));
+      setSelectedId(id);
+      anchorRef.current = id;
+    }
+  }
+
   function clearSelection() {
     setSelectedId(null);
     setSelectedIds(new Set());
@@ -382,6 +426,7 @@ function useSelection(flows: FlowSummary[]) {
     selectedIds,
     setSelectedIds,
     onRowClick,
+    selectByKeyboard,
     clearSelection,
   };
 }
@@ -393,35 +438,56 @@ function useFlowDetail(
   selectedSummary: FlowSummary | undefined,
 ) {
   const [detail, setDetail] = useState<FlowDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  // Track what the showing detail is for, so a background re-fetch (status /
+  // duration completing) doesn't blank the pane — only switching flows does.
+  const shownIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!selectedId) {
       setDetail(null);
+      setLoading(false);
+      shownIdRef.current = null;
       return;
     }
+    if (shownIdRef.current !== selectedId) {
+      setDetail(null);
+      setLoading(true);
+    }
     let active = true;
-    void api.getFlow(selectedId, decode, fullBody).then((d) => {
-      if (active) setDetail(d);
-    });
+    void api
+      .getFlow(selectedId, decode, fullBody)
+      .then((d) => {
+        if (!active) return;
+        setDetail(d);
+        setLoading(false);
+        shownIdRef.current = selectedId;
+      })
+      .catch(() => {
+        if (active) setLoading(false);
+      });
     return () => {
       active = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, decode, fullBody, selectedSummary?.status, selectedSummary?.durationMs]);
 
-  return { detail, setDetail };
+  return { detail, setDetail, loading };
 }
 
 function useProxyControl(
   settings: ProxySettings,
   setError: SetError,
   onPortBound: (port: number) => void,
+  notify: Notify,
 ) {
   const [running, setRunning] = useState(false);
   const [systemProxy, setSystemProxy] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   async function toggleProxy() {
-    setError(null);
+    if (busy) return;
+    setBusy(true);
     try {
       if (running) {
         if (systemProxy) {
@@ -434,14 +500,19 @@ function useProxyControl(
         const boundPort = await api.startProxy(settings.port, settings.allowRemote);
         if (boundPort !== settings.port) onPortBound(boundPort);
         setRunning(true);
+        notify(
+          "success",
+          `Proxy listening on ${settings.allowRemote ? "0.0.0.0" : "127.0.0.1"}:${boundPort}`,
+        );
       }
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBusy(false);
     }
   }
 
   async function toggleSystemProxy() {
-    setError(null);
     try {
       if (systemProxy) {
         await api.clearSystemProxy();
@@ -449,13 +520,14 @@ function useProxyControl(
       } else {
         await api.setSystemProxy(settings.port);
         setSystemProxy(true);
+        notify("info", "System proxy now routed through Germi");
       }
     } catch (e) {
       setError(String(e));
     }
   }
 
-  return { running, setRunning, systemProxy, toggleProxy, toggleSystemProxy };
+  return { running, setRunning, systemProxy, busy, toggleProxy, toggleSystemProxy };
 }
 
 function useSettings() {
@@ -504,7 +576,8 @@ function useRuleHits(activeScenarioId: string | null, active: boolean, setError:
 function useAutoresponder(
   setError: SetError,
   setRightTab: (tab: RightTab) => void,
-  rightTab: RightTab,
+  notify: Notify,
+  autoresponderActive: boolean,
 ) {
   const [autoresponder, setAutoresponder] = useState<AutoResponder>({
     scenarios: [],
@@ -516,7 +589,7 @@ function useAutoresponder(
   const pendingSave = useRef<AutoResponder | null>(null);
   const { ruleHits, resetRuleState } = useRuleHits(
     autoresponder.activeScenarioId,
-    rightTab === "autoresponder",
+    autoresponderActive,
     setError,
   );
 
@@ -563,6 +636,8 @@ function useAutoresponder(
       setAutoresponder(result.autoresponder);
       setSelectRuleId(result.newRuleIds[0] ?? null);
       setRightTab("autoresponder");
+      const n = result.newRuleIds.length;
+      notify("success", n > 1 ? `Created ${plural(n, "mock rule")}` : "Mock rule created");
       return true;
     } catch (e) {
       setError(String(e));
@@ -571,21 +646,23 @@ function useAutoresponder(
   }
 
   async function exportRules(scenarioId: string | null) {
-    setError(null);
     await flushSave();
     try {
-      await api.exportRules(scenarioId);
+      const ok = await api.exportRules(scenarioId);
+      if (ok) notify("success", scenarioId ? "Scenario exported" : "All scenarios exported");
     } catch (e) {
       setError(String(e));
     }
   }
 
   async function importRules(replace: boolean) {
-    setError(null);
     cancelSave();
     try {
       const n = await api.importRules(replace);
-      if (n > 0) setAutoresponder(await api.getAutoresponder());
+      if (n > 0) {
+        setAutoresponder(await api.getAutoresponder());
+        notify("success", `Imported ${plural(n, "scenario")}`);
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -621,28 +698,32 @@ function usePersistentColumns(headerColumns: string[]) {
   return { columnOrder, setColumnOrder, visibleColumns };
 }
 
-function useSession(setError: SetError, onOpened: () => void) {
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+function useSession(setError: SetError, onOpened: () => void, notify: Notify) {
   async function importArchive() {
-    setError(null);
     try {
-      await api.importArchive();
+      const n = await api.importArchive();
+      if (n > 0) notify("success", `Imported ${plural(n, "flow")} from archive`);
     } catch (e) {
       setError(String(e));
     }
   }
   async function saveSession() {
-    setError(null);
     try {
-      await api.saveSession();
+      const ok = await api.saveSession();
+      if (ok) notify("success", "Session saved");
     } catch (e) {
       setError(String(e));
     }
   }
   async function openSession() {
-    setError(null);
     try {
-      await api.openSession();
+      const n = await api.openSession();
       onOpened();
+      if (n >= 0) notify("success", `Opened session — ${plural(n, "flow")}`);
     } catch (e) {
       setError(String(e));
     }
@@ -651,13 +732,46 @@ function useSession(setError: SetError, onOpened: () => void) {
 }
 
 export function useAppState() {
-  const [error, setError] = useState<string | null>(null);
-  const [rightTab, setRightTab] = useState<RightTab>("inspector");
+  const toasts = useToasts();
+  const notify = toasts.notify;
+  const setError = useCallback<SetError>(
+    (value) => {
+      if (value) notify("error", value);
+    },
+    [notify],
+  );
+
+  const [rightTab, setRightTabState] = useState<RightTab>(() =>
+    loadString("germi.rightTab", ["inspector", "autoresponder"] as const, "inspector"),
+  );
+  const setRightTab = useCallback((tab: RightTab) => {
+    setRightTabState(tab);
+    persist("germi.rightTab", tab);
+  }, []);
+  const [rightMode, setRightModeState] = useState<RightMode>(() =>
+    loadString("germi.rightMode", ["single", "split"] as const, "single"),
+  );
+  const setRightMode = useCallback((mode: RightMode) => {
+    setRightModeState(mode);
+    persist("germi.rightMode", mode);
+  }, []);
+
   const [decode, setDecode] = useState(true);
   const [fullBody, setFullBody] = useState(false);
   const [caInfo, setCaInfo] = useState<CaInfo | null>(null);
   const [caOpen, setCaOpen] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
   const [trafficMin, setTrafficMin] = useState(640);
+  const filterInputRef = useRef<HTMLInputElement>(null);
+
+  const [theme, setTheme] = useState<"dark" | "light">(() =>
+    loadString("germi.theme", ["dark", "light"] as const, "dark"),
+  );
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    persist("germi.theme", theme);
+  }, [theme]);
+  const toggleTheme = useCallback(() => setTheme((t) => (t === "dark" ? "light" : "dark")), []);
 
   const settings = useSettings();
   const flowStore = useFlowStore(settings.settings.maxFlows, setError);
@@ -667,15 +781,23 @@ export function useAppState() {
     ? flowStore.flowsRef.current.get(selection.selectedId)
     : undefined;
   const inspector = useFlowDetail(selection.selectedId, decode, fullBody, selectedSummary);
-  const proxy = useProxyControl(settings.settings, setError, (port) =>
-    saveSettings({ ...settings.settings, port }),
+  const proxy = useProxyControl(
+    settings.settings,
+    setError,
+    (port) => saveSettings({ ...settings.settings, port }),
+    notify,
   );
-  const ar = useAutoresponder(setError, setRightTab, rightTab);
+  const autoresponderActive = rightTab === "autoresponder" || rightMode === "split";
+  const ar = useAutoresponder(setError, setRightTab, notify, autoresponderActive);
   const columns = usePersistentColumns(settings.settings.headerColumns);
-  const session = useSession(setError, () => {
-    selection.clearSelection();
-    inspector.setDetail(null);
-  });
+  const session = useSession(
+    setError,
+    () => {
+      selection.clearSelection();
+      inspector.setDetail(null);
+    },
+    notify,
+  );
   const trafficResize = useResizable({
     initial: 760,
     min: trafficMin,
@@ -692,6 +814,8 @@ export function useAppState() {
       loadInitialFlows: flowStore.loadInitial,
       setError,
     });
+    const focusTimer = window.setTimeout(() => filterInputRef.current?.focus(), 60);
+    return () => clearTimeout(focusTimer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -710,13 +834,76 @@ export function useAppState() {
   function handleRowClick(id: string, e: ReactMouseEvent) {
     setFullBody(false);
     selection.onRowClick(id, e);
-    setRightTab("inspector");
+    // In split mode both panes are visible, so don't yank the user out of the
+    // rule they're editing; only force the Inspector tab in single mode.
+    if (rightMode === "single") setRightTab("inspector");
+  }
+
+  function handleKeySelect(id: string, extend: boolean) {
+    setFullBody(false);
+    selection.selectByKeyboard(id, extend);
+    if (rightMode === "single" && !extend) setRightTab("inspector");
+  }
+
+  function mockFlow(id: string) {
+    void ar.mockFlows([id], ar.autoresponder.activeScenarioId);
+  }
+
+  function filterToHost(host: string) {
+    filtering.setFilter(`host:${host}`);
+    filterInputRef.current?.focus();
+  }
+
+  function excludeHost(host: string) {
+    const cur = settings.settings.excludedHosts;
+    if (cur.includes(host)) {
+      notify("info", `${host} is already excluded`);
+      return;
+    }
+    saveSettings({ ...settings.settings, excludedHosts: [...cur, host] });
+    notify("success", `Excluded ${host} from interception`);
+  }
+
+  async function copyFlowAsCurl(id: string) {
+    try {
+      const d = await api.getFlow(id, true, true);
+      if (!d) return;
+      await navigator.clipboard.writeText(toCurl(d));
+      notify("success", "cURL command copied");
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function copyFlowBody(id: string) {
+    try {
+      const d = await api.getFlow(id, decode, true);
+      const body = d?.response?.bodyText || d?.request.bodyText || "";
+      if (!body) {
+        notify("info", "No body to copy");
+        return;
+      }
+      await navigator.clipboard.writeText(body);
+      notify("success", "Body copied");
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   function clearTraffic() {
     void api.clearFlows();
     selection.clearSelection();
     inspector.setDetail(null);
+  }
+
+  function requestClearTraffic() {
+    if (flowStore.orderRef.current.length === 0) return;
+    setConfirmClear(true);
+  }
+
+  function confirmClearTraffic() {
+    setConfirmClear(false);
+    clearTraffic();
   }
 
   function refreshCa() {
@@ -730,21 +917,33 @@ export function useAppState() {
   const matchCount = filtering.matchedIds ? filtering.matchedIds.size : null;
 
   return {
-    error,
     setError,
+    notify,
+    toasts: toasts.toasts,
+    dismissToast: toasts.dismiss,
     rightTab,
     setRightTab,
+    rightMode,
+    setRightMode,
     decode,
     setDecode,
+    theme,
+    toggleTheme,
     setFullBody,
     caInfo,
     caOpen,
     setCaOpen,
     setTrafficMin,
+    filterInputRef,
+    confirmClear,
+    setConfirmClear,
+    requestClearTraffic,
+    confirmClearTraffic,
     settings,
     flowStore,
     filtering,
     selection,
+    selectedSummary,
     inspector,
     proxy,
     ar,
@@ -754,6 +953,12 @@ export function useAppState() {
     saveSettings,
     applyImportedSettings,
     handleRowClick,
+    handleKeySelect,
+    mockFlow,
+    filterToHost,
+    excludeHost,
+    copyFlowAsCurl,
+    copyFlowBody,
     clearTraffic,
     refreshCa,
     activeScenario,

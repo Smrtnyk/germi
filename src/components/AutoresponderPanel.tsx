@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { api } from "../ipc";
 import type { Action, ActionKind, AutoResponder, Rule, Scenario } from "../types";
@@ -105,24 +105,111 @@ function fireBadge(rule: Rule): string | null {
   return rule.fireLimit === 1 ? "once" : `x${rule.fireLimit}`;
 }
 
+/** Non-blocking lint of a rule — surfaced as inline warnings in the editor so
+ *  silently-never-matching or duplicate-header mistakes are caught early. */
+function ruleWarnings(rule: Rule): string[] {
+  const w: string[] = [];
+  if (!rule.matcher.url.trim()) {
+    w.push("URL pattern is empty — this rule matches every request.");
+  } else if (rule.matcher.urlMatch === "regex") {
+    try {
+      RegExp(rule.matcher.url);
+    } catch {
+      w.push("URL regex is invalid — this rule will never match.");
+    }
+  }
+  if (rule.action.kind === "respond") {
+    const names = rule.action.headers.map(([n]) => n.trim().toLowerCase()).filter(Boolean);
+    const dup = names.find((n, i) => names.indexOf(n) !== i);
+    if (dup) w.push(`Duplicate header "${dup}" — only the last value is sent.`);
+    if (names.includes("content-type")) {
+      w.push("Content-Type is in the Headers table — use the dedicated field to avoid duplicates.");
+    }
+  }
+  return w;
+}
+
+function Section({
+  title,
+  defaultOpen = true,
+  children,
+}: {
+  title: string;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className={`rsection ${open ? "open" : ""}`}>
+      <button
+        type="button"
+        className="rsection-head"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="rsection-caret">{open ? "▾" : "▸"}</span>
+        {title}
+      </button>
+      {open && <div className="rsection-body">{children}</div>}
+    </div>
+  );
+}
+
 function RuleListItem({
   rule,
   selected,
   hits,
+  draggable,
+  dragOver,
   onSelect,
   onToggle,
   onDuplicate,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
 }: {
   rule: Rule;
   selected: boolean;
   hits: number;
+  draggable: boolean;
+  dragOver: boolean;
   onSelect: () => void;
   onToggle: (enabled: boolean) => void;
   onDuplicate: () => void;
+  onDragStart: () => void;
+  onDragOver: () => void;
+  onDrop: () => void;
+  onDragEnd: () => void;
 }) {
   const badge = fireBadge(rule);
   return (
-    <div className={`rule-item ${selected ? "selected" : ""}`} onClick={onSelect} title={rule.name}>
+    <div
+      className={`rule-item ${selected ? "selected" : ""} ${dragOver ? "dragover" : ""}`}
+      onClick={onSelect}
+      title={rule.name}
+      draggable={draggable}
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        onDragStart();
+      }}
+      onDragOver={(e) => {
+        if (!draggable) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        onDragOver();
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        onDrop();
+      }}
+      onDragEnd={onDragEnd}
+    >
+      {draggable && (
+        <span className="rgrip" title="Drag to reorder (evaluation order matters)">
+          ⠿
+        </span>
+      )}
       <input
         type="checkbox"
         checked={rule.enabled}
@@ -176,6 +263,11 @@ function ScenarioView({
   onExport: () => void;
 }) {
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
+  const saveTimer = useRef<number | null>(null);
   const rulesRef = useRef<HTMLDivElement>(null);
   const listResize = useResizable({
     initial: 240,
@@ -188,16 +280,28 @@ function ScenarioView({
     if (selectRuleId) setSelectedRuleId(selectRuleId);
   }, [selectRuleId]);
 
+  useEffect(() => {
+    return () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+    };
+  }, []);
+
+  function patch(p: Partial<Scenario>) {
+    onPatch(p);
+    setSaveState("saving");
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => setSaveState("saved"), 650);
+  }
   function setRules(rules: Rule[]) {
-    onPatch({ rules });
+    patch({ rules });
   }
   function addRule() {
     const r = newRule();
     setRules([...active.rules, r]);
     setSelectedRuleId(r.id);
   }
-  function patchRule(id: string, patch: Partial<Rule>) {
-    setRules(active.rules.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  function patchRule(id: string, p: Partial<Rule>) {
+    setRules(active.rules.map((r) => (r.id === id ? { ...r, ...p } : r)));
   }
   function deleteRule(id: string) {
     setRules(active.rules.filter((r) => r.id !== id));
@@ -217,7 +321,24 @@ function ScenarioView({
     setRules([...active.rules.slice(0, idx + 1), copy, ...active.rules.slice(idx + 1)]);
     setSelectedRuleId(copy.id);
   }
+  function reorder(toId: string) {
+    if (!dragId || dragId === toId) return;
+    const arr = [...active.rules];
+    const from = arr.findIndex((r) => r.id === dragId);
+    const to = arr.findIndex((r) => r.id === toId);
+    if (from === -1 || to === -1) return;
+    const [moved] = arr.splice(from, 1);
+    arr.splice(to, 0, moved);
+    setRules(arr);
+  }
 
+  const q = query.trim().toLowerCase();
+  const shownRules = q
+    ? active.rules.filter(
+        (r) => r.name.toLowerCase().includes(q) || r.matcher.url.toLowerCase().includes(q),
+      )
+    : active.rules;
+  const canReorder = !q;
   const selectedRule = active.rules.find((r) => r.id === selectedRuleId) ?? null;
 
   return (
@@ -226,10 +347,12 @@ function ScenarioView({
         <input
           className="scenario-name"
           value={active.name}
-          onChange={(e) => onPatch({ name: e.target.value })}
+          onChange={(e) => patch({ name: e.target.value })}
         />
-        <span className="muted small">
-          {active.rules.filter((r) => r.enabled).length}/{active.rules.length} rule(s) active · live
+        <span className="muted small scenario-status">
+          {active.rules.filter((r) => r.enabled).length}/{active.rules.length} active
+          {saveState === "saving" && <span className="save-state"> · saving…</span>}
+          {saveState === "saved" && <span className="save-state ok"> · saved ✓</span>}
         </span>
         <div className="scenario-actions">
           <button
@@ -263,18 +386,42 @@ function ScenarioView({
           <button className="btn primary block" onClick={addRule}>
             + Add rule
           </button>
+          {active.rules.length > 4 && (
+            <input
+              className="rule-search"
+              placeholder="Search rules…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          )}
           {active.rules.length === 0 && (
             <div className="muted pad">No rules in this scenario yet.</div>
           )}
-          {active.rules.map((r) => (
+          {active.rules.length > 0 && shownRules.length === 0 && (
+            <div className="muted pad small">No rules match “{query}”.</div>
+          )}
+          {shownRules.map((r) => (
             <RuleListItem
               key={r.id}
               rule={r}
               selected={r.id === selectedRuleId}
               hits={ruleHits[r.id] ?? 0}
+              draggable={canReorder}
+              dragOver={overId === r.id && dragId !== r.id}
               onSelect={() => setSelectedRuleId(r.id)}
               onToggle={(enabled) => patchRule(r.id, { enabled })}
               onDuplicate={() => duplicateRule(r.id)}
+              onDragStart={() => setDragId(r.id)}
+              onDragOver={() => setOverId(r.id)}
+              onDrop={() => {
+                reorder(r.id);
+                setDragId(null);
+                setOverId(null);
+              }}
+              onDragEnd={() => {
+                setDragId(null);
+                setOverId(null);
+              }}
             />
           ))}
         </aside>
@@ -289,7 +436,7 @@ function ScenarioView({
               key={selectedRule.id}
               rule={selectedRule}
               hits={ruleHits[selectedRule.id] ?? 0}
-              onPatch={(patch) => patchRule(selectedRule.id, patch)}
+              onPatch={(p) => patchRule(selectedRule.id, p)}
               onDelete={() => deleteRule(selectedRule.id)}
             />
           )}
@@ -506,7 +653,6 @@ function FireLimitFields({
 }) {
   return (
     <>
-      <h4>Fire limit</h4>
       <div className="row">
         <label className="check">
           <input
@@ -558,6 +704,8 @@ function RuleEditor({
     onPatch({ action: { ...rule.action, ...patch } as Action });
   }
 
+  const warnings = ruleWarnings(rule);
+
   return (
     <div className="editor-form">
       <div className="row">
@@ -572,68 +720,82 @@ function RuleEditor({
         </button>
       </div>
 
-      <h4>Match</h4>
-      <div className="row">
-        <label>Method</label>
-        <select
-          value={rule.matcher.method ?? ""}
-          onChange={(e) =>
-            onPatch({
-              matcher: { ...rule.matcher, method: e.target.value || null },
-            })
-          }
-        >
-          <option value="">any</option>
-          {["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
+      {warnings.length > 0 && (
+        <div className="rule-warnings">
+          {warnings.map((w) => (
+            <div key={w} className="warn-text small">
+              ⚠ {w}
+            </div>
           ))}
-        </select>
-        <select
-          value={rule.matcher.urlMatch}
-          onChange={(e) =>
-            onPatch({
-              matcher: {
-                ...rule.matcher,
-                urlMatch: e.target.value as Rule["matcher"]["urlMatch"],
-              },
-            })
-          }
-        >
-          <option value="contains">contains</option>
-          <option value="exact">exact</option>
-          <option value="regex">regex</option>
-        </select>
-      </div>
-      <div className="row">
-        <label>URL</label>
-        <input
-          className="grow"
-          placeholder="e.g. /api/health   or   example.com/users"
-          value={rule.matcher.url}
-          onChange={(e) => onPatch({ matcher: { ...rule.matcher, url: e.target.value } })}
-        />
-      </div>
+        </div>
+      )}
 
-      <FireLimitFields rule={rule} hits={hits} onPatch={onPatch} />
+      <Section title="Match">
+        <div className="row">
+          <label>Method</label>
+          <select
+            value={rule.matcher.method ?? ""}
+            onChange={(e) =>
+              onPatch({
+                matcher: { ...rule.matcher, method: e.target.value || null },
+              })
+            }
+          >
+            <option value="">any</option>
+            {["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+          <select
+            value={rule.matcher.urlMatch}
+            onChange={(e) =>
+              onPatch({
+                matcher: {
+                  ...rule.matcher,
+                  urlMatch: e.target.value as Rule["matcher"]["urlMatch"],
+                },
+              })
+            }
+          >
+            <option value="contains">contains</option>
+            <option value="exact">exact</option>
+            <option value="regex">regex</option>
+          </select>
+        </div>
+        <div className="row">
+          <label>URL</label>
+          <input
+            className="grow"
+            placeholder="e.g. /api/health   or   example.com/users"
+            value={rule.matcher.url}
+            onChange={(e) => onPatch({ matcher: { ...rule.matcher, url: e.target.value } })}
+          />
+        </div>
+      </Section>
 
-      <h4>Action</h4>
-      <div className="row">
-        <label>Type</label>
-        <select
-          value={rule.action.kind}
-          onChange={(e) => onPatch({ action: defaultAction(e.target.value as ActionKind) })}
-        >
-          {ACTION_KINDS.map((a) => (
-            <option key={a.value} value={a.value}>
-              {a.label}
-            </option>
-          ))}
-        </select>
-      </div>
+      <Section title="Behavior — fire limit" defaultOpen={rule.fireLimit !== null}>
+        <FireLimitFields rule={rule} hits={hits} onPatch={onPatch} />
+      </Section>
 
-      <ActionFields action={rule.action} setAction={setAction} />
+      <Section title="Action">
+        <div className="row">
+          <label>Type</label>
+          <select
+            value={rule.action.kind}
+            onChange={(e) => onPatch({ action: defaultAction(e.target.value as ActionKind) })}
+          >
+            {ACTION_KINDS.map((a) => (
+              <option key={a.value} value={a.value}>
+                {a.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <ActionFields action={rule.action} setAction={setAction} />
+      </Section>
     </div>
   );
 }

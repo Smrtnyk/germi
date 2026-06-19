@@ -49,10 +49,13 @@ export function RuleTester({ rules, seedMethod, seedUrl }: Props) {
   const [result, setResult] = useState<TestResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Re-seed from the selected rule when it changes.
+  // Re-seed from the selected rule when it changes, and drop the previous
+  // result so a stale preview from another rule isn't shown as this rule's.
   useEffect(() => {
     if (seedUrl) setUrl(seedUrl);
     if (seedMethod) setMethod(seedMethod);
+    setResult(null);
+    setError(null);
   }, [seedUrl, seedMethod]);
 
   async function run() {
@@ -94,8 +97,11 @@ export function RuleTester({ rules, seedMethod, seedUrl }: Props) {
           value={url}
           placeholder="https://host/path"
           onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void run();
+          }}
         />
-        <button className="btn primary" onClick={run}>
+        <button className="btn primary" onClick={run} title="Run test (Enter)">
           Run test
         </button>
       </div>
