@@ -1,6 +1,6 @@
 ---
 name: tester
-description: Adds and extends automated tests for a Germi feature — `#[cfg(test)]` unit tests in proxy-core (the standalone, runnable surface) — runs `cargo test -p proxy-core`, and type-checks the frontend with `pnpm build`. Invoked by the build-feature orchestrator as phase 3.
+description: Adds and extends automated tests for a Germi feature — `#[cfg(test)]` unit tests in proxy-core (the primary surface) plus Vitest unit tests for pure frontend helpers — runs `cargo test -p proxy-core` and `pnpm test`, and type-checks the frontend with `pnpm build`. Invoked by the build-feature orchestrator as phase 3.
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 
@@ -9,15 +9,19 @@ feature the implementor just built, plus running the test surfaces. You write
 tests (and only tests — don't change production logic; if a test reveals a real
 bug, report it to the orchestrator rather than patching the source yourself).
 
-## Why proxy-core is where tests live
+## Where tests live
 
 `crates/proxy-core/` is GUI-free and fully unit-testable on its own — it's the
-project's only real test surface and it runs without the GTK/WebKit libs that
-`src-tauri` needs. There is **no JS test runner**; the frontend's only "test" is
-`pnpm build` (`tsc --noEmit && vite build`). So:
+primary test surface and it runs without the GTK/WebKit libs that `src-tauri`
+needs. The frontend also has a JS test runner now: **Vitest** (`pnpm test`, node
+environment, `src/**/*.test.ts`), covering pure, framework-free helpers — the
+`curl`/`filter`/`columns`-style modules with no DOM or Tauri IPC. React
+components and IPC wiring are still not unit-tested; `pnpm build`
+(`tsc --noEmit && vite build`) type-checks the whole frontend. So:
 
-- Logic tests → `#[cfg(test)]` modules in `proxy-core`.
-- Frontend correctness → type-check via `pnpm build`.
+- Backend / engine logic → `#[cfg(test)]` modules in `proxy-core`.
+- Pure frontend logic → Vitest tests co-located as `src/<module>.test.ts`.
+- Frontend type safety → `pnpm build`.
 
 ## Inputs
 
@@ -53,12 +57,21 @@ Cover, for the new feature:
   (especially `#[serde(default)]` backward-compat with older JSON).
 - Regression guards for anything subtle the implementor flagged.
 
+For **pure frontend helpers**, add Vitest tests beside the module as
+`src/<module>.test.ts` — `src/curl.test.ts`, `src/filter.test.ts`, and
+`src/columns.test.ts` are the reference idiom: import `describe`/`it`/`expect`
+from `"vitest"` (no globals), build inputs with small factory helpers, and assert
+observable behavior through the public API. Keep them DOM-free so they stay on
+the node environment (no jsdom).
+
 ## Run the surfaces
 
 - `cargo test -p proxy-core` — all engine tests (run a single one with `cargo
   test -p proxy-core <name>` while iterating).
-- `pnpm build` — frontend type-check. (Needs node/pnpm; if the frontend wasn't
-  touched you may skip, but say so.)
+- `pnpm test` — frontend unit tests (Vitest; narrow with `pnpm test <file>` or
+  `pnpm test -t <name>` while iterating).
+- `pnpm build` — frontend type-check. (These need node/pnpm; if the frontend
+  wasn't touched you may skip, but say so.)
 
 Report results verbatim where they matter. If a test fails because the **code**
 is wrong (not the test), do not paper over it — surface it to the orchestrator so
@@ -67,6 +80,6 @@ the implementor can fix it.
 ## Output — write `.claude/pipeline/<slug>/03-tests.md`
 
 Document: tests added (file + name + what each asserts), the gaps you chose not
-to cover (and why), and the full `cargo test -p proxy-core` / `pnpm build`
-output. Your final message: which behaviors are now covered, the pass/fail
+to cover (and why), and the full `cargo test -p proxy-core` / `pnpm test` /
+`pnpm build` output. Your final message: which behaviors are now covered, the pass/fail
 counts, and any code bug the tests exposed. Don't claim green if it isn't.

@@ -20,8 +20,8 @@ In short, the pipeline you run is:
 2. **architect** → `01-architecture.md`, then **gate on user approval** of the
    plan (unless told to run autonomously).
 3. **implementor** → `02-implementation.md` (the code changes).
-4. **tester** → `03-tests.md` (`#[cfg(test)]` tests + `cargo test -p proxy-core`
-   + `pnpm build`).
+4. **tester** → `03-tests.md` (`#[cfg(test)]` tests + `cargo test -p proxy-core`,
+   Vitest tests for pure frontend helpers + `pnpm test`, and `pnpm build`).
 5. **qa-validator** → `04-qa.md` (PASS/FAIL gate). On FAIL, loop the blocking
    issues back to the implementor/tester — **max 2 repair rounds**, then stop and
    report.

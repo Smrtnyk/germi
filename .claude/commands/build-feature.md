@@ -65,9 +65,10 @@ serde↔TS mirror and exact-version pinning intact. It compiles what it can
 
 ### Phase 3 — Tester  →  `03-tests.md`
 Delegate to the **tester** agent. It adds/extends `#[cfg(test)]` unit tests in
-`proxy-core` for the new logic (the standalone, runnable test surface), runs
-`cargo test -p proxy-core`, and type-checks the frontend with `pnpm build`. It
-reports coverage of the new behavior and the test run output.
+`proxy-core` for the new logic (the primary test surface), plus Vitest unit tests
+for any pure frontend helpers it touched, runs `cargo test -p proxy-core` and
+`pnpm test`, and type-checks the frontend with `pnpm build`. It reports coverage
+of the new behavior and the test run output.
 
 ### Phase 4 — QA validator  →  `04-qa.md`  (the gate)
 Delegate to the **qa-validator** agent. It does **not** fix code — it is the
@@ -75,6 +76,7 @@ gatekeeper. It runs the CI-equivalent gates and audits conventions, producing a
 **PASS / FAIL** verdict with specific blocking issues:
 - `cargo clippy -p proxy-core --all-targets -- -D warnings`
 - `cargo test -p proxy-core`
+- `pnpm test` (frontend unit tests — Vitest)
 - `pnpm build` (frontend type-check)
 - serde↔TS mirror intact; exact-version pins; the standard path followed; no GUI
   dep leaked into `proxy-core`; documented gotchas respected.
@@ -94,8 +96,8 @@ round); leave judgment calls for the user.
 
 When the pipeline completes (or stops early), give the user a concise summary:
 - **What was built** and which layers/files changed.
-- **Verification status**: clippy / `cargo test -p proxy-core` / `pnpm build`
-  results, verbatim where it matters. Be honest if a gate was skipped because the
+- **Verification status**: clippy / `cargo test -p proxy-core` / `pnpm test` /
+  `pnpm build` results, verbatim where it matters. Be honest if a gate was skipped because the
   environment lacks the GTK/WebKit libs (the `src-tauri` shell can't compile
   there) — say so; don't claim it passed.
 - **Open review findings / follow-ups** worth the user's attention.

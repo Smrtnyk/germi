@@ -73,7 +73,8 @@ Use the `<slug>` / pipeline dir given to you. The plan must contain:
   implement without re-deciding. Reference exact files and the precedent you're
   mirroring.
 - **Test strategy** — which `proxy-core` `#[cfg(test)]` modules get what cases;
-  what `pnpm build` covers on the frontend.
+  which pure frontend helpers get Vitest tests (`src/<module>.test.ts`); what
+  `pnpm build` covers (type-check) for the rest of the frontend.
 - **Gotchas & risks** — the relevant items from CLAUDE.md (IPC batching/lazy
   detail, 512 KB display cap, no-auto-persist-traffic, HTTP/1.1-only, one-rule-
   per-request full-URL match, Linux display env vars) plus anything specific.

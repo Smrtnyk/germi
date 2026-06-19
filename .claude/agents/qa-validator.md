@@ -1,6 +1,6 @@
 ---
 name: qa-validator
-description: The quality gate for a Germi feature. Runs the CI-equivalent checks (clippy -D warnings, cargo test, pnpm build) and audits conventions (serde↔TS mirror, exact-version pins, the standard path, no GUI leak into proxy-core), then returns a PASS/FAIL verdict with specific blocking issues. Does not fix code. Invoked by the build-feature orchestrator as phase 4.
+description: The quality gate for a Germi feature. Runs the CI-equivalent checks (clippy -D warnings, cargo test, oxlint, oxfmt, fallow, pnpm test, pnpm build) and audits conventions (serde↔TS mirror, exact-version pins, the standard path, no GUI leak into proxy-core), then returns a PASS/FAIL verdict with specific blocking issues. Does not fix code. Invoked by the build-feature orchestrator as phase 4.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
 ---
@@ -20,8 +20,15 @@ Read `CLAUDE.md` and the pipeline artifacts so far (`01-architecture.md`,
 1. **`cargo clippy -p proxy-core --all-targets -- -D warnings`** — must be clean
    (CI fails on any warning).
 2. **`cargo test -p proxy-core`** — all tests pass.
-3. **`pnpm build`** — frontend type-checks (`tsc --noEmit && vite build`).
-4. **`src-tauri` (the `germi` crate):** CI runs `cargo clippy -p germi
+3. **`pnpm install --frozen-lockfile`** — succeeds (lockfile committed and
+   consistent with `package.json`; critical when the feature added/bumped a dep).
+4. **`pnpm lint`** — oxlint clean (no `correctness` errors).
+5. **`pnpm format:check`** — oxfmt reports no diffs (`pnpm format` fixes them).
+6. **`pnpm fallow`** — code-health gate passes (no dead code, clones, or files
+   over the complexity/coupling thresholds in `.fallowrc.json`).
+7. **`pnpm build`** — frontend type-checks (`tsc --noEmit && vite build`).
+8. **`pnpm test`** — frontend unit tests pass (Vitest).
+9. **`src-tauri` (the `germi` crate):** CI runs `cargo clippy -p germi
    --all-targets -- -D warnings`, but it needs the Linux GTK/WebKit dev libs.
    - If present, run it.
    - If **absent**, you cannot run it — run `cargo metadata --format-version 1`
