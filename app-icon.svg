@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="128" y1="96" x2="896" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#102A43"/>
+      <stop offset="1" stop-color="#071A2D"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="230" y1="270" x2="794" y2="754" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#020B14" flood-opacity=".42"/>
+    </filter>
+  </defs>
+
+  <rect x="44" y="44" width="936" height="936" rx="224" fill="url(#background)"/>
+  <rect x="62" y="62" width="900" height="900" rx="206" fill="none" stroke="#1E4965" stroke-width="12"/>
+
+  <g filter="url(#shadow)">
+    <path
+      d="M267 449C296 315 421 221 568 237C648 246 720 285 770 344"
+      fill="none"
+      stroke="url(#flow)"
+      stroke-linecap="round"
+      stroke-width="70"
+    />
+    <path d="M755 256L831 358L702 376Z" fill="#22D3EE"/>
+
+    <path
+      d="M757 575C728 709 603 803 456 787C376 778 304 739 254 680"
+      fill="none"
+      stroke="url(#flow)"
+      stroke-linecap="round"
+      stroke-width="70"
+    />
+    <path d="M269 768L193 666L322 648Z" fill="#2DD4BF"/>
+
+    <circle cx="512" cy="512" r="205" fill="#E6FFFB" stroke="#118A8A" stroke-width="30"/>
+    <circle cx="512" cy="512" r="164" fill="#D4FBF7"/>
+
+    <circle cx="442" cy="438" r="38" fill="#0F8F8B"/>
+    <circle cx="587" cy="423" r="26" fill="#2DD4BF"/>
+    <circle cx="608" cy="563" r="42" fill="#117C82"/>
+    <circle cx="458" cy="585" r="29" fill="#22C7B8"/>
+    <circle cx="522" cy="508" r="19" fill="#164E63"/>
+  </g>
+</svg>
