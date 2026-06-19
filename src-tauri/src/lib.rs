@@ -45,6 +45,7 @@ pub fn run() {
                 controller,
                 ca_dir,
                 flow_forwarder: std::sync::Mutex::new(None),
+                prior_system_proxy: std::sync::Mutex::new(None),
             });
             Ok(())
         })
@@ -82,6 +83,15 @@ pub fn run() {
             commands::export_rules,
             commands::import_rules,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Germi");
+        .build(tauri::generate_context!())
+        .expect("error while building Germi")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    if let Err(e) = commands::restore_prior_system_proxy(state.inner()) {
+                        tracing::warn!("failed to restore system proxy on exit: {e}");
+                    }
+                }
+            }
+        });
 }
