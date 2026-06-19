@@ -380,27 +380,7 @@ function useSelection(flows: FlowSummary[]) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const anchorRef = useRef<string | null>(null);
 
-  function onRowClick(id: string, e: ReactMouseEvent) {
-    if (e.shiftKey && anchorRef.current) {
-      const range = rangeSelection(
-        flows.map((f) => f.id),
-        anchorRef.current,
-        id,
-      );
-      if (range) setSelectedIds(range);
-      setSelectedId(id);
-    } else if (e.ctrlKey || e.metaKey) {
-      setSelectedIds((prev) => toggledSet(prev, id));
-      setSelectedId(id);
-      anchorRef.current = id;
-    } else {
-      setSelectedIds(new Set([id]));
-      setSelectedId(id);
-      anchorRef.current = id;
-    }
-  }
-
-  function selectByKeyboard(id: string, extend: boolean) {
+  function extendOrSelect(id: string, extend: boolean) {
     if (extend && anchorRef.current) {
       const range = rangeSelection(
         flows.map((f) => f.id),
@@ -414,6 +394,22 @@ function useSelection(flows: FlowSummary[]) {
       setSelectedId(id);
       anchorRef.current = id;
     }
+  }
+
+  function onRowClick(id: string, e: ReactMouseEvent) {
+    if (e.shiftKey && anchorRef.current) {
+      extendOrSelect(id, true);
+    } else if (e.ctrlKey || e.metaKey) {
+      setSelectedIds((prev) => toggledSet(prev, id));
+      setSelectedId(id);
+      anchorRef.current = id;
+    } else {
+      extendOrSelect(id, false);
+    }
+  }
+
+  function selectByKeyboard(id: string, extend: boolean) {
+    extendOrSelect(id, extend);
   }
 
   function clearSelection() {
@@ -731,16 +727,33 @@ function useSession(setError: SetError, onOpened: () => void, notify: Notify) {
   return { importArchive, saveSession, openSession };
 }
 
-export function useAppState() {
-  const toasts = useToasts();
-  const notify = toasts.notify;
-  const setError = useCallback<SetError>(
-    (value) => {
-      if (value) notify("error", value);
-    },
-    [notify],
-  );
+async function copyFlowAsCurlAction(id: string, notify: Notify, setError: SetError) {
+  try {
+    const d = await api.getFlow(id, true, true);
+    if (!d) return;
+    await navigator.clipboard.writeText(toCurl(d));
+    notify("success", "cURL command copied");
+  } catch (e) {
+    setError(String(e));
+  }
+}
 
+async function copyFlowBodyAction(id: string, decode: boolean, notify: Notify, setError: SetError) {
+  try {
+    const d = await api.getFlow(id, decode, true);
+    const body = d?.response?.bodyText || d?.request.bodyText || "";
+    if (!body) {
+      notify("info", "No body to copy");
+      return;
+    }
+    await navigator.clipboard.writeText(body);
+    notify("success", "Body copied");
+  } catch (e) {
+    setError(String(e));
+  }
+}
+
+function useViewState() {
   const [rightTab, setRightTabState] = useState<RightTab>(() =>
     loadString("germi.rightTab", ["inspector", "autoresponder"] as const, "inspector"),
   );
@@ -758,7 +771,6 @@ export function useAppState() {
 
   const [decode, setDecode] = useState(true);
   const [fullBody, setFullBody] = useState(false);
-  const [caInfo, setCaInfo] = useState<CaInfo | null>(null);
   const [caOpen, setCaOpen] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [trafficMin, setTrafficMin] = useState(640);
@@ -772,6 +784,58 @@ export function useAppState() {
     persist("germi.theme", theme);
   }, [theme]);
   const toggleTheme = useCallback(() => setTheme((t) => (t === "dark" ? "light" : "dark")), []);
+
+  return {
+    rightTab,
+    setRightTab,
+    rightMode,
+    setRightMode,
+    decode,
+    setDecode,
+    fullBody,
+    setFullBody,
+    caOpen,
+    setCaOpen,
+    confirmClear,
+    setConfirmClear,
+    trafficMin,
+    setTrafficMin,
+    filterInputRef,
+    theme,
+    toggleTheme,
+  };
+}
+
+export function useAppState() {
+  const toasts = useToasts();
+  const notify = toasts.notify;
+  const setError = useCallback<SetError>(
+    (value) => {
+      if (value) notify("error", value);
+    },
+    [notify],
+  );
+
+  const {
+    rightTab,
+    setRightTab,
+    rightMode,
+    setRightMode,
+    decode,
+    setDecode,
+    fullBody,
+    setFullBody,
+    caOpen,
+    setCaOpen,
+    confirmClear,
+    setConfirmClear,
+    trafficMin,
+    setTrafficMin,
+    filterInputRef,
+    theme,
+    toggleTheme,
+  } = useViewState();
+  const [caInfo, setCaInfo] = useState<CaInfo | null>(null);
 
   const settings = useSettings();
   const flowStore = useFlowStore(settings.settings.maxFlows, setError);
@@ -864,31 +928,8 @@ export function useAppState() {
     notify("success", `Excluded ${host} from interception`);
   }
 
-  async function copyFlowAsCurl(id: string) {
-    try {
-      const d = await api.getFlow(id, true, true);
-      if (!d) return;
-      await navigator.clipboard.writeText(toCurl(d));
-      notify("success", "cURL command copied");
-    } catch (e) {
-      setError(String(e));
-    }
-  }
-
-  async function copyFlowBody(id: string) {
-    try {
-      const d = await api.getFlow(id, decode, true);
-      const body = d?.response?.bodyText || d?.request.bodyText || "";
-      if (!body) {
-        notify("info", "No body to copy");
-        return;
-      }
-      await navigator.clipboard.writeText(body);
-      notify("success", "Body copied");
-    } catch (e) {
-      setError(String(e));
-    }
-  }
+  const copyFlowAsCurl = (id: string) => copyFlowAsCurlAction(id, notify, setError);
+  const copyFlowBody = (id: string) => copyFlowBodyAction(id, decode, notify, setError);
 
   function clearTraffic() {
     void api.clearFlows();

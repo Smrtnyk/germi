@@ -16,7 +16,7 @@ const DURATION: Record<ToastKind, number> = {
 
 const MAX_VISIBLE = 4;
 
-export function friendlyError(raw: string): string {
+function friendlyError(raw: string): string {
   const s = raw.replace(/^(?:Error:\s*)+/i, "").trim();
   const low = s.toLowerCase();
   if (low.includes("in use") || low.includes("os error 98") || low.includes("os error 10048")) {
