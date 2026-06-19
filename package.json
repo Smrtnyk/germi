@@ -14,6 +14,8 @@
     "fallow": "fallow",
     "fallow:fix": "fallow fix",
     "fallow:audit": "fallow audit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -41,6 +43,7 @@
     "oxfmt": "0.55.0",
     "oxlint": "1.70.0",
     "typescript": "6.0.3",
-    "vite": "8.0.16"
+    "vite": "8.0.16",
+    "vitest": "4.1.9"
   }
 }

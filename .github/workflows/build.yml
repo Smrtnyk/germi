@@ -86,3 +86,6 @@ jobs:
 
       - name: Build frontend (tsc + vite)
         run: pnpm build
+
+      - name: Test frontend (vitest)
+        run: pnpm test
