@@ -84,6 +84,8 @@ function RightPanel({
   autoresponder,
   onAutoresponderChange,
   selectRuleId,
+  onResetState,
+  ruleHits,
 }: {
   rightTab: RightTab;
   setRightTab: (tab: RightTab) => void;
@@ -95,6 +97,8 @@ function RightPanel({
   autoresponder: AutoResponder;
   onAutoresponderChange: (ar: AutoResponder) => void;
   selectRuleId: string | null;
+  onResetState: (scenarioId: string | null) => void;
+  ruleHits: Record<string, number>;
 }) {
   return (
     <div className="right-panel">
@@ -125,6 +129,8 @@ function RightPanel({
             ar={autoresponder}
             onChange={onAutoresponderChange}
             selectRuleId={selectRuleId}
+            onResetState={onResetState}
+            ruleHits={ruleHits}
           />
         </div>
       </div>
@@ -255,6 +261,8 @@ export function App() {
           autoresponder={s.ar.autoresponder}
           onAutoresponderChange={s.ar.saveAutoresponder}
           selectRuleId={s.ar.selectRuleId}
+          onResetState={s.ar.resetRuleState}
+          ruleHits={s.ar.ruleHits}
         />
       </main>
 

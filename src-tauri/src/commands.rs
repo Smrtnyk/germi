@@ -141,6 +141,16 @@ pub fn set_autoresponder(state: State<'_, AppState>, autoresponder: AutoResponde
 }
 
 #[tauri::command]
+pub fn reset_rule_state(state: State<'_, AppState>, scenario_id: Option<String>) {
+    state.controller.reset_rule_state(scenario_id.as_deref());
+}
+
+#[tauri::command]
+pub fn rule_hits(state: State<'_, AppState>) -> std::collections::HashMap<String, u32> {
+    state.controller.rule_hits()
+}
+
+#[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> ProxySettings {
     state.controller.get_settings()
 }

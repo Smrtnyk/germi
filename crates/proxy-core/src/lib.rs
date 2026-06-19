@@ -47,7 +47,7 @@ pub use ca::CertAuthority;
 pub use flow::{FlowDetail, FlowEvent, FlowSummary, MessageDetail, ResourceKind};
 pub use rules::{Action, AutoResponder, MatchKind, Matcher, Rule, RuleSet, Scenario};
 pub use settings::ProxySettings;
-pub use tester::{test_rules, TestInput, TestResponse, TestResult};
+pub use tester::{test_rules, SequenceStep, TestInput, TestResponse, TestResult};
 
 use handler::CaptureHandler;
 use shared::Shared;
@@ -336,9 +336,71 @@ impl ProxyController {
     }
 
     pub fn set_autoresponder(&self, autoresponder: AutoResponder) {
+        let prev_active = self
+            .shared
+            .autoresponder
+            .read()
+            .ok()
+            .and_then(|ar| ar.active_scenario_id.clone());
         if let Ok(mut guard) = self.shared.autoresponder.write() {
             *guard = autoresponder;
         }
+        let (live_ids, new_active) = {
+            let Ok(ar) = self.shared.autoresponder.read() else {
+                return;
+            };
+            let ids: std::collections::HashSet<String> = ar
+                .scenarios
+                .iter()
+                .flat_map(|s| s.rules.iter().map(|r| r.id.clone()))
+                .collect();
+            (ids, ar.active_scenario_id.clone())
+        };
+        if let Ok(mut cursors) = self.shared.cursors.lock() {
+            if prev_active == new_active {
+                let live: std::collections::HashSet<&str> =
+                    live_ids.iter().map(String::as_str).collect();
+                cursors.reset_missing(&live);
+            } else {
+                cursors.reset();
+            }
+        }
+    }
+
+    pub fn reset_rule_state(&self, scenario_id: Option<&str>) {
+        let ids: Vec<String> = match scenario_id {
+            None => Vec::new(),
+            Some(id) => self
+                .shared
+                .autoresponder
+                .read()
+                .ok()
+                .and_then(|ar| {
+                    ar.scenarios
+                        .iter()
+                        .find(|s| s.id == id)
+                        .map(|s| s.rules.iter().map(|r| r.id.clone()).collect())
+                })
+                .unwrap_or_default(),
+        };
+        if let Ok(mut cursors) = self.shared.cursors.lock() {
+            match scenario_id {
+                None => cursors.reset(),
+                Some(_) => {
+                    for rid in &ids {
+                        cursors.reset_rule(rid);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn rule_hits(&self) -> std::collections::HashMap<String, u32> {
+        self.shared
+            .cursors
+            .lock()
+            .map(|c| c.snapshot())
+            .unwrap_or_default()
     }
 
     // ---- proxy settings (host exclusions) ----
@@ -404,5 +466,129 @@ impl ProxyController {
             autoresponder: ar,
             new_rule_ids,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flow::CapturedRequest;
+
+    fn controller() -> ProxyController {
+        ProxyController::new(CertAuthority::generate().expect("generate in-memory CA"))
+    }
+
+    fn respond_rule(id: &str) -> Rule {
+        Rule {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            fire_limit: Some(1),
+            repeat: false,
+            matcher: Matcher {
+                method: None,
+                url: "/seq".to_string(),
+                url_match: MatchKind::Contains,
+            },
+            action: Action::Respond {
+                status: 200,
+                headers: vec![],
+                body: id.to_string(),
+                content_type: Some("text/plain".to_string()),
+            },
+        }
+    }
+
+    fn scenario(id: &str, rules: Vec<Rule>) -> Scenario {
+        Scenario {
+            id: id.to_string(),
+            name: id.to_string(),
+            rules,
+        }
+    }
+
+    fn request() -> CapturedRequest {
+        CapturedRequest {
+            method: "GET".to_string(),
+            uri: "https://example.com/seq".to_string(),
+            scheme: "https".to_string(),
+            host: "example.com".to_string(),
+            path: "/seq".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+            timestamp_ms: 0,
+        }
+    }
+
+    fn fire_active_once(controller: &ProxyController) {
+        let ar = controller.shared.autoresponder.read().expect("read autoresponder");
+        let mut cursors = controller.shared.cursors.lock().expect("lock cursors");
+        ar.evaluate_request_stateful(&request(), &mut cursors);
+    }
+
+    #[test]
+    fn set_autoresponder_sticky_reset_fork() {
+        let controller = controller();
+
+        let ar_a = AutoResponder {
+            scenarios: vec![scenario("A", vec![respond_rule("seq-rule")])],
+            active_scenario_id: Some("A".to_string()),
+        };
+        controller.set_autoresponder(ar_a.clone());
+
+        fire_active_once(&controller);
+        assert_eq!(
+            controller.rule_hits().get("seq-rule").copied(),
+            Some(1),
+            "firing the active rule must advance its cursor"
+        );
+
+        controller.set_autoresponder(ar_a.clone());
+        assert_eq!(
+            controller.rule_hits().get("seq-rule").copied(),
+            Some(1),
+            "re-applying the same active scenario must preserve in-progress hits"
+        );
+
+        let ar_b = AutoResponder {
+            scenarios: vec![
+                scenario("A", vec![respond_rule("seq-rule")]),
+                scenario("B", vec![respond_rule("other-rule")]),
+            ],
+            active_scenario_id: Some("B".to_string()),
+        };
+        controller.set_autoresponder(ar_b);
+        assert!(
+            controller.rule_hits().is_empty(),
+            "switching the active scenario must fully reset every cursor"
+        );
+    }
+
+    #[test]
+    fn set_autoresponder_same_active_drops_deleted_rule() {
+        let controller = controller();
+
+        let with_rule = AutoResponder {
+            scenarios: vec![scenario("A", vec![respond_rule("seq-rule")])],
+            active_scenario_id: Some("A".to_string()),
+        };
+        controller.set_autoresponder(with_rule);
+        fire_active_once(&controller);
+        assert_eq!(
+            controller.rule_hits().get("seq-rule").copied(),
+            Some(1),
+            "the rule fired before deletion"
+        );
+
+        let rule_removed = AutoResponder {
+            scenarios: vec![scenario("A", vec![])],
+            active_scenario_id: Some("A".to_string()),
+        };
+        controller.set_autoresponder(rule_removed);
+        assert!(
+            !controller.rule_hits().contains_key("seq-rule"),
+            "reset_missing must drop the counter for a deleted rule even when the active scenario is unchanged"
+        );
     }
 }

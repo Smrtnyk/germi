@@ -15,6 +15,8 @@ interface Props {
   onChange: (ar: AutoResponder) => void;
   /** When set (e.g. via "Mock this"), select this rule for editing. */
   selectRuleId?: string | null;
+  onResetState: (scenarioId: string | null) => void;
+  ruleHits: Record<string, number>;
 }
 
 const ACTION_KINDS: { value: ActionKind; label: string }[] = [
@@ -88,24 +90,35 @@ function newRule(): Rule {
     id: crypto.randomUUID(),
     name: "New rule",
     enabled: true,
+    fireLimit: null,
+    repeat: false,
     matcher: { method: null, url: "", urlMatch: "contains" },
     action: defaultAction("respond"),
   };
 }
 
+function fireBadge(rule: Rule): string | null {
+  if (rule.fireLimit === null) return null;
+  if (rule.repeat) return "loop";
+  return rule.fireLimit === 1 ? "once" : `x${rule.fireLimit}`;
+}
+
 function RuleListItem({
   rule,
   selected,
+  hits,
   onSelect,
   onToggle,
   onDuplicate,
 }: {
   rule: Rule;
   selected: boolean;
+  hits: number;
   onSelect: () => void;
   onToggle: (enabled: boolean) => void;
   onDuplicate: () => void;
 }) {
+  const badge = fireBadge(rule);
   return (
     <div className={`rule-item ${selected ? "selected" : ""}`} onClick={onSelect} title={rule.name}>
       <input
@@ -119,7 +132,15 @@ function RuleListItem({
           <span className={`rname ${rule.enabled ? "" : "off"}`}>{middleTruncate(rule.name)}</span>
           {rule.action.kind !== "respond" && <span className="rkind">{rule.action.kind}</span>}
         </div>
-        <div className="rsub">{ruleSummary(rule)}</div>
+        <div className="rsub">
+          {ruleSummary(rule)}
+          {badge && (
+            <span className="rfire">
+              {badge}
+              {rule.fireLimit !== null && ` ${hits}/${rule.fireLimit}`}
+            </span>
+          )}
+        </div>
       </div>
       <button
         className="btn ghost dup"
@@ -140,11 +161,15 @@ function ScenarioView({
   onPatch,
   onRequestDelete,
   selectRuleId,
+  onResetState,
+  ruleHits,
 }: {
   active: Scenario;
   onPatch: (patch: Partial<Scenario>) => void;
   onRequestDelete: () => void;
   selectRuleId?: string | null;
+  onResetState: () => void;
+  ruleHits: Record<string, number>;
 }) {
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
   const rulesRef = useRef<HTMLDivElement>(null);
@@ -203,6 +228,13 @@ function ScenarioView({
           {active.rules.filter((r) => r.enabled).length}/{active.rules.length} rule(s) active · live
         </span>
         <div className="spacer" />
+        <button
+          className="btn"
+          title="Clear per-rule hit counters so match-once / sequenced rules fire from the start again."
+          onClick={onResetState}
+        >
+          Reset state
+        </button>
         <button className="btn danger" onClick={onRequestDelete}>
           Delete scenario
         </button>
@@ -227,6 +259,7 @@ function ScenarioView({
               key={r.id}
               rule={r}
               selected={r.id === selectedRuleId}
+              hits={ruleHits[r.id] ?? 0}
               onSelect={() => setSelectedRuleId(r.id)}
               onToggle={(enabled) => patchRule(r.id, { enabled })}
               onDuplicate={() => duplicateRule(r.id)}
@@ -243,6 +276,7 @@ function ScenarioView({
             <RuleEditor
               key={selectedRule.id}
               rule={selectedRule}
+              hits={ruleHits[selectedRule.id] ?? 0}
               onPatch={(patch) => patchRule(selectedRule.id, patch)}
               onDelete={() => deleteRule(selectedRule.id)}
             />
@@ -259,7 +293,7 @@ function ScenarioView({
   );
 }
 
-export function AutoresponderPanel({ ar, onChange, selectRuleId }: Props) {
+export function AutoresponderPanel({ ar, onChange, selectRuleId, onResetState, ruleHits }: Props) {
   const [pendingDelete, setPendingDelete] = useState<Scenario | null>(null);
 
   const active = ar.scenarios.find((s) => s.id === ar.activeScenarioId) ?? null;
@@ -334,6 +368,8 @@ export function AutoresponderPanel({ ar, onChange, selectRuleId }: Props) {
           onPatch={(patch) => patchScenario(active.id, patch)}
           onRequestDelete={() => setPendingDelete(active)}
           selectRuleId={selectRuleId}
+          onResetState={() => onResetState(active.id)}
+          ruleHits={ruleHits}
         />
       )}
 
@@ -354,12 +390,105 @@ export function AutoresponderPanel({ ar, onChange, selectRuleId }: Props) {
   );
 }
 
+function NumberDraftInput({
+  value,
+  min,
+  max,
+  onCommit,
+  width = 78,
+  className,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  onCommit: (n: number) => void;
+  width?: number;
+  className?: string;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => setDraft(String(value)), [value]);
+  function commit() {
+    const n = Math.trunc(Number(draft));
+    if (draft.trim() !== "" && Number.isFinite(n) && n >= min && n <= max) {
+      onCommit(n);
+      setDraft(String(n));
+    } else {
+      setDraft(String(value));
+    }
+  }
+  return (
+    <input
+      type="number"
+      min={min}
+      max={Number.isFinite(max) ? max : undefined}
+      style={{ width }}
+      className={className}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+      }}
+    />
+  );
+}
+
+function FireLimitFields({
+  rule,
+  hits,
+  onPatch,
+}: {
+  rule: Rule;
+  hits: number;
+  onPatch: (patch: Partial<Rule>) => void;
+}) {
+  return (
+    <>
+      <h4>Fire limit</h4>
+      <div className="row">
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={rule.fireLimit !== null}
+            onChange={(e) => onPatch({ fireLimit: e.target.checked ? 1 : null })}
+          />
+          Match once (auto-disable after first hit)
+        </label>
+      </div>
+      {rule.fireLimit !== null && (
+        <div className="row">
+          <label>Fire N times</label>
+          <NumberDraftInput
+            value={rule.fireLimit}
+            min={1}
+            max={Number.POSITIVE_INFINITY}
+            onCommit={(n) => onPatch({ fireLimit: n })}
+          />
+          <span className="muted small">
+            {hits}/{rule.fireLimit} fired
+          </span>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={rule.repeat}
+              onChange={(e) => onPatch({ repeat: e.target.checked })}
+            />
+            Repeat (loop instead of stopping)
+          </label>
+        </div>
+      )}
+    </>
+  );
+}
+
 function RuleEditor({
   rule,
+  hits,
   onPatch,
   onDelete,
 }: {
   rule: Rule;
+  hits: number;
   onPatch: (patch: Partial<Rule>) => void;
   onDelete: () => void;
 }) {
@@ -425,6 +554,8 @@ function RuleEditor({
         />
       </div>
 
+      <FireLimitFields rule={rule} hits={hits} onPatch={onPatch} />
+
       <h4>Action</h4>
       <div className="row">
         <label>Type</label>
@@ -476,34 +607,11 @@ function formatJson(body: string): string | null {
 }
 
 function StatusField({ status, onChange }: { status: number; onChange: (s: number) => void }) {
-  // Local draft so the field can be cleared / retyped without immediately
-  // committing an invalid status 0 (Number("") === 0). Commit a valid HTTP
-  // status (100–599) on blur/Enter, otherwise revert to the last good value.
-  const [draft, setDraft] = useState(String(status));
-  useEffect(() => setDraft(String(status)), [status]);
-  const commit = () => {
-    const n = Math.trunc(Number(draft));
-    if (draft.trim() !== "" && Number.isFinite(n) && n >= 100 && n <= 599) {
-      onChange(n);
-      setDraft(String(n));
-    } else {
-      setDraft(String(status));
-    }
-  };
   return (
     <div className="status-field">
       <div className="row status-row">
         <label>Status</label>
-        <input
-          type="number"
-          style={{ width: 78 }}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={commit}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-          }}
-        />
+        <NumberDraftInput value={status} min={100} max={599} onCommit={onChange} />
         <span className="muted reason">{STATUS_REASON[status] ?? ""}</span>
       </div>
       <div className="status-presets">

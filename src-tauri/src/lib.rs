@@ -59,6 +59,8 @@ pub fn run() {
             commands::set_flow_comment,
             commands::get_autoresponder,
             commands::set_autoresponder,
+            commands::reset_rule_state,
+            commands::rule_hits,
             commands::get_settings,
             commands::set_settings,
             commands::export_settings,

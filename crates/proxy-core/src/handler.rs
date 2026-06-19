@@ -109,13 +109,16 @@ impl HttpHandler for CaptureHandler {
             timestamp_ms: now_ms(),
         };
 
-        let outcome = self
-            .shared
-            .autoresponder
-            .read()
-            .map_or(RequestOutcome::Continue {
-                set_headers: vec![],
-            }, |ar| ar.evaluate_request(&captured));
+        let outcome = {
+            let ar = self.shared.autoresponder.read();
+            let cursors = self.shared.cursors.lock();
+            match (ar, cursors) {
+                (Ok(ar), Ok(mut cursors)) => ar.evaluate_request_stateful(&captured, &mut cursors),
+                _ => RequestOutcome::Continue {
+                    set_headers: vec![],
+                },
+            }
+        };
 
         let id = self.shared.next_id();
         let start = Instant::now();

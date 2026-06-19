@@ -460,7 +460,46 @@ function useSettings() {
   return { settings, setSettings, settingsOpen, setSettingsOpen };
 }
 
-function useAutoresponder(setError: SetError, setRightTab: (tab: RightTab) => void) {
+function useRuleHits(
+  flowTick: number,
+  activeScenarioId: string | null,
+  active: boolean,
+  setError: SetError,
+) {
+  const [ruleHits, setRuleHits] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = () =>
+      void api.ruleHits().then((h) => {
+        if (!cancelled) setRuleHits(h);
+      });
+    const handle = window.setTimeout(poll, 250);
+    const interval = active ? window.setInterval(poll, 1500) : null;
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+      if (interval !== null) clearInterval(interval);
+    };
+  }, [flowTick, activeScenarioId, active]);
+
+  function resetRuleState(scenarioId: string | null) {
+    void api
+      .resetRuleState(scenarioId)
+      .then(() => api.ruleHits())
+      .then(setRuleHits)
+      .catch((e) => setError(String(e)));
+  }
+
+  return { ruleHits, resetRuleState };
+}
+
+function useAutoresponder(
+  setError: SetError,
+  setRightTab: (tab: RightTab) => void,
+  flowTick: number,
+  rightTab: RightTab,
+) {
   const [autoresponder, setAutoresponder] = useState<AutoResponder>({
     scenarios: [],
     activeScenarioId: null,
@@ -468,6 +507,12 @@ function useAutoresponder(setError: SetError, setRightTab: (tab: RightTab) => vo
   const [selectRuleId, setSelectRuleId] = useState<string | null>(null);
   const [pickScenarioId, setPickScenarioId] = useState("");
   const saveTimer = useRef<number | null>(null);
+  const { ruleHits, resetRuleState } = useRuleHits(
+    flowTick,
+    autoresponder.activeScenarioId,
+    rightTab === "autoresponder",
+    setError,
+  );
 
   function saveAutoresponder(next: AutoResponder) {
     setAutoresponder(next);
@@ -499,6 +544,8 @@ function useAutoresponder(setError: SetError, setRightTab: (tab: RightTab) => vo
     setPickScenarioId,
     saveAutoresponder,
     mockFlows,
+    ruleHits,
+    resetRuleState,
   };
 }
 
@@ -564,7 +611,7 @@ export function useAppState() {
     : undefined;
   const inspector = useFlowDetail(selection.selectedId, decode, fullBody, selectedSummary);
   const proxy = useProxyControl(settings.settings, setError);
-  const ar = useAutoresponder(setError, setRightTab);
+  const ar = useAutoresponder(setError, setRightTab, flowStore.tick, rightTab);
   const columns = usePersistentColumns(settings.settings.headerColumns);
   const session = useSession(setError, () => {
     selection.clearSelection();

@@ -102,6 +102,8 @@ export interface Rule {
   id: string;
   name: string;
   enabled: boolean;
+  fireLimit: number | null;
+  repeat: boolean;
   matcher: Matcher;
   action: Action;
 }
@@ -169,6 +171,12 @@ export interface TestResponse {
   source: string;
 }
 
+export interface SequenceStep {
+  outcome: string;
+  status: number | null;
+  rule: string | null;
+}
+
 export interface TestResult {
   matchedRules: string[];
   outcome: "respond" | "block" | "continue";
@@ -177,4 +185,6 @@ export interface TestResult {
   effectiveRequestHeaders: [string, string][];
   response: TestResponse | null;
   notes: string[];
+  sequence: SequenceStep[];
+  sequenceLoops: boolean;
 }

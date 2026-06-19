@@ -11,7 +11,7 @@
 //! Request-phase actions run in `handle_request`; response-phase in
 //! `handle_response`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 
 use regex::Regex;
@@ -136,6 +136,10 @@ pub struct Rule {
     pub name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub fire_limit: Option<u32>,
+    #[serde(default)]
+    pub repeat: bool,
     pub matcher: Matcher,
     pub action: Action,
 }
@@ -194,10 +198,44 @@ pub enum RequestOutcome {
     Block { rule: String },
 }
 
-/// Evaluate request-phase rules in order (shared by `RuleSet`, Scenario, tester).
-pub fn evaluate_request_rules(rules: &[Rule], req: &CapturedRequest) -> RequestOutcome {
+#[derive(Default, Debug)]
+pub struct RuleCursors {
+    hits: HashMap<String, u32>,
+}
+
+impl RuleCursors {
+    fn is_exhausted(&self, rule: &Rule) -> bool {
+        matches!(rule.fire_limit, Some(limit) if self.hits.get(&rule.id).copied().unwrap_or(0) >= limit)
+    }
+
+    fn allows_fire(&self, rule: &Rule) -> bool {
+        !self.is_exhausted(rule)
+    }
+
+    fn record_fire(&mut self, rule: &Rule) {
+        *self.hits.entry(rule.id.clone()).or_insert(0) += 1;
+    }
+
+    pub fn reset(&mut self) {
+        self.hits.clear();
+    }
+
+    pub fn reset_rule(&mut self, id: &str) {
+        self.hits.remove(id);
+    }
+
+    pub fn reset_missing(&mut self, live_ids: &HashSet<&str>) {
+        self.hits.retain(|id, _| live_ids.contains(id.as_str()));
+    }
+
+    pub fn snapshot(&self) -> HashMap<String, u32> {
+        self.hits.clone()
+    }
+}
+
+fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors) -> RequestOutcome {
     let mut set_headers = Vec::new();
-    for rule in rules.iter().filter(|r| r.enabled) {
+    for rule in rules.iter().filter(|r| r.enabled && cursors.allows_fire(r)) {
         if !rule.matcher.matches(req) {
             continue;
         }
@@ -214,6 +252,7 @@ pub fn evaluate_request_rules(rules: &[Rule], req: &CapturedRequest) -> RequestO
                         hs.push(("content-type".to_string(), ct.clone()));
                     }
                 }
+                cursors.record_fire(rule);
                 return RequestOutcome::Respond {
                     rule: rule.name.clone(),
                     response: SyntheticResponse {
@@ -230,6 +269,7 @@ pub fn evaluate_request_rules(rules: &[Rule], req: &CapturedRequest) -> RequestO
                         .first_raw()
                         .unwrap_or("application/octet-stream")
                         .to_string();
+                    cursors.record_fire(rule);
                     return RequestOutcome::Respond {
                         rule: rule.name.clone(),
                         response: SyntheticResponse {
@@ -241,9 +281,10 @@ pub fn evaluate_request_rules(rules: &[Rule], req: &CapturedRequest) -> RequestO
                 }
             }
             Action::Block => {
+                cursors.record_fire(rule);
                 return RequestOutcome::Block {
                     rule: rule.name.clone(),
-                }
+                };
             }
             Action::SetRequestHeader { name, value } => {
                 set_headers.push((name.clone(), value.clone()));
@@ -255,6 +296,36 @@ pub fn evaluate_request_rules(rules: &[Rule], req: &CapturedRequest) -> RequestO
         }
     }
     RequestOutcome::Continue { set_headers }
+}
+
+fn has_exhausted_repeat(rules: &[Rule], req: &CapturedRequest, cursors: &RuleCursors) -> bool {
+    rules
+        .iter()
+        .any(|r| r.enabled && r.repeat && r.matcher.matches(req) && cursors.is_exhausted(r))
+}
+
+pub fn evaluate_request_rules_stateful(
+    rules: &[Rule],
+    req: &CapturedRequest,
+    cursors: &mut RuleCursors,
+) -> RequestOutcome {
+    let outcome = first_match(rules, req, cursors);
+    if !matches!(outcome, RequestOutcome::Continue { .. }) {
+        return outcome;
+    }
+    if !has_exhausted_repeat(rules, req, cursors) {
+        return outcome;
+    }
+    for rule in rules.iter().filter(|r| r.matcher.matches(req)) {
+        cursors.reset_rule(&rule.id);
+    }
+    first_match(rules, req, cursors)
+}
+
+/// Evaluate request-phase rules in order (shared by `RuleSet`, Scenario, tester).
+pub fn evaluate_request_rules(rules: &[Rule], req: &CapturedRequest) -> RequestOutcome {
+    let mut scratch = RuleCursors::default();
+    evaluate_request_rules_stateful(rules, req, &mut scratch)
 }
 
 /// Apply response-phase rules in order, mutating `resp`. Returns the last rule
@@ -339,6 +410,8 @@ impl RuleSet {
                 id: "example-health".to_string(),
                 name: "Mock GET /api/health".to_string(),
                 enabled: true,
+                fire_limit: None,
+                repeat: false,
                 matcher: Matcher {
                     method: Some("GET".to_string()),
                     url: "/api/health".to_string(),
@@ -367,6 +440,19 @@ impl AutoResponder {
     pub fn evaluate_request(&self, req: &CapturedRequest) -> RequestOutcome {
         match self.active() {
             Some(s) => evaluate_request_rules(&s.rules, req),
+            None => RequestOutcome::Continue {
+                set_headers: vec![],
+            },
+        }
+    }
+
+    pub fn evaluate_request_stateful(
+        &self,
+        req: &CapturedRequest,
+        cursors: &mut RuleCursors,
+    ) -> RequestOutcome {
+        match self.active() {
+            Some(s) => evaluate_request_rules_stateful(&s.rules, req, cursors),
             None => RequestOutcome::Continue {
                 set_headers: vec![],
             },
@@ -444,6 +530,8 @@ pub fn respond_rule_from_flow(flow: &Flow, id: String) -> Rule {
         id,
         name,
         enabled: true,
+        fire_limit: None,
+        repeat: false,
         matcher: Matcher {
             method: Some(flow.request.method.clone()),
             url: full_url,
@@ -510,6 +598,8 @@ mod tests {
             id: name.to_string(),
             name: name.to_string(),
             enabled: true,
+            fire_limit: None,
+            repeat: false,
             matcher: Matcher {
                 method: None,
                 url: url.to_string(),
@@ -521,6 +611,34 @@ mod tests {
                 body: name.to_string(),
                 content_type: Some("text/plain".to_string()),
             },
+        }
+    }
+
+    fn respond_rule_limited(name: &str, url: &str, limit: Option<u32>, repeat: bool) -> Rule {
+        let mut rule = respond_rule(name, url);
+        rule.fire_limit = limit;
+        rule.repeat = repeat;
+        rule
+    }
+
+    fn responded_rule_name(outcome: &RequestOutcome) -> Option<&str> {
+        match outcome {
+            RequestOutcome::Respond { rule, .. } => Some(rule.as_str()),
+            _ => None,
+        }
+    }
+
+    fn responded_body(outcome: &RequestOutcome) -> Option<&[u8]> {
+        match outcome {
+            RequestOutcome::Respond { response, .. } => Some(response.body.as_slice()),
+            _ => None,
+        }
+    }
+
+    fn responded_status(outcome: &RequestOutcome) -> Option<u16> {
+        match outcome {
+            RequestOutcome::Respond { response, .. } => Some(response.status),
+            _ => None,
         }
     }
 
@@ -546,6 +664,8 @@ mod tests {
                 id: "1".into(),
                 name: "post-only".into(),
                 enabled: true,
+                fire_limit: None,
+                repeat: false,
                 matcher: Matcher {
                     method: Some("POST".into()),
                     url: String::new(),
@@ -571,6 +691,8 @@ mod tests {
                 id: "1".into(),
                 name: "redact".into(),
                 enabled: true,
+                fire_limit: None,
+                repeat: false,
                 matcher: Matcher::default(),
                 action: Action::RewriteResponseBody {
                     find: r"\d{4}".into(),
@@ -606,6 +728,8 @@ mod tests {
                 id: "1".into(),
                 name: "redact".into(),
                 enabled: true,
+                fire_limit: None,
+                repeat: false,
                 matcher: Matcher::default(),
                 action: Action::RewriteResponseBody {
                     find: "secret".into(),
@@ -773,5 +897,520 @@ mod tests {
         // Mocking github.com/feed must NOT also catch a different host's /feed.
         assert!(rule.matcher.matches(&req("github.com", "/feed")));
         assert!(!rule.matcher.matches(&req("dynatrace.com", "/feed")));
+    }
+
+    #[test]
+    fn match_once_consumes_then_falls_through() {
+        let mut a = respond_rule_limited("rule-a", "/dup", Some(1), false);
+        a.id = "a".into();
+        let mut b = respond_rule("rule-b", "/dup");
+        b.id = "b".into();
+        let rules = vec![a, b];
+        let mut cursors = RuleCursors::default();
+        let r = || req("GET", "https", "h", "/dup");
+
+        let first = evaluate_request_rules_stateful(&rules, &r(), &mut cursors);
+        assert_eq!(
+            responded_rule_name(&first),
+            Some("rule-a"),
+            "first request must hit the match-once rule A"
+        );
+        let second = evaluate_request_rules_stateful(&rules, &r(), &mut cursors);
+        assert_eq!(
+            responded_rule_name(&second),
+            Some("rule-b"),
+            "after A is consumed the same URL must fall through to B"
+        );
+        let third = evaluate_request_rules_stateful(&rules, &r(), &mut cursors);
+        assert_eq!(
+            responded_rule_name(&third),
+            Some("rule-b"),
+            "unlimited rule B keeps responding"
+        );
+    }
+
+    #[test]
+    fn match_once_then_passthrough_to_network() {
+        let rules = vec![respond_rule_limited("once", "/only", Some(1), false)];
+        let mut cursors = RuleCursors::default();
+        let r = || req("GET", "https", "h", "/only");
+
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+                RequestOutcome::Respond { .. }
+            ),
+            "first request is served by the one-shot rule"
+        );
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+                RequestOutcome::Continue { .. }
+            ),
+            "with no fallback rule the second request must hit the network (Continue)"
+        );
+    }
+
+    #[test]
+    fn sequence_advances_foo_then_bar() {
+        let mut foo = respond_rule_limited("foo", "/seq", Some(1), false);
+        foo.id = "foo".into();
+        let mut bar = respond_rule_limited("bar", "/seq", Some(1), false);
+        bar.id = "bar".into();
+        let rules = vec![foo, bar];
+        let mut cursors = RuleCursors::default();
+        let r = || req("GET", "https", "h", "/seq");
+
+        assert_eq!(
+            responded_body(&evaluate_request_rules_stateful(&rules, &r(), &mut cursors)),
+            Some(&b"foo"[..]),
+            "first request yields foo"
+        );
+        assert_eq!(
+            responded_body(&evaluate_request_rules_stateful(&rules, &r(), &mut cursors)),
+            Some(&b"bar"[..]),
+            "second request yields bar"
+        );
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+                RequestOutcome::Continue { .. }
+            ),
+            "after the sequence is exhausted the request continues to the network"
+        );
+    }
+
+    #[test]
+    fn status_sequence_503_503_200() {
+        let status_rule = |id: &str, status: u16| Rule {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            fire_limit: Some(if status == 503 { 2 } else { 1 }),
+            repeat: false,
+            matcher: Matcher {
+                method: None,
+                url: "/retry".to_string(),
+                url_match: MatchKind::Contains,
+            },
+            action: Action::Respond {
+                status,
+                headers: vec![],
+                body: String::new(),
+                content_type: None,
+            },
+        };
+        let rules = vec![status_rule("down", 503), status_rule("up", 200)];
+        let mut cursors = RuleCursors::default();
+        let r = || req("GET", "https", "h", "/retry");
+
+        let statuses: Vec<Option<u16>> = (0..3)
+            .map(|_| responded_status(&evaluate_request_rules_stateful(&rules, &r(), &mut cursors)))
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![Some(503), Some(503), Some(200)],
+            "status sequence must be 503, 503, 200"
+        );
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+                RequestOutcome::Continue { .. }
+            ),
+            "fourth request falls through once the status sequence is spent"
+        );
+    }
+
+    #[test]
+    fn repeat_loops_group() {
+        let rules = vec![respond_rule_limited("twice", "/loop", Some(2), true)];
+        let mut cursors = RuleCursors::default();
+        let r = || req("GET", "https", "h", "/loop");
+
+        for label in ["first", "second"] {
+            assert!(
+                matches!(
+                    evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+                    RequestOutcome::Respond { .. }
+                ),
+                "{label} fire within the limit must respond"
+            );
+        }
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+                RequestOutcome::Respond { .. }
+            ),
+            "third fire must respond because repeat resets the exhausted group"
+        );
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+                RequestOutcome::Respond { .. }
+            ),
+            "fourth fire still responds (loop continues)"
+        );
+
+        let mut a = respond_rule_limited("A", "/cycle", Some(1), true);
+        a.id = "A".into();
+        let mut b = respond_rule_limited("B", "/cycle", Some(1), true);
+        b.id = "B".into();
+        let group = vec![a, b];
+        let mut group_cursors = RuleCursors::default();
+        let gr = || req("GET", "https", "h", "/cycle");
+
+        let order: Vec<Option<String>> = (0..4)
+            .map(|_| {
+                responded_rule_name(&evaluate_request_rules_stateful(
+                    &group,
+                    &gr(),
+                    &mut group_cursors,
+                ))
+                .map(str::to_string)
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                Some("A".to_string()),
+                Some("B".to_string()),
+                Some("A".to_string()),
+                Some("B".to_string()),
+            ],
+            "a repeating group must cycle A,B,A,B (group reset), never A,A,A (per-rule wrap)"
+        );
+    }
+
+    #[test]
+    fn fire_limit_none_is_unlimited() {
+        let rules = vec![respond_rule_limited("forever", "/x", None, false)];
+        let mut cursors = RuleCursors::default();
+        let r = || req("GET", "https", "h", "/x");
+
+        for i in 0..50 {
+            assert!(
+                matches!(
+                    evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+                    RequestOutcome::Respond { .. }
+                ),
+                "unlimited rule must fire on request {i}"
+            );
+        }
+        assert!(
+            cursors.snapshot().get("forever").copied().unwrap_or(0) >= 50,
+            "fires are still counted even when unlimited"
+        );
+    }
+
+    #[test]
+    fn fire_limit_zero_always_skips() {
+        let rules = vec![respond_rule_limited("never", "/zero", Some(0), false)];
+        let mut cursors = RuleCursors::default();
+        let r = || req("GET", "https", "h", "/zero");
+
+        for _ in 0..3 {
+            assert!(
+                matches!(
+                    evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+                    RequestOutcome::Continue { .. }
+                ),
+                "fire_limit Some(0) must never respond"
+            );
+        }
+        assert_eq!(
+            cursors.snapshot().get("never").copied().unwrap_or(0),
+            0,
+            "a never-firing rule records no hits"
+        );
+
+        let repeat_zero = vec![respond_rule_limited("never-loop", "/zeroloop", Some(0), true)];
+        let mut repeat_cursors = RuleCursors::default();
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(
+                    &repeat_zero,
+                    &req("GET", "https", "h", "/zeroloop"),
+                    &mut repeat_cursors
+                ),
+                RequestOutcome::Continue { .. }
+            ),
+            "Some(0) with repeat must not spin and must yield Continue"
+        );
+    }
+
+    #[test]
+    fn disabled_rule_does_not_consume() {
+        let mut rule = respond_rule_limited("off", "/d", Some(1), false);
+        rule.enabled = false;
+        let rules = vec![rule];
+        let mut cursors = RuleCursors::default();
+
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(
+                    &rules,
+                    &req("GET", "https", "h", "/d"),
+                    &mut cursors
+                ),
+                RequestOutcome::Continue { .. }
+            ),
+            "a disabled rule never responds"
+        );
+        assert_eq!(
+            cursors.snapshot().get("off").copied().unwrap_or(0),
+            0,
+            "a disabled match-once rule stays at hit count 0"
+        );
+    }
+
+    #[test]
+    fn missing_maplocal_does_not_consume() {
+        let rules = vec![Rule {
+            id: "map".into(),
+            name: "map".into(),
+            enabled: true,
+            fire_limit: Some(1),
+            repeat: false,
+            matcher: Matcher {
+                method: None,
+                url: "/file".into(),
+                url_match: MatchKind::Contains,
+            },
+            action: Action::MapLocal {
+                path: "/germi/does/not/exist/abcdef.bin".into(),
+                status: 200,
+            },
+        }];
+        let mut cursors = RuleCursors::default();
+        let r = || req("GET", "https", "h", "/file");
+
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+                RequestOutcome::Continue { .. }
+            ),
+            "a MapLocal with a missing file falls through"
+        );
+        assert_eq!(
+            cursors.snapshot().get("map").copied().unwrap_or(0),
+            0,
+            "a missing-file MapLocal must not burn its one-shot use"
+        );
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+                RequestOutcome::Continue { .. }
+            ),
+            "still eligible (and still missing) on the next request"
+        );
+    }
+
+    #[test]
+    fn set_request_header_does_not_consume() {
+        let rules = vec![Rule {
+            id: "hdr".into(),
+            name: "hdr".into(),
+            enabled: true,
+            fire_limit: Some(1),
+            repeat: false,
+            matcher: Matcher {
+                method: None,
+                url: "/h".into(),
+                url_match: MatchKind::Contains,
+            },
+            action: Action::SetRequestHeader {
+                name: "x-germi".into(),
+                value: "1".into(),
+            },
+        }];
+        let mut cursors = RuleCursors::default();
+        let r = || req("GET", "https", "h", "/h");
+
+        for _ in 0..3 {
+            match evaluate_request_rules_stateful(&rules, &r(), &mut cursors) {
+                RequestOutcome::Continue { set_headers } => assert_eq!(
+                    set_headers,
+                    vec![("x-germi".to_string(), "1".to_string())],
+                    "the header edit must keep applying every request"
+                ),
+                other => panic!("expected Continue with header, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            cursors.snapshot().get("hdr").copied().unwrap_or(0),
+            0,
+            "a non-short-circuiting header edit never consumes a fire"
+        );
+    }
+
+    #[test]
+    fn reset_restores_consumed() {
+        let rules = vec![respond_rule_limited("once", "/r", Some(1), false)];
+        let mut cursors = RuleCursors::default();
+        let r = || req("GET", "https", "h", "/r");
+
+        assert!(matches!(
+            evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+            RequestOutcome::Respond { .. }
+        ));
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+                RequestOutcome::Continue { .. }
+            ),
+            "consumed before reset"
+        );
+        cursors.reset();
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+                RequestOutcome::Respond { .. }
+            ),
+            "after reset the one-shot rule fires again"
+        );
+    }
+
+    #[test]
+    fn reset_rule_only_targets_one() {
+        let mut a = respond_rule_limited("A", "/a", Some(1), false);
+        a.id = "a".into();
+        let mut b = respond_rule_limited("B", "/b", Some(1), false);
+        b.id = "b".into();
+        let rules = vec![a, b];
+        let mut cursors = RuleCursors::default();
+
+        assert!(matches!(
+            evaluate_request_rules_stateful(&rules, &req("GET", "https", "h", "/a"), &mut cursors),
+            RequestOutcome::Respond { .. }
+        ));
+        assert!(matches!(
+            evaluate_request_rules_stateful(&rules, &req("GET", "https", "h", "/b"), &mut cursors),
+            RequestOutcome::Respond { .. }
+        ));
+
+        cursors.reset_rule("a");
+
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(
+                    &rules,
+                    &req("GET", "https", "h", "/a"),
+                    &mut cursors
+                ),
+                RequestOutcome::Respond { .. }
+            ),
+            "reset_rule(a) revives rule A"
+        );
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(
+                    &rules,
+                    &req("GET", "https", "h", "/b"),
+                    &mut cursors
+                ),
+                RequestOutcome::Continue { .. }
+            ),
+            "rule B stays consumed after reset_rule(a)"
+        );
+    }
+
+    #[test]
+    fn only_active_scenario_consumes() {
+        let ar = AutoResponder {
+            scenarios: vec![
+                Scenario {
+                    id: "a".into(),
+                    name: "A".into(),
+                    rules: vec![respond_rule_limited("from-a", "/x", Some(1), false)],
+                },
+                Scenario {
+                    id: "b".into(),
+                    name: "B".into(),
+                    rules: vec![respond_rule_limited("from-b", "/x", Some(1), false)],
+                },
+            ],
+            active_scenario_id: Some("b".into()),
+        };
+        let mut cursors = RuleCursors::default();
+
+        match ar.evaluate_request_stateful(&req("GET", "https", "h", "/x"), &mut cursors) {
+            RequestOutcome::Respond { rule, .. } => assert_eq!(rule, "from-b"),
+            other => panic!("expected Respond from scenario b, got {other:?}"),
+        }
+        let snap = cursors.snapshot();
+        assert_eq!(
+            snap.get("from-b").copied().unwrap_or(0),
+            1,
+            "the active scenario's rule advances"
+        );
+        assert_eq!(
+            snap.get("from-a").copied().unwrap_or(0),
+            0,
+            "an inactive scenario's rule id must not advance"
+        );
+    }
+
+    #[test]
+    fn tester_is_side_effect_free() {
+        let rules = vec![respond_rule_limited("once", "/t", Some(1), false)];
+        let r = || req("GET", "https", "h", "/t");
+
+        assert!(
+            matches!(
+                evaluate_request_rules(&rules, &r()),
+                RequestOutcome::Respond { .. }
+            ),
+            "first pure preview responds"
+        );
+        assert!(
+            matches!(
+                evaluate_request_rules(&rules, &r()),
+                RequestOutcome::Respond { .. }
+            ),
+            "second pure preview also responds — the offline tester uses a scratch cursor and never advances state"
+        );
+    }
+
+    #[test]
+    fn rule_hits_snapshot_reflects_fires() {
+        let mut a = respond_rule_limited("A", "/a", Some(5), false);
+        a.id = "a".into();
+        let mut b = respond_rule_limited("B", "/b", Some(5), false);
+        b.id = "b".into();
+        let rules = vec![a, b];
+        let mut cursors = RuleCursors::default();
+
+        evaluate_request_rules_stateful(&rules, &req("GET", "https", "h", "/a"), &mut cursors);
+        evaluate_request_rules_stateful(&rules, &req("GET", "https", "h", "/a"), &mut cursors);
+        evaluate_request_rules_stateful(&rules, &req("GET", "https", "h", "/b"), &mut cursors);
+
+        let snap = cursors.snapshot();
+        assert_eq!(snap.get("a").copied(), Some(2), "rule A fired twice");
+        assert_eq!(snap.get("b").copied(), Some(1), "rule B fired once");
+    }
+
+    #[test]
+    fn evaluate_request_stateful_off_is_continue_and_pure() {
+        let ar = AutoResponder {
+            scenarios: vec![Scenario {
+                id: "a".into(),
+                name: "A".into(),
+                rules: vec![respond_rule_limited("from-a", "/x", Some(1), false)],
+            }],
+            active_scenario_id: None,
+        };
+        let mut cursors = RuleCursors::default();
+
+        assert!(
+            matches!(
+                ar.evaluate_request_stateful(&req("GET", "https", "h", "/x"), &mut cursors),
+                RequestOutcome::Continue { .. }
+            ),
+            "Off (no active scenario) must pass through"
+        );
+        assert!(
+            cursors.snapshot().is_empty(),
+            "Off must never mutate cursors"
+        );
     }
 }

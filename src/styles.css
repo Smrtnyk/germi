@@ -10,6 +10,7 @@
   --muted: #8a96a6;
   --accent: #2dd4bf; /* teal */
   --accent-dim: #0d9488;
+  --accent-bg: #113333;
   --danger: #f87171;
   --warn: #fbbf24;
 
@@ -929,6 +930,13 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.rfire {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--accent-bg);
+  color: var(--accent);
+}
 .rule-item .dup {
   opacity: 0;
   font-size: 13px;
@@ -1404,6 +1412,44 @@ code {
 }
 .resp-status .badge.status {
   background: var(--bg-3);
+}
+.seq-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.seq-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+.seq-chip {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--text);
+}
+.seq-chip.respond {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+.seq-chip.block {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.seq-chip.continue {
+  border-color: var(--s3);
+  color: var(--s3);
+}
+.seq-chip.loops {
+  border-color: var(--warn);
+  color: var(--warn);
 }
 
 /* ---- autoresponder / scenarios ---- */

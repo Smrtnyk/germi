@@ -9,7 +9,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::flow::{now_ms, CapturedRequest, CapturedResponse};
-use crate::rules::{RequestOutcome, RuleSet};
+use crate::rules::{
+    evaluate_request_rules_stateful, RequestOutcome, RuleCursors, RuleSet,
+};
 
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +52,14 @@ pub struct TestResponse {
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct SequenceStep {
+    pub outcome: String,
+    pub status: Option<u16>,
+    pub rule: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct TestResult {
     /// Names of every enabled rule whose matcher matches the request.
     pub matched_rules: Vec<String>,
@@ -63,6 +73,8 @@ pub struct TestResult {
     /// The response the client would receive.
     pub response: Option<TestResponse>,
     pub notes: Vec<String>,
+    pub sequence: Vec<SequenceStep>,
+    pub sequence_loops: bool,
 }
 
 /// Split a URL/pattern into `(scheme, host, path)`, matching how the live
@@ -98,6 +110,61 @@ fn client_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
         .collect()
 }
 
+const PREVIEW_CAP: usize = 10;
+
+fn preview_sequence(rules: &RuleSet, req: &CapturedRequest) -> (Vec<SequenceStep>, bool) {
+    let mut cursors = RuleCursors::default();
+    let mut steps = Vec::new();
+    let mut ran_to_cap = true;
+    for _ in 0..PREVIEW_CAP {
+        let outcome = evaluate_request_rules_stateful(&rules.rules, req, &mut cursors);
+        let terminal = match &outcome {
+            RequestOutcome::Respond { rule, response } => {
+                steps.push(SequenceStep {
+                    outcome: "respond".into(),
+                    status: Some(response.status),
+                    rule: Some(rule.clone()),
+                });
+                rules
+                    .rules
+                    .iter()
+                    .find(|r| &r.name == rule)
+                    .is_none_or(|r| r.fire_limit.is_none())
+            }
+            RequestOutcome::Block { rule } => {
+                steps.push(SequenceStep {
+                    outcome: "block".into(),
+                    status: Some(403),
+                    rule: Some(rule.clone()),
+                });
+                rules
+                    .rules
+                    .iter()
+                    .find(|r| &r.name == rule)
+                    .is_none_or(|r| r.fire_limit.is_none())
+            }
+            RequestOutcome::Continue { .. } => {
+                steps.push(SequenceStep {
+                    outcome: "continue".into(),
+                    status: None,
+                    rule: None,
+                });
+                true
+            }
+        };
+        if terminal {
+            ran_to_cap = false;
+            break;
+        }
+    }
+    let loops = ran_to_cap
+        && rules
+            .rules
+            .iter()
+            .any(|r| r.enabled && r.repeat && r.matcher.matches(req));
+    (steps, loops)
+}
+
 pub fn test_rules(rules: &RuleSet, input: &TestInput) -> TestResult {
     let (scheme, host, path) = parse_url(&input.url);
     let req = CapturedRequest {
@@ -126,6 +193,9 @@ pub fn test_rules(rules: &RuleSet, input: &TestInput) -> TestResult {
         );
     }
 
+    let (seq, sequence_loops) = preview_sequence(rules, &req);
+    let sequence = if seq.len() > 1 { seq } else { Vec::new() };
+
     match rules.evaluate_request(&req) {
         RequestOutcome::Respond { rule, response } => TestResult {
             matched_rules,
@@ -140,6 +210,8 @@ pub fn test_rules(rules: &RuleSet, input: &TestInput) -> TestResult {
                 source: format!("Synthesized by rule \u{201c}{rule}\u{201d} — request never hit the network"),
             }),
             notes,
+            sequence,
+            sequence_loops,
         },
         RequestOutcome::Block { rule } => TestResult {
             matched_rules,
@@ -154,53 +226,78 @@ pub fn test_rules(rules: &RuleSet, input: &TestInput) -> TestResult {
                 source: format!("Blocked by rule \u{201c}{rule}\u{201d}"),
             }),
             notes,
+            sequence,
+            sequence_loops,
         },
-        RequestOutcome::Continue { set_headers } => {
-            let mut eff = req.headers.clone();
-            for (k, v) in &set_headers {
-                if let Some(slot) = eff.iter_mut().find(|(hk, _)| hk.eq_ignore_ascii_case(k)) {
-                    slot.1.clone_from(v);
-                } else {
-                    eff.push((k.clone(), v.clone()));
-                }
-            }
-            if !set_headers.is_empty() {
-                notes.push(format!(
-                    "{} request-header rule(s) applied; request forwarded upstream.",
-                    set_headers.len()
-                ));
-            }
+        RequestOutcome::Continue { set_headers } => continue_result(
+            rules,
+            input,
+            &req,
+            &set_headers,
+            matched_rules,
+            notes,
+            sequence,
+            sequence_loops,
+        ),
+    }
+}
 
-            let mut resp = CapturedResponse {
-                status: input.resp_status,
-                version: "HTTP/1.1".to_string(),
-                headers: input.resp_headers.clone(),
-                body: input.resp_body.clone().into_bytes(),
-                timestamp_ms: now_ms(),
-            };
-            let fired = rules.apply_response(&req, &mut resp);
-            let source = match &fired {
-                Some(name) => {
-                    format!("Sample upstream response, modified by rule \u{201c}{name}\u{201d}")
-                }
-                None => "Sample upstream response (no response-phase rule changed it)".to_string(),
-            };
-
-            TestResult {
-                matched_rules,
-                outcome: "continue".to_string(),
-                short_circuit: false,
-                fired_rule: fired,
-                effective_request_headers: eff,
-                response: Some(TestResponse {
-                    status: resp.status,
-                    headers: client_headers(resp.headers),
-                    body: String::from_utf8_lossy(&resp.body).into_owned(),
-                    source,
-                }),
-                notes,
-            }
+#[allow(clippy::too_many_arguments)]
+fn continue_result(
+    rules: &RuleSet,
+    input: &TestInput,
+    req: &CapturedRequest,
+    set_headers: &[(String, String)],
+    matched_rules: Vec<String>,
+    mut notes: Vec<String>,
+    sequence: Vec<SequenceStep>,
+    sequence_loops: bool,
+) -> TestResult {
+    let mut eff = req.headers.clone();
+    for (k, v) in set_headers {
+        if let Some(slot) = eff.iter_mut().find(|(hk, _)| hk.eq_ignore_ascii_case(k)) {
+            slot.1.clone_from(v);
+        } else {
+            eff.push((k.clone(), v.clone()));
         }
+    }
+    if !set_headers.is_empty() {
+        notes.push(format!(
+            "{} request-header rule(s) applied; request forwarded upstream.",
+            set_headers.len()
+        ));
+    }
+
+    let mut resp = CapturedResponse {
+        status: input.resp_status,
+        version: "HTTP/1.1".to_string(),
+        headers: input.resp_headers.clone(),
+        body: input.resp_body.clone().into_bytes(),
+        timestamp_ms: now_ms(),
+    };
+    let fired = rules.apply_response(req, &mut resp);
+    let source = match &fired {
+        Some(name) => {
+            format!("Sample upstream response, modified by rule \u{201c}{name}\u{201d}")
+        }
+        None => "Sample upstream response (no response-phase rule changed it)".to_string(),
+    };
+
+    TestResult {
+        matched_rules,
+        outcome: "continue".to_string(),
+        short_circuit: false,
+        fired_rule: fired,
+        effective_request_headers: eff,
+        response: Some(TestResponse {
+            status: resp.status,
+            headers: client_headers(resp.headers),
+            body: String::from_utf8_lossy(&resp.body).into_owned(),
+            source,
+        }),
+        notes,
+        sequence,
+        sequence_loops,
     }
 }
 
@@ -214,6 +311,8 @@ mod tests {
             id: "1".into(),
             name: "mock health".into(),
             enabled: true,
+            fire_limit: None,
+            repeat: false,
             matcher: Matcher {
                 method: Some("GET".into()),
                 url: "/health".into(),
@@ -275,6 +374,8 @@ mod tests {
                 id: "2".into(),
                 name: "redact".into(),
                 enabled: true,
+                fire_limit: None,
+                repeat: false,
                 matcher: Matcher::default(),
                 action: Action::RewriteResponseBody {
                     find: "secret".into(),
@@ -308,6 +409,8 @@ mod tests {
                 id: "1".into(),
                 name: "mock".into(),
                 enabled: true,
+                fire_limit: None,
+                repeat: false,
                 matcher: Matcher::default(),
                 action: Action::Respond {
                     status: 200,
@@ -357,5 +460,107 @@ mod tests {
         assert_eq!(result.outcome, "continue");
         assert!(result.matched_rules.is_empty());
         assert_eq!(result.response.unwrap().status, 204);
+    }
+
+    fn seq_rule(id: &str, status: u16, fire_limit: Option<u32>, repeat: bool) -> Rule {
+        Rule {
+            id: id.into(),
+            name: id.into(),
+            enabled: true,
+            fire_limit,
+            repeat,
+            matcher: Matcher {
+                method: None,
+                url: "/seq".into(),
+                url_match: MatchKind::Contains,
+            },
+            action: Action::Respond {
+                status,
+                headers: vec![],
+                body: format!("body-{id}"),
+                content_type: None,
+            },
+        }
+    }
+
+    fn seq_input() -> TestInput {
+        TestInput {
+            method: "GET".into(),
+            url: "https://api.test/seq".into(),
+            req_headers: vec![],
+            req_body: String::new(),
+            resp_status: 200,
+            resp_headers: vec![],
+            resp_body: String::new(),
+        }
+    }
+
+    #[test]
+    fn sequence_preview_advances() {
+        let rules = RuleSet {
+            rules: vec![
+                seq_rule("A", 201, Some(1), false),
+                seq_rule("B", 202, Some(1), false),
+            ],
+        };
+        let result = test_rules(&rules, &seq_input());
+        assert_eq!(result.sequence.len(), 3);
+        assert_eq!(result.sequence[0].outcome, "respond");
+        assert_eq!(result.sequence[1].outcome, "respond");
+        assert_eq!(result.sequence[2].outcome, "continue");
+        assert_eq!(
+            result
+                .sequence
+                .iter()
+                .map(|s| s.status)
+                .collect::<Vec<_>>(),
+            vec![Some(201), Some(202), None]
+        );
+        assert!(!result.sequence_loops);
+    }
+
+    #[test]
+    fn sequence_preview_status_503_200() {
+        let rules = RuleSet {
+            rules: vec![
+                seq_rule("A", 503, Some(2), false),
+                seq_rule("B", 200, None, false),
+            ],
+        };
+        let result = test_rules(&rules, &seq_input());
+        assert_eq!(
+            result
+                .sequence
+                .iter()
+                .map(|s| s.status)
+                .collect::<Vec<_>>(),
+            vec![Some(503), Some(503), Some(200)]
+        );
+        assert_eq!(result.sequence.len(), 3);
+        assert!(!result.sequence_loops);
+    }
+
+    #[test]
+    fn sequence_preview_loops_flagged() {
+        let rules = RuleSet {
+            rules: vec![
+                seq_rule("A", 201, Some(1), true),
+                seq_rule("B", 202, Some(1), true),
+            ],
+        };
+        let result = test_rules(&rules, &seq_input());
+        assert!(result.sequence_loops);
+        assert_eq!(result.sequence.len(), PREVIEW_CAP);
+    }
+
+    #[test]
+    fn sequence_empty_for_single_static_rule() {
+        let rules = RuleSet {
+            rules: vec![seq_rule("A", 200, None, false)],
+        };
+        let result = test_rules(&rules, &seq_input());
+        assert!(result.sequence.is_empty());
+        assert_eq!(result.outcome, "respond");
+        assert!(result.response.is_some());
     }
 }

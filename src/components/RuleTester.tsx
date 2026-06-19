@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { api } from "../ipc";
-import type { RuleSet, TestInput, TestResult } from "../types";
+import type { RuleSet, SequenceStep, TestInput, TestResult } from "../types";
 
 interface Props {
   /** The full rule set to simulate (tested as a whole, in order). */
@@ -15,6 +15,30 @@ const OUTCOME: Record<TestResult["outcome"], { label: string; cls: string }> = {
   block: { label: "Blocked", cls: "block" },
   continue: { label: "Forwarded upstream", cls: "continue" },
 };
+
+function SequenceStrip({ sequence, loops }: { sequence: SequenceStep[]; loops: boolean }) {
+  return (
+    <div className="seq-strip">
+      <span className="muted small">If this exact request repeats:</span>
+      <div className="seq-chips">
+        {sequence.map((step, i) => (
+          <span
+            key={i}
+            className={`seq-chip ${step.outcome}`}
+            title={step.rule ?? "forwarded upstream"}
+          >
+            {step.status === null ? "→ upstream" : step.status}
+          </span>
+        ))}
+        {loops && (
+          <span className="seq-chip loops" title="sequence loops while it keeps matching">
+            ↻ loops
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function RuleTester({ rules, seedMethod, seedUrl }: Props) {
   const [method, setMethod] = useState(seedMethod ?? "GET");
@@ -103,48 +127,56 @@ export function RuleTester({ rules, seedMethod, seedUrl }: Props) {
 
       {error && <div className="error-bar">{error}</div>}
 
-      {result && (
-        <div className="test-result">
-          <div className="result-head">
-            <span className={`outcome-badge ${OUTCOME[result.outcome].cls}`}>
-              {OUTCOME[result.outcome].label}
-            </span>
-            {result.firedRule && (
-              <span className="muted">
-                fired: <strong>{result.firedRule}</strong>
-              </span>
-            )}
-            <span className="muted">
-              matched: {result.matchedRules.length ? result.matchedRules.join(", ") : "none"}
-            </span>
+      {result && <TestResultView result={result} />}
+    </div>
+  );
+}
+
+function TestResultView({ result }: { result: TestResult }) {
+  return (
+    <div className="test-result">
+      <div className="result-head">
+        <span className={`outcome-badge ${OUTCOME[result.outcome].cls}`}>
+          {OUTCOME[result.outcome].label}
+        </span>
+        {result.firedRule && (
+          <span className="muted">
+            fired: <strong>{result.firedRule}</strong>
+          </span>
+        )}
+        <span className="muted">
+          matched: {result.matchedRules.length ? result.matchedRules.join(", ") : "none"}
+        </span>
+      </div>
+
+      {result.notes.map((n, i) => (
+        <div key={i} className="muted small note">
+          {n}
+        </div>
+      ))}
+
+      {result.response && (
+        <div className="result-response">
+          <div className="muted small">{result.response.source}</div>
+          <div className="resp-status">
+            <span className="badge status">{result.response.status}</span>
           </div>
-
-          {result.notes.map((n, i) => (
-            <div key={i} className="muted small note">
-              {n}
-            </div>
-          ))}
-
-          {result.response && (
-            <div className="result-response">
-              <div className="muted small">{result.response.source}</div>
-              <div className="resp-status">
-                <span className="badge status">{result.response.status}</span>
-              </div>
-              {result.response.headers.length > 0 && (
-                <div className="headers compact">
-                  {result.response.headers.map(([k, v], i) => (
-                    <div className="hrow" key={`${k}-${i}`}>
-                      <span className="hkey">{k}</span>
-                      <span className="hval">{v}</span>
-                    </div>
-                  ))}
+          {result.response.headers.length > 0 && (
+            <div className="headers compact">
+              {result.response.headers.map(([k, v], i) => (
+                <div className="hrow" key={`${k}-${i}`}>
+                  <span className="hkey">{k}</span>
+                  <span className="hval">{v}</span>
                 </div>
-              )}
-              <pre className="snippet">{result.response.body || "(empty body)"}</pre>
+              ))}
             </div>
           )}
+          <pre className="snippet">{result.response.body || "(empty body)"}</pre>
         </div>
+      )}
+
+      {result.sequence.length > 0 && (
+        <SequenceStrip sequence={result.sequence} loops={result.sequenceLoops} />
       )}
     </div>
   );

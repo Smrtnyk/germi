@@ -30,6 +30,8 @@ export const api = {
   getAutoresponder: () => invoke<AutoResponder>("get_autoresponder"),
   setAutoresponder: (autoresponder: AutoResponder) =>
     invoke<void>("set_autoresponder", { autoresponder }),
+  resetRuleState: (scenarioId: string | null) => invoke<void>("reset_rule_state", { scenarioId }),
+  ruleHits: () => invoke<Record<string, number>>("rule_hits"),
   getSettings: () => invoke<ProxySettings>("get_settings"),
   setSettings: (settings: ProxySettings) => invoke<void>("set_settings", { settings }),
   exportSettings: () => invoke<boolean>("export_settings"),
