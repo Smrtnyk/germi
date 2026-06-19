@@ -9,6 +9,12 @@
         "functions": ["useAppState"],
         "maxCognitive": 25,
         "reason": "Composition-root hook that wires the feature hooks; fallow's cognitive score here reflects hook count (cyclomatic is 5), not branching."
+      },
+      {
+        "files": ["src/components/TrafficList.tsx"],
+        "functions": ["TrafficList"],
+        "maxCognitive": 20,
+        "reason": "Pure wiring component (cyclomatic 1); cognitive reflects prop/hook fan-out to its extracted subcomponents (HeaderRow/FlowScroll/useFlowMenu), not branching."
       }
     ]
   }
