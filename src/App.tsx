@@ -92,6 +92,12 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       run: () => s.setRightMode(s.rightMode === "split" ? "single" : "split"),
     },
     {
+      id: "toggle-panel",
+      group: "View",
+      label: s.rightCollapsed ? "Show side panel" : "Hide side panel",
+      run: () => s.setRightCollapsed(!s.rightCollapsed),
+    },
+    {
       id: "decode",
       group: "View",
       label: s.decode ? "Disable body decode" : "Enable body decode",
@@ -260,12 +266,14 @@ function RightPanelHeader({
   split,
   setRightMode,
   activeScenario,
+  onCollapse,
 }: {
   rightTab: RightTab;
   setRightTab: (tab: RightTab) => void;
   split: boolean;
   setRightMode: (mode: RightMode) => void;
   activeScenario: string | null;
+  onCollapse: () => void;
 }) {
   return (
     <div className="right-header">
@@ -298,6 +306,13 @@ function RightPanelHeader({
       >
         ⊟ Split
       </button>
+      <button
+        className="btn ghost small"
+        title="Hide panel — widen the traffic list"
+        onClick={onCollapse}
+      >
+        ⟩
+      </button>
     </div>
   );
 }
@@ -308,6 +323,7 @@ function RightPanel({
   rightMode,
   setRightMode,
   activeScenario,
+  onCollapse,
   inspector,
   auto,
 }: {
@@ -316,6 +332,7 @@ function RightPanel({
   rightMode: RightMode;
   setRightMode: (mode: RightMode) => void;
   activeScenario: string | null;
+  onCollapse: () => void;
   inspector: {
     detail: FlowDetail | null;
     summary: FlowSummary | undefined;
@@ -342,6 +359,7 @@ function RightPanel({
         split={split}
         setRightMode={setRightMode}
         activeScenario={activeScenario}
+        onCollapse={onCollapse}
       />
 
       <div className={`right-content ${split ? "split" : ""}`}>
@@ -352,6 +370,23 @@ function RightPanel({
           <AutoresponderPanel {...auto} />
         </div>
       </div>
+    </div>
+  );
+}
+
+function PanelRail({
+  activeScenario,
+  onExpand,
+}: {
+  activeScenario: string | null;
+  onExpand: () => void;
+}) {
+  return (
+    <div className="panel-rail">
+      <button className="rail-btn" onClick={onExpand} title="Show Inspector / Autoresponder panel">
+        ⟨{activeScenario && <span className="live-dot" />}
+        <span className="rail-label">Panel</span>
+      </button>
     </div>
   );
 }
@@ -448,7 +483,9 @@ export function App() {
           <main
             className="body workbench"
             style={{
-              gridTemplateColumns: `minmax(0, ${s.trafficResize.size}px) 6px minmax(440px, 1fr)`,
+              gridTemplateColumns: s.rightCollapsed
+                ? "minmax(0, 1fr) 0 36px"
+                : `minmax(0, ${s.trafficSplit.leftPx}px) 6px minmax(440px, 1fr)`,
             }}
           >
             <div className="traffic-col">
@@ -484,7 +521,6 @@ export function App() {
                 onKeySelect={s.handleKeySelect}
                 onClearSelection={s.selection.clearSelection}
                 onDeleteSelected={s.deleteSelected}
-                onContentWidth={s.setTrafficMin}
                 onCommentEdit={s.flowStore.editComment}
                 onMockFlow={s.mockFlow}
                 onFilterToHost={s.filterToHost}
@@ -496,43 +532,51 @@ export function App() {
 
             <div
               className="resizer"
-              onPointerDown={s.trafficResize.onPointerDown}
+              onPointerDown={s.rightCollapsed ? undefined : s.trafficSplit.onPointerDown}
               title="Drag to resize"
             />
 
-            <RightPanel
-              rightTab={s.rightTab}
-              setRightTab={s.setRightTab}
-              rightMode={s.rightMode}
-              setRightMode={s.setRightMode}
-              activeScenario={s.activeScenario}
-              inspector={{
-                detail: s.inspector.detail,
-                summary: s.selectedSummary,
-                loading: s.inspector.loading,
-                decode: s.decode,
-                onMock: (d) => void s.ar.mockFlows([d.id], s.ar.autoresponder.activeScenarioId),
-                onLoadFull: () => s.setFullBody(true),
-                selectedSummaries: s.selectedSummaries,
-                onSelectOne: (id) => s.handleKeySelect(id, false),
-                onMockMany: (ids) => {
-                  void s.ar.mockFlows(ids, s.ar.autoresponder.activeScenarioId).then((ok) => {
-                    if (ok) s.selection.clearSelection();
-                  });
-                },
-                onClearSelection: s.selection.clearSelection,
-              }}
-              auto={{
-                ar: s.ar.autoresponder,
-                onChange: s.ar.saveAutoresponder,
-                selectRuleId: s.ar.selectRuleId,
-                onResetState: s.ar.resetRuleState,
-                ruleHits: s.ar.ruleHits,
-                onExportRules: s.ar.exportRules,
-                onImportRules: s.ar.importRules,
-                onDropMock: s.dropMockFlows,
-              }}
-            />
+            {s.rightCollapsed ? (
+              <PanelRail
+                activeScenario={s.activeScenario}
+                onExpand={() => s.setRightCollapsed(false)}
+              />
+            ) : (
+              <RightPanel
+                rightTab={s.rightTab}
+                setRightTab={s.setRightTab}
+                rightMode={s.rightMode}
+                setRightMode={s.setRightMode}
+                activeScenario={s.activeScenario}
+                onCollapse={() => s.setRightCollapsed(true)}
+                inspector={{
+                  detail: s.inspector.detail,
+                  summary: s.selectedSummary,
+                  loading: s.inspector.loading,
+                  decode: s.decode,
+                  onMock: (d) => void s.ar.mockFlows([d.id], s.ar.autoresponder.activeScenarioId),
+                  onLoadFull: () => s.setFullBody(true),
+                  selectedSummaries: s.selectedSummaries,
+                  onSelectOne: (id) => s.handleKeySelect(id, false),
+                  onMockMany: (ids) => {
+                    void s.ar.mockFlows(ids, s.ar.autoresponder.activeScenarioId).then((ok) => {
+                      if (ok) s.selection.clearSelection();
+                    });
+                  },
+                  onClearSelection: s.selection.clearSelection,
+                }}
+                auto={{
+                  ar: s.ar.autoresponder,
+                  onChange: s.ar.saveAutoresponder,
+                  selectRuleId: s.ar.selectRuleId,
+                  onResetState: s.ar.resetRuleState,
+                  ruleHits: s.ar.ruleHits,
+                  onExportRules: s.ar.exportRules,
+                  onImportRules: s.ar.importRules,
+                  onDropMock: s.dropMockFlows,
+                }}
+              />
+            )}
           </main>
 
           <StatusBar

@@ -1,12 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  allColumns,
-  DEFAULT_COLUMNS,
-  FLEX_PREFERENCE,
-  PRESETS,
-  resolveColumns,
-  type ColumnDef,
-} from "./columns";
+import { allColumns, DEFAULT_COLUMNS, PRESETS, resolveColumns, type ColumnDef } from "./columns";
 import type { FlowSummary } from "./types";
 
 function summary(overrides: Partial<FlowSummary> = {}): FlowSummary {
@@ -105,9 +98,5 @@ describe("presets", () => {
     expect(PRESETS[1].name).toBe("Default");
     expect(DEFAULT_COLUMNS).toBe(PRESETS[1].columns);
     expect(DEFAULT_COLUMNS).toContain("method");
-  });
-
-  it("lists the flex-fill preference order", () => {
-    expect(FLEX_PREFERENCE).toEqual(["path", "url", "host"]);
   });
 });
