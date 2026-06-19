@@ -27,6 +27,7 @@ mod flow;
 mod handler;
 mod import;
 mod rules;
+mod rules_export;
 mod session;
 mod settings;
 mod shared;
@@ -46,6 +47,7 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 pub use ca::CertAuthority;
 pub use flow::{FlowDetail, FlowEvent, FlowSummary, MessageDetail, ResourceKind};
 pub use rules::{Action, AutoResponder, MatchKind, Matcher, Rule, RuleSet, Scenario};
+pub use rules_export::RulesExport;
 pub use settings::ProxySettings;
 pub use tester::{test_rules, SequenceStep, TestInput, TestResponse, TestResult};
 
@@ -312,6 +314,46 @@ impl ProxyController {
         let flows = session::import_session(bytes)?;
         self.clear_flows();
         Ok(self.import_flows(flows))
+    }
+
+    // ---- autoresponder rules export / import (.germi-rules) ----
+
+    /// Serialize scenarios to a portable `.germi-rules` bundle. With `Some(id)`
+    /// only that scenario is exported (empty bundle if it's not found); `None`
+    /// exports the whole config. The active-scenario pointer is never carried.
+    pub fn export_rules(&self, scenario_id: Option<&str>) -> Vec<u8> {
+        let ar = self.get_autoresponder();
+        let selected: Vec<Scenario> = match scenario_id {
+            Some(id) => ar.scenarios.into_iter().filter(|s| s.id == id).collect(),
+            None => ar.scenarios,
+        };
+        rules_export::export_rules(&selected)
+    }
+
+    /// Import scenarios from a `.germi-rules` bundle. Imported scenarios are
+    /// always re-keyed (fresh scenario + rule ids) so they can never alias an
+    /// existing rule's hit counter. `replace == false` appends them (active
+    /// pointer preserved); `replace == true` clears existing scenarios and resets
+    /// the active pointer to Off (importing must not silently start mocking).
+    /// Returns the number of scenarios imported.
+    pub fn import_rules(&self, bytes: &[u8], replace: bool) -> Result<usize> {
+        let imported = rules_export::parse_rules(bytes)?;
+        let count = imported.len();
+
+        let mut ar = self.get_autoresponder();
+        if replace {
+            ar.scenarios.clear();
+            ar.active_scenario_id = None;
+        }
+        let mut taken: std::collections::HashSet<String> =
+            ar.scenarios.iter().map(|s| s.name.clone()).collect();
+        for mut scenario in imported {
+            scenario.name = rules_export::dedupe_name(&mut taken, &scenario.name);
+            ar.scenarios.push(scenario);
+        }
+
+        self.set_autoresponder(ar);
+        Ok(count)
     }
 
     /// Insert imported flows (assigning ids) and stream them to the UI.
@@ -589,6 +631,275 @@ mod tests {
         assert!(
             !controller.rule_hits().contains_key("seq-rule"),
             "reset_missing must drop the counter for a deleted rule even when the active scenario is unchanged"
+        );
+    }
+
+    #[test]
+    fn import_rules_merges_and_preserves_active() {
+        let dst = controller();
+        dst.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("A", vec![respond_rule("a-rule")])],
+            active_scenario_id: Some("A".to_string()),
+        });
+
+        let src = controller();
+        src.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("B", vec![respond_rule("b-rule")])],
+            active_scenario_id: None,
+        });
+        let bytes = src.export_rules(None);
+
+        let count = dst.import_rules(&bytes, false).expect("import");
+        assert_eq!(count, 1);
+
+        let ar = dst.get_autoresponder();
+        assert_eq!(ar.scenarios.len(), 2, "merge appends the imported scenario");
+        assert_eq!(
+            ar.active_scenario_id.as_deref(),
+            Some("A"),
+            "merge must not steal the active selection"
+        );
+        let imported = ar.scenarios.iter().find(|s| s.name == "B").expect("imported B");
+        assert_ne!(imported.id, "B", "imported scenario must be re-keyed");
+    }
+
+    #[test]
+    fn import_rules_dedupes_names() {
+        let dst = controller();
+        dst.set_autoresponder(AutoResponder {
+            scenarios: vec![Scenario {
+                id: "x".to_string(),
+                name: "My mocks".to_string(),
+                rules: vec![],
+            }],
+            active_scenario_id: None,
+        });
+
+        let src = controller();
+        src.set_autoresponder(AutoResponder {
+            scenarios: vec![Scenario {
+                id: "y".to_string(),
+                name: "My mocks".to_string(),
+                rules: vec![],
+            }],
+            active_scenario_id: None,
+        });
+        let bytes = src.export_rules(None);
+
+        dst.import_rules(&bytes, false).expect("import");
+        let names: Vec<String> = dst.get_autoresponder().scenarios.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(names, vec!["My mocks".to_string(), "My mocks (2)".to_string()]);
+    }
+
+    #[test]
+    fn export_single_scenario_filters() {
+        let c = controller();
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![
+                scenario("A", vec![respond_rule("a-rule")]),
+                scenario("B", vec![respond_rule("b-rule")]),
+            ],
+            active_scenario_id: None,
+        });
+
+        let only_a = rules_export::parse_rules(&c.export_rules(Some("A"))).expect("parse A");
+        assert_eq!(only_a.len(), 1, "exporting one id yields exactly that scenario");
+        assert_eq!(only_a[0].name, "A");
+
+        let missing = rules_export::parse_rules(&c.export_rules(Some("missing"))).expect("parse missing");
+        assert!(missing.is_empty(), "exporting an unknown id yields an empty bundle");
+    }
+
+    #[test]
+    fn import_rekey_avoids_cursor_aliasing() {
+        let c = controller();
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("A", vec![respond_rule("seq-rule")])],
+            active_scenario_id: Some("A".to_string()),
+        });
+
+        fire_active_once(&c);
+        assert_eq!(
+            c.rule_hits().get("seq-rule").copied(),
+            Some(1),
+            "the original rule fired once"
+        );
+
+        // Import a copy of A back into the same controller; the clone's rule must
+        // get a fresh id so it does NOT inherit the original's (consumed) hit.
+        let bytes = c.export_rules(Some("A"));
+        c.import_rules(&bytes, false).expect("import");
+
+        let ar = c.get_autoresponder();
+        let clone = ar.scenarios.iter().rev().find(|s| s.name == "A (2)").expect("imported clone");
+        let clone_rule_id = &clone.rules[0].id;
+        assert_ne!(
+            clone_rule_id, "seq-rule",
+            "the imported rule must be re-keyed away from the original id"
+        );
+        assert_eq!(
+            c.rule_hits().get(clone_rule_id.as_str()).copied().unwrap_or(0),
+            0,
+            "the re-keyed clone starts with an independent (zero) hit count"
+        );
+    }
+
+    #[test]
+    fn import_rules_replace_clears_existing() {
+        let dst = controller();
+        dst.set_autoresponder(AutoResponder {
+            scenarios: vec![
+                scenario("A", vec![respond_rule("a-rule")]),
+                scenario("B", vec![respond_rule("b-rule")]),
+            ],
+            active_scenario_id: Some("A".to_string()),
+        });
+
+        let src = controller();
+        src.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("C", vec![respond_rule("c-rule")])],
+            active_scenario_id: None,
+        });
+        let bytes = src.export_rules(None);
+
+        let count = dst.import_rules(&bytes, true).expect("replace import");
+        assert_eq!(count, 1);
+
+        let ar = dst.get_autoresponder();
+        assert_eq!(ar.scenarios.len(), 1, "replace wipes the existing scenarios");
+        assert_eq!(ar.scenarios[0].name, "C");
+        assert_ne!(ar.scenarios[0].id, "C", "the replaced-in scenario is re-keyed");
+        assert_ne!(ar.scenarios[0].rules[0].id, "c-rule", "its rule is re-keyed too");
+        assert_eq!(
+            ar.active_scenario_id, None,
+            "replace resets the active pointer to Off"
+        );
+    }
+
+    #[test]
+    fn import_rules_replace_on_empty_config() {
+        let dst = controller();
+        dst.set_autoresponder(AutoResponder {
+            scenarios: vec![],
+            active_scenario_id: None,
+        });
+
+        let src = controller();
+        src.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("Only", vec![respond_rule("only-rule")])],
+            active_scenario_id: None,
+        });
+        let bytes = src.export_rules(None);
+
+        let count = dst.import_rules(&bytes, true).expect("replace into empty");
+        assert_eq!(count, 1);
+        let ar = dst.get_autoresponder();
+        assert_eq!(ar.scenarios.len(), 1, "replace into an empty config yields exactly the import");
+        assert_eq!(ar.scenarios[0].name, "Only");
+        assert_eq!(ar.active_scenario_id, None, "still Off after replace into empty");
+    }
+
+    #[test]
+    fn import_one_file_with_duplicate_names_dedupes_within_file() {
+        let dst = controller();
+        dst.set_autoresponder(AutoResponder {
+            scenarios: vec![],
+            active_scenario_id: None,
+        });
+
+        let src = controller();
+        src.set_autoresponder(AutoResponder {
+            scenarios: vec![
+                Scenario { id: "a".into(), name: "Set".into(), rules: vec![] },
+                Scenario { id: "b".into(), name: "Set".into(), rules: vec![] },
+                Scenario { id: "c".into(), name: "Set".into(), rules: vec![] },
+            ],
+            active_scenario_id: None,
+        });
+        let bytes = src.export_rules(None);
+
+        dst.import_rules(&bytes, false).expect("import");
+        let names: Vec<String> = dst.get_autoresponder().scenarios.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["Set".to_string(), "Set (2)".to_string(), "Set (3)".to_string()],
+            "duplicate names inside a single imported file are de-duped in order"
+        );
+    }
+
+    #[test]
+    fn merge_dedupes_against_existing_and_within_file() {
+        let dst = controller();
+        dst.set_autoresponder(AutoResponder {
+            scenarios: vec![Scenario { id: "x".into(), name: "Set".into(), rules: vec![] }],
+            active_scenario_id: None,
+        });
+
+        let src = controller();
+        src.set_autoresponder(AutoResponder {
+            scenarios: vec![
+                Scenario { id: "a".into(), name: "Set".into(), rules: vec![] },
+                Scenario { id: "b".into(), name: "Set".into(), rules: vec![] },
+            ],
+            active_scenario_id: None,
+        });
+        let bytes = src.export_rules(None);
+
+        dst.import_rules(&bytes, false).expect("import");
+        let names: Vec<String> = dst.get_autoresponder().scenarios.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["Set".to_string(), "Set (2)".to_string(), "Set (3)".to_string()],
+            "merge de-dupes the imported names against the existing one AND against each other"
+        );
+    }
+
+    #[test]
+    fn import_twice_same_ms_keeps_clones_independent() {
+        let c = controller();
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("A", vec![respond_rule("seq-rule")])],
+            active_scenario_id: Some("A".to_string()),
+        });
+
+        let bytes = c.export_rules(Some("A"));
+        c.import_rules(&bytes, false).expect("first import");
+        c.import_rules(&bytes, false).expect("second import");
+
+        let ar = c.get_autoresponder();
+        let rule_ids: Vec<String> = ar
+            .scenarios
+            .iter()
+            .flat_map(|s| s.rules.iter().map(|r| r.id.clone()))
+            .collect();
+        let unique: std::collections::HashSet<&String> = rule_ids.iter().collect();
+        assert_eq!(
+            unique.len(),
+            rule_ids.len(),
+            "two imports of the same file must not produce colliding rule ids (cursor aliasing)"
+        );
+    }
+
+    #[test]
+    fn import_rules_replace_resets_active_off() {
+        let dst = controller();
+        dst.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("A", vec![respond_rule("a-rule")])],
+            active_scenario_id: Some("A".to_string()),
+        });
+
+        let src = controller();
+        src.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("B", vec![respond_rule("b-rule")])],
+            active_scenario_id: None,
+        });
+        let bytes = src.export_rules(None);
+
+        dst.import_rules(&bytes, true).expect("replace import");
+        assert_eq!(
+            dst.get_autoresponder().active_scenario_id,
+            None,
+            "a non-empty replace must never auto-activate a scenario"
         );
     }
 }

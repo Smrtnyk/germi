@@ -17,6 +17,8 @@ interface Props {
   selectRuleId?: string | null;
   onResetState: (scenarioId: string | null) => void;
   ruleHits: Record<string, number>;
+  onExportRules: (scenarioId: string | null) => void;
+  onImportRules: (replace: boolean) => void;
 }
 
 const ACTION_KINDS: { value: ActionKind; label: string }[] = [
@@ -163,6 +165,7 @@ function ScenarioView({
   selectRuleId,
   onResetState,
   ruleHits,
+  onExport,
 }: {
   active: Scenario;
   onPatch: (patch: Partial<Scenario>) => void;
@@ -170,6 +173,7 @@ function ScenarioView({
   selectRuleId?: string | null;
   onResetState: () => void;
   ruleHits: Record<string, number>;
+  onExport: () => void;
 }) {
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
   const rulesRef = useRef<HTMLDivElement>(null);
@@ -227,17 +231,25 @@ function ScenarioView({
         <span className="muted small">
           {active.rules.filter((r) => r.enabled).length}/{active.rules.length} rule(s) active · live
         </span>
-        <div className="spacer" />
-        <button
-          className="btn"
-          title="Clear per-rule hit counters so match-once / sequenced rules fire from the start again."
-          onClick={onResetState}
-        >
-          Reset state
-        </button>
-        <button className="btn danger" onClick={onRequestDelete}>
-          Delete scenario
-        </button>
+        <div className="scenario-actions">
+          <button
+            className="btn"
+            title="Clear per-rule hit counters so match-once / sequenced rules fire from the start again."
+            onClick={onResetState}
+          >
+            Reset state
+          </button>
+          <button
+            className="btn"
+            title="Export this scenario to a shareable .germi-rules file"
+            onClick={onExport}
+          >
+            Export scenario
+          </button>
+          <button className="btn danger" onClick={onRequestDelete}>
+            Delete scenario
+          </button>
+        </div>
       </div>
 
       <div
@@ -293,8 +305,17 @@ function ScenarioView({
   );
 }
 
-export function AutoresponderPanel({ ar, onChange, selectRuleId, onResetState, ruleHits }: Props) {
+export function AutoresponderPanel({
+  ar,
+  onChange,
+  selectRuleId,
+  onResetState,
+  ruleHits,
+  onExportRules,
+  onImportRules,
+}: Props) {
   const [pendingDelete, setPendingDelete] = useState<Scenario | null>(null);
+  const [pendingReplace, setPendingReplace] = useState(false);
 
   const active = ar.scenarios.find((s) => s.id === ar.activeScenarioId) ?? null;
 
@@ -346,6 +367,28 @@ export function AutoresponderPanel({ ar, onChange, selectRuleId, onResetState, r
         >
           ⏻ Off
         </button>
+        <button
+          className="btn small"
+          title="Import scenarios from a .germi-rules file (added to your existing scenarios)"
+          onClick={() => onImportRules(false)}
+        >
+          Import
+        </button>
+        <button
+          className="btn small"
+          title="Replace all scenarios with the contents of a .germi-rules file"
+          onClick={() => setPendingReplace(true)}
+        >
+          Replace…
+        </button>
+        <button
+          className="btn small"
+          title="Export all scenarios to a shareable .germi-rules file"
+          disabled={ar.scenarios.length === 0}
+          onClick={() => onExportRules(null)}
+        >
+          Export all
+        </button>
       </div>
 
       {!active ? (
@@ -370,6 +413,7 @@ export function AutoresponderPanel({ ar, onChange, selectRuleId, onResetState, r
           selectRuleId={selectRuleId}
           onResetState={() => onResetState(active.id)}
           ruleHits={ruleHits}
+          onExport={() => onExportRules(active.id)}
         />
       )}
 
@@ -384,6 +428,24 @@ export function AutoresponderPanel({ ar, onChange, selectRuleId, onResetState, r
             setPendingDelete(null);
           }}
           onCancel={() => setPendingDelete(null)}
+        />
+      )}
+
+      {pendingReplace && (
+        <ConfirmDialog
+          title="Replace all scenarios?"
+          message={
+            ar.scenarios.length > 0
+              ? `This replaces all ${ar.scenarios.length} of your scenario(s) with the ones in the file you pick. Mocking switches off until you activate a scenario. This can't be undone.`
+              : `This loads the scenarios from the file you pick. Mocking stays off until you activate one.`
+          }
+          confirmLabel="Choose file & replace"
+          danger
+          onConfirm={() => {
+            setPendingReplace(false);
+            onImportRules(true);
+          }}
+          onCancel={() => setPendingReplace(false)}
         />
       )}
     </div>

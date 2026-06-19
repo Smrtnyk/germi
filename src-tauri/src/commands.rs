@@ -352,6 +352,57 @@ pub async fn open_session(
         .map_err(|e| e.to_string())
 }
 
+/// Export autoresponder scenarios to a `.germi-rules` file. With `scenario_id`
+/// only that scenario is written; otherwise the whole config. Returns false if
+/// the user cancels.
+#[tauri::command]
+pub async fn export_rules(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    scenario_id: Option<String>,
+) -> Result<bool, String> {
+    let controller = state.controller.clone();
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .add_filter("Germi rules", &["germi-rules"])
+        .set_file_name("autoresponder.germi-rules")
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    std::fs::write(&path, controller.export_rules(scenario_id.as_deref()))
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Import autoresponder scenarios from a `.germi-rules` file. `replace == false`
+/// merges (appends); `replace == true` wipes the existing scenarios first.
+/// Persists the merged config and returns the number of scenarios imported (0 if
+/// the user cancels).
+#[tauri::command]
+pub async fn import_rules(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    replace: bool,
+) -> Result<usize, String> {
+    let controller = state.controller.clone();
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .add_filter("Germi rules", &["germi-rules"])
+        .blocking_pick_file()
+    else {
+        return Ok(0);
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let count = controller.import_rules(&bytes, replace).map_err(|e| e.to_string())?;
+    crate::persist::save_autoresponder(&state.ca_dir, &controller.get_autoresponder());
+    Ok(count)
+}
+
 /// Export the current proxy settings to a user-chosen JSON file.
 #[tauri::command]
 pub async fn export_settings(

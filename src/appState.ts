@@ -536,6 +536,25 @@ function useAutoresponder(
     }
   }
 
+  async function exportRules(scenarioId: string | null) {
+    setError(null);
+    try {
+      await api.exportRules(scenarioId);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function importRules(replace: boolean) {
+    setError(null);
+    try {
+      const n = await api.importRules(replace);
+      if (n > 0) setAutoresponder(await api.getAutoresponder());
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   return {
     autoresponder,
     setAutoresponder,
@@ -544,6 +563,8 @@ function useAutoresponder(
     setPickScenarioId,
     saveAutoresponder,
     mockFlows,
+    exportRules,
+    importRules,
     ruleHits,
     resetRuleState,
   };

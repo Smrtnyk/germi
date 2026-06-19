@@ -78,6 +78,8 @@ pub fn run() {
             commands::search_bodies,
             commands::save_session,
             commands::open_session,
+            commands::export_rules,
+            commands::import_rules,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Germi");

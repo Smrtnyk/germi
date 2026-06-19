@@ -46,6 +46,8 @@ export const api = {
   fileExists: (path: string) => invoke<boolean>("file_exists", { path }),
   saveSession: () => invoke<boolean>("save_session"),
   openSession: () => invoke<number>("open_session"),
+  exportRules: (scenarioId: string | null) => invoke<boolean>("export_rules", { scenarioId }),
+  importRules: (replace: boolean) => invoke<number>("import_rules", { replace }),
   searchBodies: (
     pattern: string,
     side: "request" | "response" | "either",

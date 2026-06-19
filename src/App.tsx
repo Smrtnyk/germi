@@ -86,6 +86,8 @@ function RightPanel({
   selectRuleId,
   onResetState,
   ruleHits,
+  onExportRules,
+  onImportRules,
 }: {
   rightTab: RightTab;
   setRightTab: (tab: RightTab) => void;
@@ -99,6 +101,8 @@ function RightPanel({
   selectRuleId: string | null;
   onResetState: (scenarioId: string | null) => void;
   ruleHits: Record<string, number>;
+  onExportRules: (scenarioId: string | null) => void;
+  onImportRules: (replace: boolean) => void;
 }) {
   return (
     <div className="right-panel">
@@ -131,6 +135,8 @@ function RightPanel({
             selectRuleId={selectRuleId}
             onResetState={onResetState}
             ruleHits={ruleHits}
+            onExportRules={onExportRules}
+            onImportRules={onImportRules}
           />
         </div>
       </div>
@@ -263,6 +269,8 @@ export function App() {
           selectRuleId={s.ar.selectRuleId}
           onResetState={s.ar.resetRuleState}
           ruleHits={s.ar.ruleHits}
+          onExportRules={s.ar.exportRules}
+          onImportRules={s.ar.importRules}
         />
       </main>
 

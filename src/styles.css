@@ -125,6 +125,7 @@ body {
   border-radius: 6px;
   padding: 5px 10px;
   cursor: pointer;
+  white-space: nowrap;
 }
 .btn:hover {
   background: var(--bg-3);
@@ -1483,6 +1484,7 @@ code {
   align-items: center;
   gap: 7px;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .stab:hover {
   background: var(--bg-3);
@@ -1526,14 +1528,16 @@ code {
 .scenario-head {
   display: flex;
   align-items: center;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
 }
 .scenario-name {
   font-size: 14px;
   font-weight: 600;
-  min-width: 220px;
+  flex: 1 1 180px;
+  min-width: 140px;
   background: transparent;
   border: 1px solid transparent;
 }
@@ -1541,6 +1545,16 @@ code {
 .scenario-name:focus {
   border-color: var(--line);
   background: var(--bg-2);
+}
+.scenario-head .muted.small {
+  white-space: nowrap;
+}
+.scenario-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-inline-start: auto;
+  flex-shrink: 0;
 }
 
 .off-state {
