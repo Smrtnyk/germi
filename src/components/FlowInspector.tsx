@@ -249,13 +249,20 @@ function VirtualText({
   );
 }
 
-interface Props {
+interface SingleProps {
   detail: FlowDetail | null;
   summary: FlowSummary | undefined;
   loading: boolean;
   onMock: (detail: FlowDetail) => void;
   decode: boolean;
   onLoadFull: () => void;
+}
+
+interface Props extends SingleProps {
+  selectedSummaries: FlowSummary[];
+  onSelectOne: (id: string) => void;
+  onMockMany: (ids: string[]) => void;
+  onClearSelection: () => void;
 }
 
 type Side = "request" | "response";
@@ -768,7 +775,124 @@ function RequestHead({
   );
 }
 
-export function FlowInspector({ detail, summary, loading, onMock, decode, onLoadFull }: Props) {
+function statusCls(status: number | null): string {
+  if (status === null) return "pending";
+  if (status >= 500) return "s5";
+  if (status >= 400) return "s4";
+  if (status >= 300) return "s3";
+  return "s2";
+}
+
+const STATUS_ORDER: { cls: string; label: string }[] = [
+  { cls: "s2", label: "2xx" },
+  { cls: "s3", label: "3xx" },
+  { cls: "s4", label: "4xx" },
+  { cls: "s5", label: "5xx" },
+  { cls: "pending", label: "pending" },
+];
+
+function summarize(flows: FlowSummary[]) {
+  const hosts = new Set<string>();
+  const byStatus = new Map<string, number>();
+  let totalSize = 0;
+  for (const f of flows) {
+    hosts.add(f.host);
+    totalSize += f.reqSize + f.respSize;
+    const c = statusCls(f.status);
+    byStatus.set(c, (byStatus.get(c) ?? 0) + 1);
+  }
+  return { hostCount: hosts.size, totalSize, byStatus };
+}
+
+function MultiSelectView({
+  flows,
+  onSelectOne,
+  onMockMany,
+  onClearSelection,
+}: {
+  flows: FlowSummary[];
+  onSelectOne: (id: string) => void;
+  onMockMany: (ids: string[]) => void;
+  onClearSelection: () => void;
+}) {
+  const notify = useToast();
+  const parentRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: flows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 24,
+    overscan: 20,
+  });
+  const stats = useMemo(() => summarize(flows), [flows]);
+
+  const copyUrls = () => {
+    void navigator.clipboard.writeText(
+      flows.map((f) => `${f.scheme}://${f.host}${f.path}`).join("\n"),
+    );
+    notify("success", `Copied ${flows.length} URLs`);
+  };
+
+  return (
+    <div className="inspector multi">
+      <div className="multi-head">
+        <div className="multi-top">
+          <span className="multi-title">
+            <strong>{flows.length}</strong> requests selected
+          </span>
+          <div className="multi-actions">
+            <button className="btn primary" onClick={() => onMockMany(flows.map((f) => f.id))}>
+              ⚡ Mock all
+            </button>
+            <button className="btn ghost" onClick={copyUrls}>
+              Copy URLs
+            </button>
+            <button className="btn ghost" onClick={onClearSelection}>
+              Clear
+            </button>
+          </div>
+        </div>
+        <div className="multi-stats">
+          <span className="muted">
+            {stats.hostCount} {stats.hostCount === 1 ? "host" : "hosts"}
+          </span>
+          <span className="muted">·</span>
+          <span className="muted">{fmtSize(stats.totalSize)}</span>
+          {STATUS_ORDER.map(({ cls, label }) =>
+            stats.byStatus.get(cls) ? (
+              <span key={cls} className={`multi-tag ${cls}`}>
+                {label} · {stats.byStatus.get(cls)}
+              </span>
+            ) : null,
+          )}
+        </div>
+      </div>
+      <div ref={parentRef} className="multi-list">
+        <div className="multi-canvas" style={{ height: virtualizer.getTotalSize() }}>
+          {virtualizer.getVirtualItems().map((item) => {
+            const f = flows[item.index];
+            return (
+              <button
+                key={f.id}
+                type="button"
+                className="multi-row"
+                style={{ transform: `translateY(${item.start}px)`, height: item.size }}
+                onClick={() => onSelectOne(f.id)}
+                title="Inspect this request"
+              >
+                <span className={`badge m-${f.method.toLowerCase()}`}>{f.method}</span>
+                <span className={`multi-code ${statusCls(f.status)}`}>{f.status ?? "···"}</span>
+                <span className="multi-host">{f.host}</span>
+                <span className="multi-path">{f.path}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SingleFlowView({ detail, summary, loading, onMock, decode, onLoadFull }: SingleProps) {
   const notify = useToast();
   const [side, setSide] = useState<Side>("response");
 
@@ -826,5 +950,28 @@ export function FlowInspector({ detail, summary, loading, onMock, decode, onLoad
         />
       )}
     </div>
+  );
+}
+
+export function FlowInspector(props: Props) {
+  if (props.selectedSummaries.length > 1) {
+    return (
+      <MultiSelectView
+        flows={props.selectedSummaries}
+        onSelectOne={props.onSelectOne}
+        onMockMany={props.onMockMany}
+        onClearSelection={props.onClearSelection}
+      />
+    );
+  }
+  return (
+    <SingleFlowView
+      detail={props.detail}
+      summary={props.summary}
+      loading={props.loading}
+      onMock={props.onMock}
+      decode={props.decode}
+      onLoadFull={props.onLoadFull}
+    />
   );
 }
