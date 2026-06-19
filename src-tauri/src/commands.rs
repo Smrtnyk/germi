@@ -238,7 +238,12 @@ pub async fn regenerate_ca(state: State<'_, AppState>) -> Result<(), String> {
 
 /// Route the OS system proxy through Germi (Windows `WinINET` / GNOME / KDE).
 #[tauri::command]
-pub fn set_system_proxy(port: u16) -> Result<(), String> {
+pub fn set_system_proxy(port: u16, state: State<'_, AppState>) -> Result<(), String> {
+    if let Ok(mut prior) = state.prior_system_proxy.lock() {
+        if prior.is_none() {
+            *prior = Some(sysproxy::Sysproxy::get_system_proxy().unwrap_or_default());
+        }
+    }
     let sp = sysproxy::Sysproxy {
         enable: true,
         host: "127.0.0.1".to_string(),
@@ -249,10 +254,25 @@ pub fn set_system_proxy(port: u16) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn clear_system_proxy() -> Result<(), String> {
+pub fn clear_system_proxy(state: State<'_, AppState>) -> Result<(), String> {
+    if restore_prior_system_proxy(&state)? {
+        return Ok(());
+    }
     let mut sp = sysproxy::Sysproxy::get_system_proxy().map_err(|e| e.to_string())?;
     sp.enable = false;
     sp.set_system_proxy().map_err(|e| e.to_string())
+}
+
+pub fn restore_prior_system_proxy(state: &AppState) -> Result<bool, String> {
+    let prior = match state.prior_system_proxy.lock() {
+        Ok(mut guard) => guard.take(),
+        Err(_) => None,
+    };
+    let Some(prior) = prior else {
+        return Ok(false);
+    };
+    prior.set_system_proxy().map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// Open a native file picker and import a HAR or Fiddler SAZ archive into the

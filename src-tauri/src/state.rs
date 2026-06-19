@@ -13,4 +13,5 @@ pub struct AppState {
     /// Stored so a re-subscribe (React Strict Mode double-mount, hot reload, or a
     /// future remount) aborts the prior task instead of leaking it.
     pub flow_forwarder: Mutex<Option<JoinHandle<()>>>,
+    pub prior_system_proxy: Mutex<Option<sysproxy::Sysproxy>>,
 }
