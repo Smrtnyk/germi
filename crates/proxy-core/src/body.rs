@@ -46,6 +46,41 @@ pub fn content_encodings_of(headers: &[(String, String)]) -> Vec<String> {
         .collect()
 }
 
+/// Heuristic: do `bytes` look like human-readable text rather than binary?
+///
+/// Used to recognize a body that declares a `Content-Encoding` but isn't actually
+/// compressed (a stale or incorrect header — seen from some servers, CDNs, and
+/// proxy hops). Real compressed data is high-entropy and effectively never valid
+/// UTF-8, so it reliably fails this check; readable text passes, and the
+/// inspector can then show it as text instead of a decode "failure".
+pub(crate) fn looks_textual(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    let n = bytes.len().min(8192);
+    let sample = &bytes[..n];
+    let valid_up_to = match std::str::from_utf8(sample) {
+        Ok(_) => n,
+        // Tolerate only a trailing partial multi-byte char clipped by the sample
+        // boundary; any earlier invalid byte means this isn't text.
+        Err(e) if e.valid_up_to() >= n.saturating_sub(3) => e.valid_up_to(),
+        Err(_) => return false,
+    };
+    let Ok(text) = std::str::from_utf8(&sample[..valid_up_to]) else {
+        return false;
+    };
+    let mut total = 0usize;
+    let mut ctrl = 0usize;
+    for c in text.chars() {
+        total += 1;
+        if c.is_control() && !matches!(c, '\t' | '\n' | '\r') {
+            ctrl += 1;
+        }
+    }
+    // Mostly printable (<2% control chars) on top of a valid-UTF-8 prefix.
+    total > 0 && ctrl * 50 < total
+}
+
 /// Decode the full `Content-Encoding` chain of a message body, undoing each
 /// applied encoding in reverse (last-applied = outermost). Returns the decoded
 /// bytes and whether the decompression cap truncated the result, or `None` when
@@ -180,6 +215,19 @@ mod tests {
         assert!(!truncated);
         // No content-encoding => nothing to decode.
         assert!(decode_body(&[], b"plain").is_none());
+    }
+
+    #[test]
+    fn looks_textual_separates_text_from_compressed() {
+        assert!(looks_textual(b""));
+        assert!(looks_textual(b"{\"ok\":true}\nplain text"));
+        assert!(looks_textual("hello unicode \u{2713} \u{e9}".as_bytes()));
+        // Real compressed payloads must read as binary (so a genuine decode
+        // failure still shows as hex, not mislabeled text).
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(b"the quick brown fox jumps over the lazy dog").unwrap();
+        assert!(!looks_textual(&e.finish().unwrap()));
+        assert!(!looks_textual(&[0x00, 0xff, 0xfe, 0x80, 0x01, 0x02, 0x9c, 0x8b]));
     }
 
     #[test]

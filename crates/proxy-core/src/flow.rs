@@ -243,13 +243,22 @@ pub(crate) fn is_textual(headers: &[(String, String)]) -> bool {
 impl MessageDetail {
     fn new(headers: &[(String, String)], body: &[u8], decode: bool, full: bool) -> Self {
         use std::borrow::Cow;
-        let encoding = crate::body::content_encoding_of(headers);
-        let (bytes, decoded, decode_truncated): (Cow<[u8]>, bool, bool) = if decode {
-            match crate::body::decode_body(headers, body) {
-                Some((d, t)) => (Cow::Owned(d), true, t),
-                None => (Cow::Borrowed(body), false, false),
-            }
+        let mut encoding = crate::body::content_encoding_of(headers);
+        let (bytes, decoded, decode_truncated): (Cow<[u8]>, bool, bool) = if !decode {
+            (Cow::Borrowed(body), false, false)
+        } else if let Some((d, t)) = crate::body::decode_body(headers, body) {
+            (Cow::Owned(d), true, t)
         } else {
+            // Decode failed. If the raw body is actually valid text, the
+            // Content-Encoding header is stale/incorrect (the body was never
+            // really compressed) — drop the misleading label and present the
+            // identity text it is, rather than a "failed" decode shown as a hex
+            // dump. The header itself stays visible in the headers table.
+            // Genuinely-undecodable binary is high-entropy and fails
+            // looks_textual, so it still shows as hex.
+            if encoding.is_some() && crate::body::looks_textual(body) {
+                encoding = None;
+            }
             (Cow::Borrowed(body), false, false)
         };
 
@@ -526,5 +535,50 @@ mod tests {
         assert_eq!(extra.get("cf-ray").map(String::as_str), Some("abc123"));
         assert_eq!(extra.get("req:referer").map(String::as_str), Some("https://app"));
         assert!(!extra.contains_key("x-missing"));
+    }
+
+    fn h(k: &str, v: &str) -> (String, String) {
+        (k.to_string(), v.to_string())
+    }
+
+    #[test]
+    fn stale_content_encoding_on_text_body_is_shown_as_text() {
+        // A body that declares `Content-Encoding: br` but is actually identity
+        // text (stale/incorrect header) must render as text — not a "br · failed"
+        // hex wall. This is the regression reported by users.
+        let headers = vec![h("content-type", "application/json"), h("content-encoding", "br")];
+        let md = MessageDetail::new(&headers, b"{\"ok\":true}", true, true);
+        assert_eq!(md.body_text, "{\"ok\":true}");
+        assert_eq!(md.encoding, None, "stale encoding label is dropped");
+        assert!(!md.decoded);
+        assert!(md.body_base64.is_empty(), "a textual body needs no hex/base64");
+    }
+
+    #[test]
+    fn real_brotli_body_still_decodes() {
+        use std::io::Write;
+        let mut compressed = Vec::new();
+        {
+            let mut w = brotli::CompressorWriter::new(&mut compressed, 4096, 5, 22);
+            w.write_all(b"hello brotli world").unwrap();
+        }
+        let headers = vec![h("content-type", "text/plain"), h("content-encoding", "br")];
+        let md = MessageDetail::new(&headers, &compressed, true, true);
+        assert_eq!(md.body_text, "hello brotli world");
+        assert_eq!(md.encoding.as_deref(), Some("br"));
+        assert!(md.decoded);
+    }
+
+    #[test]
+    fn undecodable_binary_with_encoding_stays_binary() {
+        // Genuinely-undecodable binary keeps its encoding label and provides
+        // base64 for the hex view — it must NOT be reinterpreted as text.
+        let headers = vec![h("content-encoding", "gzip")];
+        let body: Vec<u8> =
+            [0x00, 0xff, 0xfe, 0x80, 0x9c, 0x01, 0x02, 0x88, 0xaa, 0x55].repeat(40);
+        let md = MessageDetail::new(&headers, &body, true, true);
+        assert_eq!(md.encoding.as_deref(), Some("gzip"));
+        assert!(!md.decoded);
+        assert!(!md.body_base64.is_empty());
     }
 }
