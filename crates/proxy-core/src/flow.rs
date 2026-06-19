@@ -324,6 +324,9 @@ pub enum FlowEvent {
     Completed { summary: FlowSummary },
     /// The store was cleared.
     Cleared,
+    /// Specific flows were removed by id (the user pruned them from the session);
+    /// the UI drops exactly these rows.
+    Removed { ids: Vec<String> },
     /// The event stream lagged (a subscriber fell behind) and some events were
     /// dropped; the UI should re-fetch the flow list to resynchronize.
     Resync,

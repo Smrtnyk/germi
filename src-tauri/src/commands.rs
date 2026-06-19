@@ -123,6 +123,12 @@ pub fn clear_flows(state: State<'_, AppState>) {
     state.controller.clear_flows();
 }
 
+/// Remove specific captured flows by id (prune noise before saving a session).
+#[tauri::command]
+pub fn remove_flows(state: State<'_, AppState>, ids: Vec<String>) {
+    state.controller.remove_flows(&ids);
+}
+
 /// Set or clear a flow's user comment (re-emits the row to the live stream).
 #[tauri::command]
 pub fn set_flow_comment(state: State<'_, AppState>, id: String, comment: Option<String>) {

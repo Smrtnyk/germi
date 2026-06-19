@@ -71,6 +71,7 @@ export type FlowEvent =
   | { type: "new"; summary: FlowSummary }
   | { type: "completed"; summary: FlowSummary }
   | { type: "cleared" }
+  | { type: "removed"; ids: string[] }
   | { type: "resync" };
 
 // ---- rules (mirror crates/proxy-core/src/rules.rs) ----

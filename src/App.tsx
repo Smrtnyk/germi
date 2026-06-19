@@ -50,6 +50,12 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       run: s.selection.clearSelection,
     },
     {
+      id: "delete-selected",
+      group: "Traffic",
+      label: "Delete selected requests",
+      run: s.deleteSelected,
+    },
+    {
       id: "save",
       group: "Session",
       label: "Save session…",
@@ -189,6 +195,7 @@ function SelectionBar({
   pickScenarioId,
   setPickScenarioId,
   onMock,
+  onDelete,
 }: {
   flows: FlowSummary[];
   selectedIds: Set<string>;
@@ -197,6 +204,7 @@ function SelectionBar({
   pickScenarioId: string;
   setPickScenarioId: (id: string) => void;
   onMock: (ids: string[], scenarioId: string | null) => Promise<boolean>;
+  onDelete: () => void;
 }) {
   if (selectedIds.size < 2) return null;
 
@@ -228,6 +236,9 @@ function SelectionBar({
       </select>
       <button className="btn primary" onClick={addToScenario}>
         Add to scenario
+      </button>
+      <button className="btn ghost danger" onClick={onDelete} title="Delete the selected requests">
+        Delete
       </button>
       <button className="btn" onClick={() => setSelectedIds(new Set())}>
         Clear
@@ -455,6 +466,7 @@ export function App() {
                 pickScenarioId={s.ar.pickScenarioId}
                 setPickScenarioId={s.ar.setPickScenarioId}
                 onMock={s.ar.mockFlows}
+                onDelete={s.deleteSelected}
               />
               <TrafficList
                 flows={s.flowStore.flows}
@@ -465,6 +477,7 @@ export function App() {
                 onRowClick={s.handleRowClick}
                 onKeySelect={s.handleKeySelect}
                 onClearSelection={s.selection.clearSelection}
+                onDeleteSelected={s.deleteSelected}
                 onContentWidth={s.setTrafficMin}
                 onCommentEdit={s.flowStore.editComment}
                 onMockFlow={s.mockFlow}
