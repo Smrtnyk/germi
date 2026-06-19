@@ -3,6 +3,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -12,6 +13,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 
 import type { FlowSummary } from "../types";
 import { FLEX_PREFERENCE, type ColumnDef } from "../columns";
+import { dragFlowIds, encodeFlowIds, FLOW_DRAG_MIME } from "../dnd";
 import { useToast } from "../toast";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 
@@ -56,6 +58,14 @@ function statusClass(status: number | null): string {
   if (status >= 400) return "s4";
   if (status >= 300) return "s3";
   return "s2";
+}
+
+function makeDragGhost(count: number): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "flow-drag-ghost";
+  el.textContent = `⚡ Mock ${count} requests`;
+  document.body.appendChild(el);
+  return el;
 }
 
 interface Menu {
@@ -324,6 +334,7 @@ interface FlowRowProps {
   onRowClick: (id: string, e: ReactMouseEvent) => void;
   onActivate: () => void;
   onOpenMenu: (e: ReactMouseEvent, f: FlowSummary) => void;
+  onDragStart: (e: ReactDragEvent, f: FlowSummary) => void;
 }
 
 function suppressShiftSelect(e: ReactMouseEvent) {
@@ -344,6 +355,7 @@ function FlowRow({
   onRowClick,
   onActivate,
   onOpenMenu,
+  onDragStart,
 }: FlowRowProps) {
   return (
     <div
@@ -351,6 +363,8 @@ function FlowRow({
         f.matchedRule ? "ruled" : ""
       } ${matched ? "match" : ""} ${dimmed ? "dim" : ""}`}
       style={{ transform: `translateY(${item.start}px)`, height: item.size }}
+      draggable
+      onDragStart={(e) => onDragStart(e, f)}
       onMouseDown={suppressShiftSelect}
       onClick={(e) => {
         onRowClick(f.id, e);
@@ -512,6 +526,25 @@ function FlowScroll({
     virtualizer,
   );
 
+  function handleDragStart(e: ReactDragEvent, f: FlowSummary) {
+    if ((e.target as HTMLElement).closest("input, textarea")) {
+      e.preventDefault();
+      return;
+    }
+    const ids = dragFlowIds(
+      f.id,
+      selectedIds,
+      flows.map((fl) => fl.id),
+    );
+    e.dataTransfer.setData(FLOW_DRAG_MIME, encodeFlowIds(ids));
+    e.dataTransfer.effectAllowed = "copy";
+    if (ids.length > 1) {
+      const ghost = makeDragGhost(ids.length);
+      e.dataTransfer.setDragImage(ghost, 12, 12);
+      window.setTimeout(() => ghost.remove(), 0);
+    }
+  }
+
   function moveSelection(e: ReactKeyboardEvent) {
     const target = e.target as HTMLElement;
     if (
@@ -589,6 +622,7 @@ function FlowScroll({
                   parentRef.current?.focus({ preventScroll: true });
                 }}
                 onOpenMenu={onOpenMenu}
+                onDragStart={handleDragStart}
               />
             );
           })}

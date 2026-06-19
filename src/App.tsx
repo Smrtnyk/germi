@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
 import { useAppState, type RightMode, type RightTab } from "./appState";
+import { hasFlowDrag } from "./dnd";
 import type { AutoResponder, CaInfo, FlowDetail, FlowSummary, ProxySettings } from "./types";
 import { Toolbar } from "./components/Toolbar";
 import { FilterChips } from "./components/FilterChips";
 import { TrafficList } from "./components/TrafficList";
 import { FlowInspector } from "./components/FlowInspector";
-import { AutoresponderPanel } from "./components/AutoresponderPanel";
+import { AutoresponderPanel, type AutoresponderPanelProps } from "./components/AutoresponderPanel";
 import { CaDialog } from "./components/CaDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { StatusBar } from "./components/StatusBar";
@@ -196,7 +197,7 @@ function handleShortcut(
 function SelectionBar({
   flows,
   selectedIds,
-  setSelectedIds,
+  clearSelection,
   autoresponder,
   pickScenarioId,
   setPickScenarioId,
@@ -205,7 +206,7 @@ function SelectionBar({
 }: {
   flows: FlowSummary[];
   selectedIds: Set<string>;
-  setSelectedIds: (ids: Set<string>) => void;
+  clearSelection: () => void;
   autoresponder: AutoResponder;
   pickScenarioId: string;
   setPickScenarioId: (id: string) => void;
@@ -222,7 +223,7 @@ function SelectionBar({
     if (ids.length === 0) return;
     const ok = await onMock(ids, pick === "__new__" ? null : pick);
     if (ok) {
-      setSelectedIds(new Set());
+      clearSelection();
       setPickScenarioId("");
     }
   }
@@ -246,7 +247,7 @@ function SelectionBar({
       <button className="btn ghost danger" onClick={onDelete} title="Delete the selected requests">
         Delete
       </button>
-      <button className="btn" onClick={() => setSelectedIds(new Set())}>
+      <button className="btn" onClick={clearSelection}>
         Clear
       </button>
     </div>
@@ -279,6 +280,9 @@ function RightPanelHeader({
           <button
             className={rightTab === "autoresponder" ? "tab active" : "tab"}
             onClick={() => setRightTab("autoresponder")}
+            onDragEnter={(e) => {
+              if (hasFlowDrag(e.dataTransfer.types)) setRightTab("autoresponder");
+            }}
           >
             Autoresponder
             {activeScenario && <span className="live-dot" />}
@@ -324,15 +328,7 @@ function RightPanel({
     onMockMany: (ids: string[]) => void;
     onClearSelection: () => void;
   };
-  auto: {
-    ar: AutoResponder;
-    onChange: (ar: AutoResponder) => void;
-    selectRuleId: string | null;
-    onResetState: (scenarioId: string | null) => void;
-    ruleHits: Record<string, number>;
-    onExportRules: (scenarioId: string | null) => void;
-    onImportRules: (replace: boolean) => void;
-  };
+  auto: AutoresponderPanelProps;
 }) {
   const split = rightMode === "split";
   const inspectorVisible = split || rightTab === "inspector";
@@ -471,7 +467,7 @@ export function App() {
               <SelectionBar
                 flows={s.flowStore.flows}
                 selectedIds={s.selection.selectedIds}
-                setSelectedIds={s.selection.setSelectedIds}
+                clearSelection={s.selection.clearSelection}
                 autoresponder={s.ar.autoresponder}
                 pickScenarioId={s.ar.pickScenarioId}
                 setPickScenarioId={s.ar.setPickScenarioId}
@@ -534,6 +530,7 @@ export function App() {
                 ruleHits: s.ar.ruleHits,
                 onExportRules: s.ar.exportRules,
                 onImportRules: s.ar.importRules,
+                onDropMock: s.dropMockFlows,
               }}
             />
           </main>
