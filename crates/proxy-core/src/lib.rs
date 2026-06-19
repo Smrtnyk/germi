@@ -226,6 +226,19 @@ impl ProxyController {
         let _ = self.shared.events.send(FlowEvent::Cleared);
     }
 
+    /// Remove specific captured flows by id, so the user can prune noise before
+    /// saving a `.germi` session. Emits `Removed` with the ids (the UI drops
+    /// those rows); a no-op that emits nothing when none of the ids were present.
+    pub fn remove_flows(&self, ids: &[String]) {
+        let removed = match self.shared.store.lock() {
+            Ok(mut store) => store.remove(ids),
+            Err(_) => 0,
+        };
+        if removed > 0 {
+            let _ = self.shared.events.send(FlowEvent::Removed { ids: ids.to_vec() });
+        }
+    }
+
     /// Scan stored bodies (decompressed text) for `pattern`; returns matching
     /// flow ids, optionally restricted to `candidates`. Case-insensitive; skips
     /// binary bodies. The candidate prefilter keeps this cheap in practice.
@@ -567,6 +580,61 @@ mod tests {
         let ar = controller.shared.autoresponder.read().expect("read autoresponder");
         let mut cursors = controller.shared.cursors.lock().expect("lock cursors");
         ar.evaluate_request_stateful(&request(), &mut cursors);
+    }
+
+    fn flow(id: &str) -> crate::flow::Flow {
+        crate::flow::Flow {
+            id: id.to_string(),
+            request: request(),
+            response: None,
+            matched_rule: None,
+            duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
+        }
+    }
+
+    #[test]
+    fn remove_flows_drops_only_selected_and_emits_event() {
+        let c = controller();
+        let mut rx = c.subscribe();
+        for id in ["f1", "f2", "f3"] {
+            c.shared.record_new(flow(id));
+        }
+        for _ in 0..3 {
+            assert!(matches!(rx.try_recv(), Ok(FlowEvent::New { .. })));
+        }
+
+        c.remove_flows(&["f1".to_string(), "f3".to_string()]);
+
+        {
+            let store = c.shared.store.lock().expect("lock store");
+            assert!(store.get("f1").is_none());
+            assert!(store.get("f2").is_some(), "an unselected flow survives the prune");
+            assert!(store.get("f3").is_none());
+            assert_eq!(store.len(), 1);
+        }
+        match rx.try_recv() {
+            Ok(FlowEvent::Removed { ids }) => {
+                assert_eq!(ids, vec!["f1".to_string(), "f3".to_string()]);
+            }
+            other => panic!("expected a Removed event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_flows_with_no_present_ids_emits_nothing() {
+        let c = controller();
+        let mut rx = c.subscribe();
+        c.shared.record_new(flow("f1"));
+        assert!(matches!(rx.try_recv(), Ok(FlowEvent::New { .. })));
+
+        c.remove_flows(&["ghost".to_string()]);
+        assert!(
+            rx.try_recv().is_err(),
+            "removing ids that were never captured must not emit an event"
+        );
+        assert_eq!(c.shared.store.lock().expect("lock store").len(), 1);
     }
 
     #[test]

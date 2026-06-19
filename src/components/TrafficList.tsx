@@ -24,6 +24,7 @@ interface Props {
   onRowClick: (id: string, e: ReactMouseEvent) => void;
   onKeySelect: (id: string, extend: boolean) => void;
   onClearSelection: () => void;
+  onDeleteSelected: () => void;
   onContentWidth?: (w: number) => void;
   onCommentEdit: (id: string, comment: string | null) => void;
   onMockFlow: (id: string) => void;
@@ -394,6 +395,7 @@ interface MenuActions {
   onExcludeHost: (host: string) => void;
   onCopyCurl: (id: string) => void;
   onCopyBody: (id: string) => void;
+  onDeleteSelected: () => void;
 }
 
 function urlOf(f: FlowSummary): string {
@@ -404,6 +406,7 @@ function menuItemsFor(
   f: FlowSummary,
   a: MenuActions,
   notify: ReturnType<typeof useToast>,
+  selectedCount: number,
 ): MenuItem[] {
   return [
     { label: "⚡ Mock this", onClick: () => a.onMockFlow(f.id) },
@@ -421,6 +424,12 @@ function menuItemsFor(
     { label: "", sep: true, onClick: () => {} },
     { label: `Filter to host: ${f.host}`, onClick: () => a.onFilterToHost(f.host) },
     { label: `Exclude host: ${f.host}`, onClick: () => a.onExcludeHost(f.host), danger: true },
+    { label: "", sep: true, onClick: () => {} },
+    {
+      label: selectedCount > 1 ? `Delete ${selectedCount} requests` : "Delete request",
+      onClick: () => a.onDeleteSelected(),
+      danger: true,
+    },
   ];
 }
 
@@ -448,7 +457,7 @@ function useFlowMenu(
     <ContextMenu
       x={menu.x}
       y={menu.y}
-      items={menuItemsFor(menu.flow, actions, notify)}
+      items={menuItemsFor(menu.flow, actions, notify, selectedIds.size)}
       onClose={() => setMenu(null)}
     />
   ) : null;
@@ -466,6 +475,7 @@ interface FlowScrollProps {
   onRowClick: (id: string, e: ReactMouseEvent) => void;
   onKeySelect: (id: string, extend: boolean) => void;
   onClearSelection: () => void;
+  onDeleteSelected: () => void;
   onOpenMenu: (e: ReactMouseEvent, f: FlowSummary) => void;
 }
 
@@ -479,6 +489,7 @@ function FlowScroll({
   onRowClick,
   onKeySelect,
   onClearSelection,
+  onDeleteSelected,
   onOpenMenu,
 }: FlowScrollProps) {
   const parentRef = useRef<HTMLDivElement>(null);
@@ -524,6 +535,13 @@ function FlowScroll({
         break;
       case "Escape":
         onClearSelection();
+        return;
+      case "Delete":
+      case "Backspace":
+        if (selectedIds.size > 0) {
+          e.preventDefault();
+          onDeleteSelected();
+        }
         return;
       default:
         return;
@@ -599,6 +617,7 @@ export function TrafficList({
   onRowClick,
   onKeySelect,
   onClearSelection,
+  onDeleteSelected,
   onContentWidth,
   onCommentEdit,
   onMockFlow,
@@ -617,6 +636,7 @@ export function TrafficList({
     onExcludeHost,
     onCopyCurl,
     onCopyBody,
+    onDeleteSelected,
   });
 
   return (
@@ -639,6 +659,7 @@ export function TrafficList({
         onRowClick={onRowClick}
         onKeySelect={onKeySelect}
         onClearSelection={onClearSelection}
+        onDeleteSelected={onDeleteSelected}
         onOpenMenu={openMenu}
       />
 

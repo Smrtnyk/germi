@@ -18,6 +18,7 @@ const GROUPS: { title: string; rows: { keys: string; desc: string }[] }[] = [
       { keys: "Shift + ↑ / ↓", desc: "Extend selection" },
       { keys: "Home / End", desc: "Jump to first / last flow" },
       { keys: "Esc", desc: "Clear selection" },
+      { keys: "Delete / Backspace", desc: "Delete selected requests" },
       { keys: "Right-click", desc: "Row actions (mock, copy, filter…)" },
     ],
   },

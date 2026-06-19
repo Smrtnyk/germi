@@ -127,6 +127,20 @@ impl FlowStore {
         self.order.clear();
     }
 
+    /// Remove the given flows by id, preserving the capture order of the rest.
+    /// Returns how many of the ids were actually present (so callers can skip
+    /// emitting an event when nothing changed). Unknown ids are ignored.
+    pub fn remove(&mut self, ids: &[String]) -> usize {
+        if ids.is_empty() {
+            return 0;
+        }
+        let drop: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let before = self.order.len();
+        self.order.retain(|id| !drop.contains(id.as_str()));
+        self.flows.retain(|id, _| !drop.contains(id.as_str()));
+        before - self.order.len()
+    }
+
     #[allow(dead_code)] // used by the Tauri layer's status bar
     pub fn len(&self) -> usize {
         self.order.len()
@@ -188,6 +202,33 @@ mod tests {
         assert!(store.get("b").is_none(), "the completed flow is evicted instead");
         assert!(store.get("c").is_some());
         assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn remove_drops_selected_and_preserves_order() {
+        let mut store = FlowStore::new(10);
+        for id in ["a", "b", "c", "d"] {
+            store.insert(flow(id));
+        }
+        // "zzz" was never inserted — it must be ignored, not counted.
+        let removed = store.remove(&["b".to_string(), "d".to_string(), "zzz".to_string()]);
+        assert_eq!(removed, 2, "only the two present ids count as removed");
+        assert_eq!(
+            store.ids(),
+            vec!["a".to_string(), "c".to_string()],
+            "survivors keep their capture order"
+        );
+        assert!(store.get("b").is_none());
+        assert!(store.get("d").is_none());
+        assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn remove_empty_is_a_noop() {
+        let mut store = FlowStore::new(10);
+        store.insert(flow("a"));
+        assert_eq!(store.remove(&[]), 0);
+        assert_eq!(store.len(), 1);
     }
 
     #[test]

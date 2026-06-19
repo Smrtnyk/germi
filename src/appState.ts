@@ -47,6 +47,17 @@ function persist(key: string, value: string): void {
   }
 }
 
+function pruneFlows(map: Map<string, FlowSummary>, order: string[], ids: string[]): void {
+  if (ids.length === 0) return;
+  const gone = new Set(ids);
+  for (const id of gone) map.delete(id);
+  let w = 0;
+  for (let r = 0; r < order.length; r++) {
+    if (!gone.has(order[r])) order[w++] = order[r];
+  }
+  order.length = w;
+}
+
 function applyFlowEvents(
   map: Map<string, FlowSummary>,
   order: string[],
@@ -58,6 +69,10 @@ function applyFlowEvents(
     if (ev.type === "cleared") {
       map.clear();
       order.length = 0;
+      continue;
+    }
+    if (ev.type === "removed") {
+      pruneFlows(map, order, ev.ids);
       continue;
     }
     if (ev.type === "resync") {
@@ -947,6 +962,16 @@ export function useAppState() {
     clearTraffic();
   }
 
+  // Prune the selected flows (no confirm — the backend `removed` event drops the
+  // rows); clear the now-stale selection + detail, like clearTraffic does.
+  function deleteSelected() {
+    const ids = [...selection.selectedIds];
+    if (ids.length === 0) return;
+    void api.removeFlows(ids).catch((e) => setError(String(e)));
+    selection.clearSelection();
+    inspector.setDetail(null);
+  }
+
   function refreshCa() {
     void api.caInfo().then(setCaInfo);
   }
@@ -1001,6 +1026,7 @@ export function useAppState() {
     copyFlowAsCurl,
     copyFlowBody,
     clearTraffic,
+    deleteSelected,
     refreshCa,
     activeScenario,
     matchCount,
