@@ -62,7 +62,9 @@ Frontend / app (from repo root):
 - `pnpm tauri dev` — run the desktop app with hot reload (recompiles Rust on save).
 - `pnpm tauri build` — produce installers (.msi/.exe, .deb/.AppImage/.rpm).
 - `pnpm build` — `tsc --noEmit && vite build`; **use this to type-check the
-  frontend** (the only frontend "test" — there is no JS test runner).
+  frontend**.
+- `pnpm test` — run the frontend unit tests with Vitest (`src/**/*.test.ts`,
+  node env); `pnpm test:watch` for watch mode.
 
 Engine (proxy-core — these work without the GUI system libs):
 - `cargo test -p proxy-core` — run all engine tests.
