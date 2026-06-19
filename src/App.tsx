@@ -174,7 +174,13 @@ function handleShortcut(
 ) {
   const mod = e.metaKey || e.ctrlKey;
   if (mod) {
-    if (runModShortcut(e.key.toLowerCase(), s, setPaletteOpen)) e.preventDefault();
+    const k = e.key.toLowerCase();
+    if (k === "a" && !isTyping(e.target)) {
+      e.preventDefault();
+      s.selectAllVisible();
+      return;
+    }
+    if (runModShortcut(k, s, setPaletteOpen)) e.preventDefault();
     return;
   }
   if (isTyping(e.target)) return;
@@ -313,6 +319,10 @@ function RightPanel({
     decode: boolean;
     onMock: (detail: FlowDetail) => void;
     onLoadFull: () => void;
+    selectedSummaries: FlowSummary[];
+    onSelectOne: (id: string) => void;
+    onMockMany: (ids: string[]) => void;
+    onClearSelection: () => void;
   };
   auto: {
     ar: AutoResponder;
@@ -507,6 +517,14 @@ export function App() {
                 decode: s.decode,
                 onMock: (d) => void s.ar.mockFlows([d.id], s.ar.autoresponder.activeScenarioId),
                 onLoadFull: () => s.setFullBody(true),
+                selectedSummaries: s.selectedSummaries,
+                onSelectOne: (id) => s.handleKeySelect(id, false),
+                onMockMany: (ids) => {
+                  void s.ar.mockFlows(ids, s.ar.autoresponder.activeScenarioId).then((ok) => {
+                    if (ok) s.selection.clearSelection();
+                  });
+                },
+                onClearSelection: s.selection.clearSelection,
               }}
               auto={{
                 ar: s.ar.autoresponder,

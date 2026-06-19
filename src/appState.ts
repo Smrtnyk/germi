@@ -427,6 +427,13 @@ function useSelection(flows: FlowSummary[]) {
     extendOrSelect(id, extend);
   }
 
+  function selectAll(ids: string[]) {
+    if (ids.length === 0) return;
+    setSelectedIds(new Set(ids));
+    setSelectedId(ids[ids.length - 1]);
+    anchorRef.current = ids[0];
+  }
+
   function clearSelection() {
     setSelectedId(null);
     setSelectedIds(new Set());
@@ -438,6 +445,7 @@ function useSelection(flows: FlowSummary[]) {
     setSelectedIds,
     onRowClick,
     selectByKeyboard,
+    selectAll,
     clearSelection,
   };
 }
@@ -859,6 +867,10 @@ export function useAppState() {
   const selectedSummary = selection.selectedId
     ? flowStore.flowsRef.current.get(selection.selectedId)
     : undefined;
+  const selectedSummaries = useMemo(
+    () => flowStore.flows.filter((f) => selection.selectedIds.has(f.id)),
+    [flowStore.flows, selection.selectedIds],
+  );
   const inspector = useFlowDetail(selection.selectedId, decode, fullBody, selectedSummary);
   const proxy = useProxyControl(
     settings.settings,
@@ -922,6 +934,15 @@ export function useAppState() {
     setFullBody(false);
     selection.selectByKeyboard(id, extend);
     if (rightMode === "single" && !extend) setRightTab("inspector");
+  }
+
+  function selectAllVisible() {
+    const matched = filtering.matchedIds;
+    const ids = matched
+      ? flowStore.flows.filter((f) => matched.has(f.id)).map((f) => f.id)
+      : flowStore.flows.map((f) => f.id);
+    selection.selectAll(ids);
+    if (ids.length > 1 && rightMode === "single") setRightTab("inspector");
   }
 
   function mockFlow(id: string) {
@@ -1010,6 +1031,8 @@ export function useAppState() {
     filtering,
     selection,
     selectedSummary,
+    selectedSummaries,
+    selectAllVisible,
     inspector,
     proxy,
     ar,

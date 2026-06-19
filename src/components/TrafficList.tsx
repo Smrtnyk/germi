@@ -326,6 +326,12 @@ interface FlowRowProps {
   onOpenMenu: (e: ReactMouseEvent, f: FlowSummary) => void;
 }
 
+function suppressShiftSelect(e: ReactMouseEvent) {
+  if (!e.shiftKey) return;
+  const tag = (e.target as HTMLElement).tagName;
+  if (tag !== "INPUT" && tag !== "TEXTAREA") e.preventDefault();
+}
+
 function FlowRow({
   f,
   item,
@@ -345,6 +351,7 @@ function FlowRow({
         f.matchedRule ? "ruled" : ""
       } ${matched ? "match" : ""} ${dimmed ? "dim" : ""}`}
       style={{ transform: `translateY(${item.start}px)`, height: item.size }}
+      onMouseDown={suppressShiftSelect}
       onClick={(e) => {
         onRowClick(f.id, e);
         onActivate();

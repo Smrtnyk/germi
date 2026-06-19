@@ -620,6 +620,7 @@ textarea {
   font-family: var(--mono);
   font-size: var(--fs-sm);
   white-space: nowrap;
+  user-select: none;
 }
 .flow-row > span {
   overflow: hidden;
@@ -770,6 +771,7 @@ textarea {
   color: var(--text);
   padding: 0 4px;
   height: 19px;
+  user-select: text;
 }
 
 .m-get {
@@ -805,6 +807,114 @@ textarea {
 .empty-pane {
   align-items: center;
   justify-content: center;
+}
+.inspector.multi {
+  padding: 0;
+}
+.multi-head {
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.multi-top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.multi-title {
+  font-size: var(--fs-base);
+}
+.multi-actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-left: auto;
+}
+.multi-stats {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  font-size: var(--fs-xs);
+}
+.multi-tag {
+  font-family: var(--mono);
+}
+.multi-list {
+  position: relative;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+.multi-canvas {
+  position: relative;
+  width: 100%;
+}
+.multi-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 12px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #1a212a;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.multi-row:hover {
+  background: var(--bg-1);
+}
+.multi-row .badge {
+  flex: none;
+}
+.multi-code {
+  flex: none;
+  width: 32px;
+}
+.multi-host {
+  flex: none;
+  max-width: 38%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.multi-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.multi-code.s2,
+.multi-tag.s2 {
+  color: var(--s2);
+}
+.multi-code.s3,
+.multi-tag.s3 {
+  color: var(--s3);
+}
+.multi-code.s4,
+.multi-tag.s4 {
+  color: var(--s4);
+  font-weight: 600;
+}
+.multi-code.s5,
+.multi-tag.s5 {
+  color: var(--s5);
+  font-weight: 700;
+}
+.multi-code.pending,
+.multi-tag.pending {
+  color: var(--muted);
 }
 .req-head {
   padding: 10px;

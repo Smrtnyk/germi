@@ -67,9 +67,10 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   request/response header, set status, or regex-rewrite the body. Built-in **offline
   tester**; persisted to `autoresponder.json`.
 - **Import & bulk-mock** — load **HAR** or Fiddler **SAZ** archives; multi-select
-  rows → **Add to scenario** to seed mock rules from real responses, or **⚡ Mock
-  this** on one. Prune noise with **Delete** (or right-click → Delete) to save a
-  cleaned-up session.
+  rows (Shift-range, Ctrl/⌘-click, **Ctrl/⌘ A** to select all) → **Add to scenario**
+  to seed mock rules from real responses, or **⚡ Mock this** on one. Selecting
+  several shows a summary (counts, hosts, sizes) in the Inspector. Prune noise with
+  **Delete** (or right-click → Delete) to save a cleaned-up session.
 - **Filtering** — highlights matches in place (Fiddler-style) with an `N of M` count:
   type/status chips, a token filter (`host: status:4xx kind:xhr -neg /regex/` — see
   the `?` popover), and backend `body:` / `req-body:` / `resp-body:` content search.
