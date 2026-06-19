@@ -33,9 +33,7 @@ function loadWidths(): Record<string, number> {
     const v = JSON.parse(localStorage.getItem(STORE_KEY) ?? "{}");
     // Guard against a corrupt/legacy value (e.g. the literal "null", a number,
     // or an array) — indexing those during render would crash the whole list.
-    return v && typeof v === "object" && !Array.isArray(v)
-      ? (v as Record<string, number>)
-      : {};
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, number>) : {};
   } catch {
     return {};
   }
@@ -81,9 +79,7 @@ export function TrafficList({
   const flexIndex = flexId ? columns.findIndex((c) => c.id === flexId) : -1;
   const hasFlex = flexIndex >= 0;
 
-  const tracks = columns.map((c, i) =>
-    i === flexIndex ? "minmax(60px, 1fr)" : `${widthOf(c)}px`,
-  );
+  const tracks = columns.map((c, i) => (i === flexIndex ? "minmax(60px, 1fr)" : `${widthOf(c)}px`));
   // With no flexible column, a trailing spacer lets columns left-pack cleanly.
   const cols = hasFlex ? tracks.join(" ") : `${tracks.join(" ")} minmax(0, 1fr)`;
 
@@ -175,9 +171,7 @@ export function TrafficList({
                 key={f.id}
                 className={`flow-row ${selected ? "selected" : ""} ${
                   inSet ? "checked" : ""
-                } ${f.matchedRule ? "ruled" : ""} ${matched ? "match" : ""} ${
-                  dimmed ? "dim" : ""
-                }`}
+                } ${f.matchedRule ? "ruled" : ""} ${matched ? "match" : ""} ${dimmed ? "dim" : ""}`}
                 style={{ transform: `translateY(${item.start}px)`, height: item.size }}
                 onClick={(e) => onRowClick(f.id, e)}
                 title={f.matchedRule ? `rule: ${f.matchedRule}` : undefined}

@@ -18,8 +18,7 @@
   --s4: #fbbf24; /* 4xx */
   --s5: #f87171; /* 5xx */
 
-  --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", Menlo, Consolas,
-    monospace;
+  --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 
   --scrollbar-thumb: #3a4655;

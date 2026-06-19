@@ -1,13 +1,15 @@
 {
   "name": "germi",
-  "private": true,
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "lint": "oxlint -c oxlint.config.ts",
     "lint:fix": "oxlint -c oxlint.config.ts --fix",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
     "fallow": "fallow",
     "fallow:fix": "fallow fix",
     "fallow:audit": "fallow audit",
@@ -35,6 +37,7 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
     "fallow": "2.99.0",
+    "oxfmt": "0.55.0",
     "oxlint": "1.70.0",
     "typescript": "6.0.3",
     "vite": "8.0.16"

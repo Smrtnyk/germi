@@ -31,8 +31,7 @@ export const api = {
   setAutoresponder: (autoresponder: AutoResponder) =>
     invoke<void>("set_autoresponder", { autoresponder }),
   getSettings: () => invoke<ProxySettings>("get_settings"),
-  setSettings: (settings: ProxySettings) =>
-    invoke<void>("set_settings", { settings }),
+  setSettings: (settings: ProxySettings) => invoke<void>("set_settings", { settings }),
   exportSettings: () => invoke<boolean>("export_settings"),
   importSettings: () => invoke<ProxySettings>("import_settings"),
   testRules: (rules: RuleSet, input: TestInput) =>
@@ -64,9 +63,7 @@ export const api = {
  * or 200 events) over a single long-lived channel. Returns the channel so the
  * caller can null its `onmessage` on unmount (see the Tauri channel leak note).
  */
-export function subscribeFlows(
-  onBatch: (events: FlowEvent[]) => void,
-): Channel<FlowEvent[]> {
+export function subscribeFlows(onBatch: (events: FlowEvent[]) => void): Channel<FlowEvent[]> {
   const channel = new Channel<FlowEvent[]>();
   channel.onmessage = onBatch;
   void invoke("subscribe_flows", { channel });

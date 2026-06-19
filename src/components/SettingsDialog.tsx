@@ -140,8 +140,8 @@ function ConnectionsSection({ settings, onChange }: SectionProps) {
       </label>
       {settings.allowRemote && (
         <p className="warn small">
-          ⚠ Any device on your network can route traffic through this proxy. Only
-          enable on trusted networks.
+          ⚠ Any device on your network can route traffic through this proxy. Only enable on trusted
+          networks.
         </p>
       )}
       <p className="muted small">
@@ -192,8 +192,8 @@ function CaptureSection({ settings, onChange }: SectionProps) {
 
       <div className="col-section-label">Capture filter (record only these hosts)</div>
       <p className="muted small">
-        When set, only matching hosts are intercepted &amp; recorded — everything
-        else is tunneled. Same subdomain matching as exclusions.
+        When set, only matching hosts are intercepted &amp; recorded — everything else is tunneled.
+        Same subdomain matching as exclusions.
       </p>
       <div className="excluded-add">
         <input
@@ -246,8 +246,8 @@ function ThrottlingSection({ settings, onChange }: SectionProps) {
     <div className="settings-pane">
       <h4>Throttling</h4>
       <p className="muted small">
-        Add an artificial delay before each response to simulate a slow network.
-        Applies to live captured responses (not mocked ones).
+        Add an artificial delay before each response to simulate a slow network. Applies to live
+        captured responses (not mocked ones).
       </p>
       <div className="row">
         <label>Response delay</label>
@@ -259,9 +259,7 @@ function ThrottlingSection({ settings, onChange }: SectionProps) {
           width={100}
           onCommit={(responseDelayMs) => onChange({ ...settings, responseDelayMs })}
         />
-        <span className="muted small">
-          ms {settings.responseDelayMs === 0 ? "(off)" : ""}
-        </span>
+        <span className="muted small">ms {settings.responseDelayMs === 0 ? "(off)" : ""}</span>
       </div>
       <div className="col-add-list">
         {presets.map((p) => (
@@ -329,9 +327,7 @@ function CertificatesSection({
           Regenerate CA
         </button>
       </div>
-      {running && (
-        <p className="muted small">Stop the proxy to regenerate the CA.</p>
-      )}
+      {running && <p className="muted small">Stop the proxy to regenerate the CA.</p>}
       {msg && <p className="small settings-ok">{msg}</p>}
       {err && <p className="settings-err">{err}</p>}
     </div>
@@ -370,10 +366,9 @@ function InterceptionSection({ settings, onChange }: SectionProps) {
     <div className="settings-pane">
       <h4>Host exclusions</h4>
       <p className="muted small">
-        Listed hosts bypass Germi entirely — their HTTPS is tunneled straight
-        through without decryption or capture, and HTTP is forwarded unrecorded.
-        Enter a domain like <code>spotify.com</code>; subdomains (e.g.{" "}
-        <code>api.spotify.com</code>) are matched too.
+        Listed hosts bypass Germi entirely — their HTTPS is tunneled straight through without
+        decryption or capture, and HTTP is forwarded unrecorded. Enter a domain like{" "}
+        <code>spotify.com</code>; subdomains (e.g. <code>api.spotify.com</code>) are matched too.
       </p>
 
       <div className="excluded-add">
@@ -394,9 +389,7 @@ function InterceptionSection({ settings, onChange }: SectionProps) {
       </div>
 
       {hosts.length === 0 ? (
-        <div className="muted small excluded-empty">
-          No exclusions — everything is intercepted.
-        </div>
+        <div className="muted small excluded-empty">No exclusions — everything is intercepted.</div>
       ) : (
         <ul className="excluded-list">
           {hosts.map((h) => (

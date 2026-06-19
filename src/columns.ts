@@ -81,9 +81,7 @@ const BUILTIN_COLUMNS: ColumnDef[] = [
     width: 78,
     align: "right",
     text: (f) =>
-      f.durationMs != null && f.ttfbMs != null
-        ? `${Math.max(0, f.durationMs - f.ttfbMs)}`
-        : "",
+      f.durationMs != null && f.ttfbMs != null ? `${Math.max(0, f.durationMs - f.ttfbMs)}` : "",
   },
   { id: "rule", label: "Mocked by", width: 150, text: (f) => f.matchedRule ?? "" },
   { id: "comment", label: "Comment", width: 170, special: "comment", text: (f) => f.comment ?? "" },
@@ -95,8 +93,14 @@ export const PRESETS: { name: string; columns: string[] }[] = [
     name: "Default",
     columns: ["method", "host", "path", "status", "type", "respSize", "duration", "comment"],
   },
-  { name: "Timing", columns: ["method", "path", "status", "start", "ttfb", "duration", "download"] },
-  { name: "Sizes", columns: ["method", "path", "status", "reqSize", "respSize", "totalSize", "type"] },
+  {
+    name: "Timing",
+    columns: ["method", "path", "status", "start", "ttfb", "duration", "download"],
+  },
+  {
+    name: "Sizes",
+    columns: ["method", "path", "status", "reqSize", "respSize", "totalSize", "type"],
+  },
   { name: "Mocking", columns: ["method", "host", "path", "status", "rule", "comment"] },
 ];
 
@@ -121,7 +125,5 @@ export function allColumns(headerSpecs: string[]): ColumnDef[] {
 /** Resolve an ordered list of column ids into definitions (dropping unknowns). */
 export function resolveColumns(order: string[], headerSpecs: string[]): ColumnDef[] {
   const byId = new Map(allColumns(headerSpecs).map((c) => [c.id, c]));
-  return order
-    .map((id) => byId.get(id))
-    .filter((c): c is ColumnDef => Boolean(c));
+  return order.map((id) => byId.get(id)).filter((c): c is ColumnDef => Boolean(c));
 }

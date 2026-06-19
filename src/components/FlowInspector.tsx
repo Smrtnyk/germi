@@ -152,11 +152,7 @@ function hexDump(b64: string, maxBytes = 64 * 1024): string {
   return lines.join("\n");
 }
 
-function bodyKind(
-  msg: MessageDetail,
-  ct: string,
-  decode: boolean,
-): "image" | "text" | "binary" {
+function bodyKind(msg: MessageDetail, ct: string, decode: boolean): "image" | "text" | "binary" {
   if (msg.size === 0) return "text";
   if (!decode && msg.encoding) return "binary";
   return classify(ct, msg.bodyText);
@@ -208,8 +204,7 @@ function MessageBody({
     return (
       <div className="binary-note">
         <span className="muted">
-          Image · {fmtSize(msg.size)} — too large to preview. Load the full body
-          to view it.
+          Image · {fmtSize(msg.size)} — too large to preview. Load the full body to view it.
         </span>
       </div>
     );
@@ -231,9 +226,7 @@ function MessageBody({
         <span className="muted">
           {isRawEncoded
             ? `Raw ${msg.encoding} body · ${fmtSize(msg.size)} — turn Decode on to read it.`
-            : `Binary content${ct ? ` · ${ct}` : ""} · ${fmtSize(
-                msg.size,
-              )} — not shown as text.`}
+            : `Binary content${ct ? ` · ${ct}` : ""} · ${fmtSize(msg.size)} — not shown as text.`}
         </span>
         {showHex && <VirtualText text={hexDump(msg.bodyBase64)} hex />}
       </div>
@@ -273,26 +266,17 @@ function MessageView({
         </span>
         {kind === "text" && canPretty && (
           <div className="seg">
-            <button
-              className={view === "pretty" ? "on" : ""}
-              onClick={() => setView("pretty")}
-            >
+            <button className={view === "pretty" ? "on" : ""} onClick={() => setView("pretty")}>
               Pretty
             </button>
-            <button
-              className={view === "raw" ? "on" : ""}
-              onClick={() => setView("raw")}
-            >
+            <button className={view === "raw" ? "on" : ""} onClick={() => setView("raw")}>
               Raw
             </button>
           </div>
         )}
         {kind === "binary" && (
           <div className="seg">
-            <button
-              className={showHex ? "on" : ""}
-              onClick={() => setShowHex((s) => !s)}
-            >
+            <button className={showHex ? "on" : ""} onClick={() => setShowHex((s) => !s)}>
               Hex
             </button>
           </div>
@@ -338,18 +322,10 @@ export function FlowInspector({ detail, onMock, decode, onLoadFull }: Props) {
     <div className="inspector">
       <div className="req-head">
         <div className="req-line">
-          <span className={`badge m-${detail.method.toLowerCase()}`}>
-            {detail.method}
-          </span>
-          {detail.status !== null && (
-            <span className="badge status">{detail.status}</span>
-          )}
-          {detail.matchedRule && (
-            <span className="badge rule">⚡ {detail.matchedRule}</span>
-          )}
-          {detail.durationMs !== null && (
-            <span className="muted">{detail.durationMs} ms</span>
-          )}
+          <span className={`badge m-${detail.method.toLowerCase()}`}>{detail.method}</span>
+          {detail.status !== null && <span className="badge status">{detail.status}</span>}
+          {detail.matchedRule && <span className="badge rule">⚡ {detail.matchedRule}</span>}
+          {detail.durationMs !== null && <span className="muted">{detail.durationMs} ms</span>}
           <button
             className="btn primary mock-btn"
             onClick={() => onMock(detail)}
@@ -371,10 +347,7 @@ export function FlowInspector({ detail, onMock, decode, onLoadFull }: Props) {
       </div>
 
       <div className="seg sides">
-        <button
-          className={side === "request" ? "on" : ""}
-          onClick={() => setSide("request")}
-        >
+        <button className={side === "request" ? "on" : ""} onClick={() => setSide("request")}>
           Request
         </button>
         <button

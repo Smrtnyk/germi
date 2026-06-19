@@ -46,10 +46,7 @@ export function Toolbar(props: ToolbarProps) {
         Germi
       </div>
 
-      <button
-        className={running ? "btn danger" : "btn primary"}
-        onClick={onToggleProxy}
-      >
+      <button className={running ? "btn danger" : "btn primary"} onClick={onToggleProxy}>
         {running ? "■ Stop" : "▶ Start"}
       </button>
 

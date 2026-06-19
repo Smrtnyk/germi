@@ -1,11 +1,5 @@
 import { useAppState, type RightTab } from "./appState";
-import type {
-  AutoResponder,
-  CaInfo,
-  FlowDetail,
-  FlowSummary,
-  ProxySettings,
-} from "./types";
+import type { AutoResponder, CaInfo, FlowDetail, FlowSummary, ProxySettings } from "./types";
 import { Toolbar } from "./components/Toolbar";
 import { FilterChips } from "./components/FilterChips";
 import { TrafficList } from "./components/TrafficList";
@@ -15,13 +9,7 @@ import { CaDialog } from "./components/CaDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { StatusBar } from "./components/StatusBar";
 
-function ErrorBar({
-  error,
-  onDismiss,
-}: {
-  error: string | null;
-  onDismiss: () => void;
-}) {
+function ErrorBar({ error, onDismiss }: { error: string | null; onDismiss: () => void }) {
   if (!error) return null;
   return (
     <div className="error-bar" onClick={onDismiss}>
@@ -50,10 +38,7 @@ function SelectionBar({
   if (selectedIds.size < 2) return null;
 
   const pick =
-    pickScenarioId ||
-    autoresponder.activeScenarioId ||
-    autoresponder.scenarios[0]?.id ||
-    "__new__";
+    pickScenarioId || autoresponder.activeScenarioId || autoresponder.scenarios[0]?.id || "__new__";
 
   async function addToScenario() {
     const ids = flows.filter((f) => selectedIds.has(f.id)).map((f) => f.id);
@@ -133,12 +118,7 @@ function RightPanel({
 
       <div className="right-content">
         <div className={rightTab === "inspector" ? "pane" : "pane hidden"}>
-          <FlowInspector
-            detail={detail}
-            onMock={onMock}
-            decode={decode}
-            onLoadFull={onLoadFull}
-          />
+          <FlowInspector detail={detail} onMock={onMock} decode={decode} onLoadFull={onLoadFull} />
         </div>
         <div className={rightTab === "autoresponder" ? "pane" : "pane hidden"}>
           <AutoresponderPanel
@@ -270,9 +250,7 @@ export function App() {
           activeScenario={s.activeScenario}
           detail={s.inspector.detail}
           decode={s.decode}
-          onMock={(d) =>
-            void s.ar.mockFlows([d.id], s.ar.autoresponder.activeScenarioId)
-          }
+          onMock={(d) => void s.ar.mockFlows([d.id], s.ar.autoresponder.activeScenarioId)}
           onLoadFull={() => s.setFullBody(true)}
           autoresponder={s.ar.autoresponder}
           onAutoresponderChange={s.ar.saveAutoresponder}

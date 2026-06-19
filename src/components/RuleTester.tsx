@@ -53,19 +53,17 @@ export function RuleTester({ rules, seedMethod, seedUrl }: Props) {
     <div className="tester">
       <h4>Test rules</h4>
       <p className="muted small">
-        Simulate the whole rule set against a sample request — no network, no
-        side effects. Preview exactly what a client would get back.
+        Simulate the whole rule set against a sample request — no network, no side effects. Preview
+        exactly what a client would get back.
       </p>
 
       <div className="row">
         <select value={method} onChange={(e) => setMethod(e.target.value)}>
-          {["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map(
-            (m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ),
-          )}
+          {["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
         </select>
         <input
           className="grow"
@@ -80,11 +78,7 @@ export function RuleTester({ rules, seedMethod, seedUrl }: Props) {
 
       <div className="row col">
         <label className="muted small">Request body (optional)</label>
-        <textarea
-          rows={3}
-          value={reqBody}
-          onChange={(e) => setReqBody(e.target.value)}
-        />
+        <textarea rows={3} value={reqBody} onChange={(e) => setReqBody(e.target.value)} />
       </div>
 
       <div className="row">
@@ -103,8 +97,8 @@ export function RuleTester({ rules, seedMethod, seedUrl }: Props) {
         />
       </div>
       <p className="muted small">
-        Only used when no rule short-circuits — to preview response-phase rules
-        (rewrite / set header / set status).
+        Only used when no rule short-circuits — to preview response-phase rules (rewrite / set
+        header / set status).
       </p>
 
       {error && <div className="error-bar">{error}</div>}
@@ -121,10 +115,7 @@ export function RuleTester({ rules, seedMethod, seedUrl }: Props) {
               </span>
             )}
             <span className="muted">
-              matched:{" "}
-              {result.matchedRules.length
-                ? result.matchedRules.join(", ")
-                : "none"}
+              matched: {result.matchedRules.length ? result.matchedRules.join(", ") : "none"}
             </span>
           </div>
 
@@ -150,9 +141,7 @@ export function RuleTester({ rules, seedMethod, seedUrl }: Props) {
                   ))}
                 </div>
               )}
-              <pre className="snippet">
-                {result.response.body || "(empty body)"}
-              </pre>
+              <pre className="snippet">{result.response.body || "(empty body)"}</pre>
             </div>
           )}
         </div>

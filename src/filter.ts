@@ -86,13 +86,10 @@ function tokenize(s: string): string[] {
   return out;
 }
 
-type ClassifiedTerm =
-  | { kind: "summary"; term: SummaryTerm }
-  | { kind: "body"; term: BodyTerm };
+type ClassifiedTerm = { kind: "summary"; term: SummaryTerm } | { kind: "body"; term: BodyTerm };
 
 function bodyTermOf(key: string, value: string, neg: boolean): BodyTerm {
-  const side =
-    key === "req-body" ? "request" : key === "resp-body" ? "response" : "either";
+  const side = key === "req-body" ? "request" : key === "resp-body" ? "response" : "either";
   const m = /^\/(.*)\/$/.exec(value);
   return { side, value: m ? m[1] : value, regex: !!m, neg };
 }
@@ -220,9 +217,7 @@ function matchKv(key: string, value: string, s: FlowSummary): boolean {
       return extOf(s.path) === v;
     case "rule":
     case "matched":
-      return value
-        ? (s.matchedRule ?? "").toLowerCase().includes(v)
-        : s.matchedRule != null;
+      return value ? (s.matchedRule ?? "").toLowerCase().includes(v) : s.matchedRule != null;
     case "larger-than":
       return s.respSize > parseSize(value);
     case "smaller-than":

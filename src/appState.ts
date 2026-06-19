@@ -9,12 +9,7 @@ import {
 } from "react";
 
 import { api, subscribeFlows } from "./ipc";
-import {
-  parseFilter,
-  statusClass,
-  type BodyTerm,
-  type ParsedFilter,
-} from "./filter";
+import { parseFilter, statusClass, type BodyTerm, type ParsedFilter } from "./filter";
 import { resolveColumns, DEFAULT_COLUMNS } from "./columns";
 import { useResizable } from "./useResizable";
 import type {
@@ -79,10 +74,7 @@ async function reconcileFlows(
   }
 }
 
-function collectFlows(
-  order: string[],
-  map: Map<string, FlowSummary>,
-): FlowSummary[] {
+function collectFlows(order: string[], map: Map<string, FlowSummary>): FlowSummary[] {
   const arr: FlowSummary[] = [];
   for (const id of order) {
     const s = map.get(id);
@@ -91,11 +83,7 @@ function collectFlows(
   return arr;
 }
 
-function mergeFlows(
-  order: string[],
-  map: Map<string, FlowSummary>,
-  list: FlowSummary[],
-): void {
+function mergeFlows(order: string[], map: Map<string, FlowSummary>, list: FlowSummary[]): void {
   for (const s of list) {
     if (!map.has(s.id)) order.push(s.id);
     map.set(s.id, s);
@@ -109,11 +97,7 @@ function toggledSet<T>(prev: Set<T>, item: T): Set<T> {
   return next;
 }
 
-function rangeSelection(
-  ids: string[],
-  anchor: string,
-  id: string,
-): Set<string> | null {
+function rangeSelection(ids: string[], anchor: string, id: string): Set<string> | null {
   const a = ids.indexOf(anchor);
   const b = ids.indexOf(id);
   if (a === -1 || b === -1) return null;
@@ -204,8 +188,7 @@ function persistSettings(
   refresh: () => Promise<void>,
   setError: SetError,
 ): void {
-  const headersChanged =
-    JSON.stringify(next.headerColumns) !== JSON.stringify(prevHeaderColumns);
+  const headersChanged = JSON.stringify(next.headerColumns) !== JSON.stringify(prevHeaderColumns);
   void api
     .setSettings(next)
     .then(async () => {
@@ -252,12 +235,7 @@ function useFlowStore(maxFlows: number, setError: SetError) {
   useEffect(() => {
     const channel = subscribeFlows((events) => {
       const cap = Math.max(1, maxFlowsRef.current);
-      const resync = applyFlowEvents(
-        flowsRef.current,
-        orderRef.current,
-        events,
-        cap,
-      );
+      const resync = applyFlowEvents(flowsRef.current, orderRef.current, events, cap);
       bump();
       if (resync) {
         void reconcileFlows(flowsRef.current, orderRef.current, bump, setError);
@@ -298,11 +276,7 @@ function useFlowStore(maxFlows: number, setError: SetError) {
   return { flows, flowsRef, orderRef, tick, editComment, loadInitial, refresh };
 }
 
-function useTrafficFilter(
-  flows: FlowSummary[],
-  tick: number,
-  setError: SetError,
-) {
+function useTrafficFilter(flows: FlowSummary[], tick: number, setError: SetError) {
   const [filter, setFilter] = useState("");
   const [typeChips, setTypeChips] = useState<Set<ResourceKind>>(new Set());
   const [statusChips, setStatusChips] = useState<Set<string>>(new Set());
@@ -313,8 +287,7 @@ function useTrafficFilter(
   const deferredFilter = useDeferredValue(filter);
   const parsed = useMemo(() => parseFilter(deferredFilter), [deferredFilter]);
 
-  const hasFilter =
-    filter.trim() !== "" || typeChips.size > 0 || statusChips.size > 0;
+  const hasFilter = filter.trim() !== "" || typeChips.size > 0 || statusChips.size > 0;
 
   const summaryMatched = useMemo(
     () => collectMatched(flows, parsed, typeChips, statusChips),
@@ -349,13 +322,7 @@ function useTrafficFilter(
   }, [deferredFilter, typeChips, statusChips, tick]);
 
   const matchedIds = useMemo(
-    () =>
-      intersectMatches(
-        hasFilter,
-        summaryMatched,
-        bodyMatchIds,
-        parsed.bodyTerms.length > 0,
-      ),
+    () => intersectMatches(hasFilter, summaryMatched, bodyMatchIds, parsed.bodyTerms.length > 0),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [hasFilter, summaryMatched, bodyMatchIds, deferredFilter],
   );
@@ -365,10 +332,8 @@ function useTrafficFilter(
     setFilter,
     typeChips,
     statusChips,
-    toggleTypeChip: (k: ResourceKind) =>
-      setTypeChips((prev) => toggledSet(prev, k)),
-    toggleStatusChip: (c: string) =>
-      setStatusChips((prev) => toggledSet(prev, c)),
+    toggleTypeChip: (k: ResourceKind) => setTypeChips((prev) => toggledSet(prev, k)),
+    toggleStatusChip: (c: string) => setStatusChips((prev) => toggledSet(prev, c)),
     matchedIds,
     searching,
   };
@@ -434,13 +399,7 @@ function useFlowDetail(
       active = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    selectedId,
-    decode,
-    fullBody,
-    selectedSummary?.status,
-    selectedSummary?.durationMs,
-  ]);
+  }, [selectedId, decode, fullBody, selectedSummary?.status, selectedSummary?.durationMs]);
 
   return { detail, setDetail };
 }
@@ -501,10 +460,7 @@ function useSettings() {
   return { settings, setSettings, settingsOpen, setSettingsOpen };
 }
 
-function useAutoresponder(
-  setError: SetError,
-  setRightTab: (tab: RightTab) => void,
-) {
+function useAutoresponder(setError: SetError, setRightTab: (tab: RightTab) => void) {
   const [autoresponder, setAutoresponder] = useState<AutoResponder>({
     scenarios: [],
     activeScenarioId: null,
@@ -521,10 +477,7 @@ function useAutoresponder(
     }, 300);
   }
 
-  async function mockFlows(
-    ids: string[],
-    scenarioId: string | null,
-  ): Promise<boolean> {
+  async function mockFlows(ids: string[], scenarioId: string | null): Promise<boolean> {
     setError(null);
     try {
       const result = await api.mockFlows(ids, scenarioId);
@@ -550,9 +503,7 @@ function useAutoresponder(
 }
 
 function usePersistentColumns(headerColumns: string[]) {
-  const [columnOrder, setColumnOrder] = useState<string[]>(() =>
-    loadColumnOrder(),
-  );
+  const [columnOrder, setColumnOrder] = useState<string[]>(() => loadColumnOrder());
 
   useEffect(() => {
     localStorage.setItem("germi.columns", JSON.stringify(columnOrder));
@@ -611,12 +562,7 @@ export function useAppState() {
   const selectedSummary = selection.selectedId
     ? flowStore.flowsRef.current.get(selection.selectedId)
     : undefined;
-  const inspector = useFlowDetail(
-    selection.selectedId,
-    decode,
-    fullBody,
-    selectedSummary,
-  );
+  const inspector = useFlowDetail(selection.selectedId, decode, fullBody, selectedSummary);
   const proxy = useProxyControl(settings.settings, setError);
   const ar = useAutoresponder(setError, setRightTab);
   const columns = usePersistentColumns(settings.settings.headerColumns);
@@ -645,12 +591,7 @@ export function useAppState() {
 
   function saveSettings(next: ProxySettings) {
     settings.setSettings(next);
-    persistSettings(
-      next,
-      settings.settings.headerColumns,
-      flowStore.refresh,
-      setError,
-    );
+    persistSettings(next, settings.settings.headerColumns, flowStore.refresh, setError);
   }
 
   function handleRowClick(id: string, e: ReactMouseEvent) {
@@ -670,9 +611,8 @@ export function useAppState() {
   }
 
   const activeScenario =
-    ar.autoresponder.scenarios.find(
-      (s) => s.id === ar.autoresponder.activeScenarioId,
-    )?.name ?? null;
+    ar.autoresponder.scenarios.find((s) => s.id === ar.autoresponder.activeScenarioId)?.name ??
+    null;
 
   const matchCount = filtering.matchedIds ? filtering.matchedIds.size : null;
 

@@ -24,9 +24,8 @@ export function CaDialog({ info, onClose }: Props) {
       </div>
 
       <p className="muted">
-        HTTPS interception requires this one-time step. The CA private key never
-        leaves your machine — but anything that trusts it can be intercepted, so
-        keep it to development machines.
+        HTTPS interception requires this one-time step. The CA private key never leaves your machine
+        — but anything that trusts it can be intercepted, so keep it to development machines.
       </p>
 
       <div className="ca-path">

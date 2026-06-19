@@ -1,22 +1,14 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 
 import { api } from "../ipc";
-import type {
-  Action,
-  ActionKind,
-  AutoResponder,
-  Rule,
-  Scenario,
-} from "../types";
+import type { Action, ActionKind, AutoResponder, Rule, Scenario } from "../types";
 import { useResizable } from "../useResizable";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { RuleTester } from "./RuleTester";
 
 // Lazy-loaded so CodeMirror (and its language packs) is a separate chunk fetched
 // only when a mock body is actually edited — keeps app startup light.
-const BodyEditor = lazy(() =>
-  import("./BodyEditor").then((m) => ({ default: m.BodyEditor })),
-);
+const BodyEditor = lazy(() => import("./BodyEditor").then((m) => ({ default: m.BodyEditor })));
 
 interface Props {
   ar: AutoResponder;
@@ -88,9 +80,7 @@ function actionSummary(a: Action): string {
 }
 
 function ruleSummary(r: Rule): string {
-  return `${r.matcher.method || "ANY"} · ${r.matcher.url || "*"} → ${actionSummary(
-    r.action,
-  )}`;
+  return `${r.matcher.method || "ANY"} · ${r.matcher.url || "*"} → ${actionSummary(r.action)}`;
 }
 
 function newRule(): Rule {
@@ -117,11 +107,7 @@ function RuleListItem({
   onDuplicate: () => void;
 }) {
   return (
-    <div
-      className={`rule-item ${selected ? "selected" : ""}`}
-      onClick={onSelect}
-      title={rule.name}
-    >
+    <div className={`rule-item ${selected ? "selected" : ""}`} onClick={onSelect} title={rule.name}>
       <input
         type="checkbox"
         checked={rule.enabled}
@@ -130,12 +116,8 @@ function RuleListItem({
       />
       <div className="rmeta">
         <div className="rtop">
-          <span className={`rname ${rule.enabled ? "" : "off"}`}>
-            {middleTruncate(rule.name)}
-          </span>
-          {rule.action.kind !== "respond" && (
-            <span className="rkind">{rule.action.kind}</span>
-          )}
+          <span className={`rname ${rule.enabled ? "" : "off"}`}>{middleTruncate(rule.name)}</span>
+          {rule.action.kind !== "respond" && <span className="rkind">{rule.action.kind}</span>}
         </div>
         <div className="rsub">{ruleSummary(rule)}</div>
       </div>
@@ -203,11 +185,7 @@ function ScenarioView({
       matcher: { ...orig.matcher },
       action: structuredClone(orig.action),
     };
-    setRules([
-      ...active.rules.slice(0, idx + 1),
-      copy,
-      ...active.rules.slice(idx + 1),
-    ]);
+    setRules([...active.rules.slice(0, idx + 1), copy, ...active.rules.slice(idx + 1)]);
     setSelectedRuleId(copy.id);
   }
 
@@ -222,8 +200,7 @@ function ScenarioView({
           onChange={(e) => onPatch({ name: e.target.value })}
         />
         <span className="muted small">
-          {active.rules.filter((r) => r.enabled).length}/{active.rules.length}{" "}
-          rule(s) active · live
+          {active.rules.filter((r) => r.enabled).length}/{active.rules.length} rule(s) active · live
         </span>
         <div className="spacer" />
         <button className="btn danger" onClick={onRequestDelete}>
@@ -257,11 +234,7 @@ function ScenarioView({
           ))}
         </aside>
 
-        <div
-          className="resizer"
-          onPointerDown={listResize.onPointerDown}
-          title="Drag to resize"
-        />
+        <div className="resizer" onPointerDown={listResize.onPointerDown} title="Drag to resize" />
 
         <section className="rule-editor">
           {!selectedRule ? (
@@ -345,8 +318,8 @@ export function AutoresponderPanel({ ar, onChange, selectRuleId }: Props) {
         <div className="off-state">
           <h3>Autoresponder is off</h3>
           <p className="muted">
-            Capturing traffic only — nothing is mocked. Pick a scenario tab above
-            to make its rules live, or create a new one.
+            Capturing traffic only — nothing is mocked. Pick a scenario tab above to make its rules
+            live, or create a new one.
           </p>
           {ar.scenarios.length === 0 && (
             <button className="btn primary" onClick={addScenario}>
@@ -420,13 +393,11 @@ function RuleEditor({
           }
         >
           <option value="">any</option>
-          {["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map(
-            (m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ),
-          )}
+          {["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
         </select>
         <select
           value={rule.matcher.urlMatch}
@@ -450,9 +421,7 @@ function RuleEditor({
           className="grow"
           placeholder="e.g. /api/health   or   example.com/users"
           value={rule.matcher.url}
-          onChange={(e) =>
-            onPatch({ matcher: { ...rule.matcher, url: e.target.value } })
-          }
+          onChange={(e) => onPatch({ matcher: { ...rule.matcher, url: e.target.value } })}
         />
       </div>
 
@@ -461,9 +430,7 @@ function RuleEditor({
         <label>Type</label>
         <select
           value={rule.action.kind}
-          onChange={(e) =>
-            onPatch({ action: defaultAction(e.target.value as ActionKind) })
-          }
+          onChange={(e) => onPatch({ action: defaultAction(e.target.value as ActionKind) })}
         >
           {ACTION_KINDS.map((a) => (
             <option key={a.value} value={a.value}>
@@ -508,13 +475,7 @@ function formatJson(body: string): string | null {
   }
 }
 
-function StatusField({
-  status,
-  onChange,
-}: {
-  status: number;
-  onChange: (s: number) => void;
-}) {
+function StatusField({ status, onChange }: { status: number; onChange: (s: number) => void }) {
   // Local draft so the field can be cleared / retyped without immediately
   // committing an invalid status 0 (Number("") === 0). Commit a valid HTTP
   // status (100–599) on blur/Enter, otherwise revert to the last good value.
@@ -692,10 +653,7 @@ function ActionFields({
       const contentType = action.contentType ?? "";
       return (
         <>
-          <StatusField
-            status={action.status}
-            onChange={(s) => setAction({ status: s })}
-          />
+          <StatusField status={action.status} onChange={(s) => setAction({ status: s })} />
           <div className="row">
             <label>Content-Type</label>
             <input
@@ -704,10 +662,7 @@ function ActionFields({
               onChange={(e) => setAction({ contentType: e.target.value })}
             />
           </div>
-          <HeadersTable
-            headers={action.headers}
-            onChange={(h) => setAction({ headers: h })}
-          />
+          <HeadersTable headers={action.headers} onChange={(h) => setAction({ headers: h })} />
           <div className="row body-head">
             <label>Body</label>
             <button
@@ -721,9 +676,7 @@ function ActionFields({
               Format
             </button>
           </div>
-          <Suspense
-            fallback={<div className="muted pad small">Loading editor…</div>}
-          >
+          <Suspense fallback={<div className="muted pad small">Loading editor…</div>}>
             <BodyEditor
               value={action.body}
               contentType={contentType}
@@ -734,13 +687,7 @@ function ActionFields({
       );
     }
     case "mapLocal":
-      return (
-        <MapLocalFields
-          path={action.path}
-          status={action.status}
-          setAction={setAction}
-        />
-      );
+      return <MapLocalFields path={action.path} status={action.status} setAction={setAction} />;
     case "setRequestHeader":
     case "setResponseHeader":
       return (
@@ -760,12 +707,7 @@ function ActionFields({
         </div>
       );
     case "setStatus":
-      return (
-        <StatusField
-          status={action.status}
-          onChange={(s) => setAction({ status: s })}
-        />
-      );
+      return <StatusField status={action.status} onChange={(s) => setAction({ status: s })} />;
     case "rewriteResponseBody":
       return (
         <>

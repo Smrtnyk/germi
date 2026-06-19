@@ -78,6 +78,9 @@ jobs:
       - name: Lint frontend (oxlint)
         run: pnpm lint
 
+      - name: Check formatting (oxfmt)
+        run: pnpm format:check
+
       - name: Analyze frontend (fallow)
         run: pnpm fallow
 

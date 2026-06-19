@@ -10,20 +10,13 @@ interface Props {
   onSettingsChange: (s: ProxySettings) => void;
 }
 
-export function ColumnsSettings({
-  order,
-  onOrderChange,
-  settings,
-  onSettingsChange,
-}: Props) {
+export function ColumnsSettings({ order, onOrderChange, settings, onSettingsChange }: Props) {
   const [hdr, setHdr] = useState("");
   const [side, setSide] = useState<"resp" | "req">("resp");
 
   const all = allColumns(settings.headerColumns);
   const byId = new Map(all.map((c) => [c.id, c]));
-  const visible = order
-    .map((id) => byId.get(id))
-    .filter((c): c is ColumnDef => Boolean(c));
+  const visible = order.map((id) => byId.get(id)).filter((c): c is ColumnDef => Boolean(c));
   const hidden = all.filter((c) => !order.includes(c.id));
 
   function move(i: number, dir: -1 | 1) {
@@ -41,7 +34,10 @@ export function ColumnsSettings({
     onOrderChange(next);
   }
   function addHeaderColumn() {
-    const name = hdr.trim().toLowerCase().replace(/[^a-z0-9-]/g, "");
+    const name = hdr
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, "");
     if (!name) {
       setHdr("");
       return;
@@ -69,8 +65,8 @@ export function ColumnsSettings({
     <div className="settings-pane columns-settings">
       <h4>Columns</h4>
       <p className="muted small">
-        Choose which columns the traffic list shows and their order. Resize them
-        by dragging the header dividers.
+        Choose which columns the traffic list shows and their order. Resize them by dragging the
+        header dividers.
       </p>
 
       <div className="col-presets">
