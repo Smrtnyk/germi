@@ -18,9 +18,6 @@ export interface ColumnDef {
   text: (f: FlowSummary) => string;
 }
 
-// Which visible column flexes to fill leftover width (first present wins).
-export const FLEX_PREFERENCE = ["path", "url", "host"];
-
 function fmtSize(n: number): string {
   if (n === 0) return "";
   if (n < 1024) return `${n} B`;

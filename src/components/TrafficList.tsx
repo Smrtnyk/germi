@@ -12,7 +12,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import type { FlowSummary } from "../types";
-import { FLEX_PREFERENCE, type ColumnDef } from "../columns";
+import type { ColumnDef } from "../columns";
 import { dragFlowIds, encodeFlowIds, FLOW_DRAG_MIME } from "../dnd";
 import { useToast } from "../toast";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
@@ -27,7 +27,6 @@ interface Props {
   onKeySelect: (id: string, extend: boolean) => void;
   onClearSelection: () => void;
   onDeleteSelected: () => void;
-  onContentWidth?: (w: number) => void;
   onCommentEdit: (id: string, comment: string | null) => void;
   onMockFlow: (id: string) => void;
   onFilterToHost: (host: string) => void;
@@ -40,7 +39,6 @@ const MIN_W = 38;
 const STORE_KEY = "germi.colWidths";
 const GAP = 8;
 const ROW_PAD = 20;
-const FLEX_MIN = 60;
 const BOTTOM_SLACK = 40;
 
 function loadWidths(): Record<string, number> {
@@ -77,7 +75,7 @@ interface Menu {
 interface ColumnWidths {
   widthOf: (c: ColumnDef) => number;
   resetWidth: (id: string, width: number) => void;
-  startResize: (e: ReactPointerEvent, c: ColumnDef, sign: number) => void;
+  startResize: (e: ReactPointerEvent, c: ColumnDef) => void;
 }
 
 function useColumnWidths(): ColumnWidths {
@@ -96,7 +94,7 @@ function useColumnWidths(): ColumnWidths {
     setWidths((prev) => ({ ...prev, [id]: width }));
   };
 
-  function startResize(e: ReactPointerEvent, c: ColumnDef, sign: number) {
+  function startResize(e: ReactPointerEvent, c: ColumnDef) {
     e.preventDefault();
     e.stopPropagation();
     const startX = e.clientX;
@@ -105,7 +103,7 @@ function useColumnWidths(): ColumnWidths {
     el.setPointerCapture(e.pointerId);
     document.body.style.cursor = "col-resize";
     const move = (ev: PointerEvent) => {
-      const w = Math.max(MIN_W, Math.round(startW + sign * (ev.clientX - startX)));
+      const w = Math.max(MIN_W, Math.round(startW + (ev.clientX - startX)));
       setWidths((prev) => (prev[c.id] === w ? prev : { ...prev, [c.id]: w }));
     };
     const up = () => {
@@ -207,38 +205,25 @@ function useCommentDraft(
 
 interface HeaderRowProps {
   columns: ColumnDef[];
-  flexIndex: number;
-  hasFlex: boolean;
-  startResize: (e: ReactPointerEvent, c: ColumnDef, sign: number) => void;
+  headerRef: React.RefObject<HTMLDivElement | null>;
+  startResize: (e: ReactPointerEvent, c: ColumnDef) => void;
   resetWidth: (id: string, width: number) => void;
 }
 
-function HeaderRow({ columns, flexIndex, hasFlex, startResize, resetWidth }: HeaderRowProps) {
+function HeaderRow({ columns, headerRef, startResize, resetWidth }: HeaderRowProps) {
   return (
-    <div className="flow-row flow-head">
-      {columns.map((c, i) => {
-        const alignCls = c.align === "right" ? "cell-right" : "";
-        if (i === flexIndex) {
-          return (
-            <span key={c.id} className={alignCls}>
-              {c.label}
-            </span>
-          );
-        }
-        const side = hasFlex && i > flexIndex ? "left" : "right";
-        const sign = hasFlex && i > flexIndex ? -1 : 1;
-        return (
-          <span key={c.id} className={alignCls}>
-            {c.label}
-            <span
-              className={`col-resize ${side}`}
-              onPointerDown={(e) => startResize(e, c, sign)}
-              onDoubleClick={() => resetWidth(c.id, c.width)}
-              title="Drag to resize · double-click to reset"
-            />
-          </span>
-        );
-      })}
+    <div className="flow-row flow-head" ref={headerRef}>
+      {columns.map((c) => (
+        <span key={c.id} className={c.align === "right" ? "cell-right" : ""}>
+          {c.label}
+          <span
+            className="col-resize right"
+            onPointerDown={(e) => startResize(e, c)}
+            onDoubleClick={() => resetWidth(c.id, c.width)}
+            title="Drag to resize · double-click to reset"
+          />
+        </span>
+      ))}
     </div>
   );
 }
@@ -381,32 +366,14 @@ function FlowRow({
 }
 
 interface ColumnLayout {
-  flexIndex: number;
-  hasFlex: boolean;
   cols: string;
+  rowWidth: number;
 }
 
-function useColumnLayout(
-  columns: ColumnDef[],
-  widthOf: (c: ColumnDef) => number,
-  onContentWidth?: (w: number) => void,
-): ColumnLayout {
-  const flexId = FLEX_PREFERENCE.find((id) => columns.some((c) => c.id === id));
-  const flexIndex = flexId ? columns.findIndex((c) => c.id === flexId) : -1;
-  const hasFlex = flexIndex >= 0;
-
-  const tracks = columns.map((c, i) => (i === flexIndex ? "minmax(60px, 1fr)" : `${widthOf(c)}px`));
-  const cols = hasFlex ? tracks.join(" ") : `${tracks.join(" ")} minmax(0, 1fr)`;
-
-  const contentWidth =
-    columns.reduce((acc, c, i) => acc + (i === flexIndex ? FLEX_MIN : widthOf(c)), 0) +
-    GAP * Math.max(0, columns.length - 1) +
-    ROW_PAD;
-  useEffect(() => {
-    onContentWidth?.(contentWidth);
-  }, [contentWidth, onContentWidth]);
-
-  return { flexIndex, hasFlex, cols };
+function useColumnLayout(columns: ColumnDef[], widthOf: (c: ColumnDef) => number): ColumnLayout {
+  const cols = `${columns.map((c) => `${widthOf(c)}px`).join(" ")} minmax(0, 1fr)`;
+  const rowWidth = columns.reduce((acc, c) => acc + widthOf(c), 0) + GAP * columns.length + ROW_PAD;
+  return { cols, rowWidth };
 }
 
 interface MenuActions {
@@ -489,6 +456,7 @@ function useFlowMenu(
 interface FlowScrollProps {
   flows: FlowSummary[];
   columns: ColumnDef[];
+  headerRef: React.RefObject<HTMLDivElement | null>;
   matchedIds: Set<string> | null;
   selectedId: string | null;
   selectedIds: Set<string>;
@@ -503,6 +471,7 @@ interface FlowScrollProps {
 function FlowScroll({
   flows,
   columns,
+  headerRef,
   matchedIds,
   selectedId,
   selectedIds,
@@ -593,6 +562,14 @@ function FlowScroll({
     virtualizer.scrollToIndex(next, { align: "auto" });
   }
 
+  function handleScroll() {
+    onScroll();
+    const el = parentRef.current;
+    if (el && headerRef.current) {
+      headerRef.current.style.transform = `translateX(${-el.scrollLeft}px)`;
+    }
+  }
+
   return (
     <>
       <div
@@ -600,7 +577,7 @@ function FlowScroll({
         ref={parentRef}
         tabIndex={0}
         onKeyDown={moveSelection}
-        onScroll={onScroll}
+        onScroll={handleScroll}
       >
         <div className="flow-canvas" style={{ height: virtualizer.getTotalSize() }}>
           {virtualizer.getVirtualItems().map((item) => {
@@ -659,7 +636,6 @@ export function TrafficList({
   onKeySelect,
   onClearSelection,
   onDeleteSelected,
-  onContentWidth,
   onCommentEdit,
   onMockFlow,
   onFilterToHost,
@@ -667,9 +643,10 @@ export function TrafficList({
   onCopyCurl,
   onCopyBody,
 }: Props) {
+  const headerRef = useRef<HTMLDivElement>(null);
   const { widthOf, resetWidth, startResize } = useColumnWidths();
   const comments = useCommentDraft(onCommentEdit);
-  const { flexIndex, hasFlex, cols } = useColumnLayout(columns, widthOf, onContentWidth);
+  const { cols, rowWidth } = useColumnLayout(columns, widthOf);
   const { openMenu, menuEl } = useFlowMenu(selectedId, selectedIds, onKeySelect, {
     beginEdit: comments.beginEdit,
     onMockFlow,
@@ -681,18 +658,23 @@ export function TrafficList({
   });
 
   return (
-    <div className="flow-list" style={{ "--cols": cols } as CSSProperties}>
-      <HeaderRow
-        columns={columns}
-        flexIndex={flexIndex}
-        hasFlex={hasFlex}
-        startResize={startResize}
-        resetWidth={resetWidth}
-      />
+    <div
+      className="flow-list"
+      style={{ "--cols": cols, "--row-w": `${rowWidth}px` } as CSSProperties}
+    >
+      <div className="flow-head-wrap">
+        <HeaderRow
+          columns={columns}
+          headerRef={headerRef}
+          startResize={startResize}
+          resetWidth={resetWidth}
+        />
+      </div>
 
       <FlowScroll
         flows={flows}
         columns={columns}
+        headerRef={headerRef}
         matchedIds={matchedIds}
         selectedId={selectedId}
         selectedIds={selectedIds}

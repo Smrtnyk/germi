@@ -12,7 +12,7 @@ import {
 import { api, subscribeFlows } from "./ipc";
 import { parseFilter, statusClass, type BodyTerm, type ParsedFilter } from "./filter";
 import { resolveColumns, DEFAULT_COLUMNS } from "./columns";
-import { useResizable } from "./useResizable";
+import { useSplitRatio } from "./useResizable";
 import { useToasts, type Notify } from "./toast";
 import { toCurl } from "./curl";
 import type {
@@ -44,6 +44,15 @@ function persist(key: string, value: string): void {
     localStorage.setItem(key, value);
   } catch {
     /* ignore quota / privacy-mode errors */
+  }
+}
+
+function loadBool(key: string, fallback: boolean): boolean {
+  try {
+    const v = localStorage.getItem(key);
+    return v === null ? fallback : v === "1";
+  } catch {
+    return fallback;
   }
 }
 
@@ -802,7 +811,13 @@ function useViewState() {
   const [fullBody, setFullBody] = useState(false);
   const [caOpen, setCaOpen] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
-  const [trafficMin, setTrafficMin] = useState(640);
+  const [rightCollapsed, setRightCollapsedState] = useState(() =>
+    loadBool("germi.rightCollapsed", false),
+  );
+  const setRightCollapsed = useCallback((v: boolean) => {
+    setRightCollapsedState(v);
+    persist("germi.rightCollapsed", v ? "1" : "0");
+  }, []);
   const filterInputRef = useRef<HTMLInputElement>(null);
 
   const [theme, setTheme] = useState<"dark" | "light">(() =>
@@ -827,8 +842,8 @@ function useViewState() {
     setCaOpen,
     confirmClear,
     setConfirmClear,
-    trafficMin,
-    setTrafficMin,
+    rightCollapsed,
+    setRightCollapsed,
     filterInputRef,
     theme,
     toggleTheme,
@@ -858,8 +873,8 @@ export function useAppState() {
     setCaOpen,
     confirmClear,
     setConfirmClear,
-    trafficMin,
-    setTrafficMin,
+    rightCollapsed,
+    setRightCollapsed,
     filterInputRef,
     theme,
     toggleTheme,
@@ -895,11 +910,11 @@ export function useAppState() {
     },
     notify,
   );
-  const trafficResize = useResizable({
-    initial: 760,
-    min: trafficMin,
-    getMax: () => window.innerWidth - 440,
-    storageKey: "germi.trafficWidth",
+  const trafficSplit = useSplitRatio({
+    initial: 0.55,
+    min: 0.18,
+    max: 0.82,
+    storageKey: "germi.trafficSplit",
   });
 
   useEffect(() => {
@@ -1032,7 +1047,8 @@ export function useAppState() {
     caInfo,
     caOpen,
     setCaOpen,
-    setTrafficMin,
+    rightCollapsed,
+    setRightCollapsed,
     filterInputRef,
     confirmClear,
     setConfirmClear,
@@ -1050,7 +1066,7 @@ export function useAppState() {
     ar,
     columns,
     session,
-    trafficResize,
+    trafficSplit,
     saveSettings,
     applyImportedSettings,
     handleRowClick,
