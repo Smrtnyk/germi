@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+echo "pre-commit: oxlint"
+pnpm lint
+
+echo "pre-commit: oxfmt"
+pnpm format:check
+
+echo "pre-commit: fallow"
+pnpm fallow
