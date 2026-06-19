@@ -3,25 +3,36 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use proxy_core::{AutoResponder, ProxySettings};
 
 const FILE: &str = "autoresponder.json";
 const SETTINGS_FILE: &str = "settings.json";
 
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Write `contents` to `path` atomically: write a sibling temp file, flush +
 /// fsync it, then rename it over the target (atomic on the same filesystem).
 /// A crash / power loss / full disk mid-write thus leaves the previous file
 /// intact instead of truncated — otherwise the next launch's `from_str(..).ok()`
 /// would silently fall back to defaults, losing all the user's scenarios.
+/// The temp file name is unique per write (pid + monotonic counter) so
+/// concurrent writers never share — and clobber — the same temp file.
 fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    {
+    let pid = std::process::id();
+    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp.{pid}.{n}"));
+    let result = (|| {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(contents)?;
         f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path)
+    result
 }
 
 /// Load the saved autoresponder, or `None` if absent / unreadable / malformed.

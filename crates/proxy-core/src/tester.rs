@@ -92,7 +92,12 @@ pub fn parse_url(url: &str) -> (String, String, String) {
     }
     match rest.find('/') {
         Some(i) => (scheme, rest[..i].to_string(), rest[i..].to_string()),
-        None => (scheme, rest, "/".to_string()),
+        // No path but a query (e.g. `host?x=1`): the query belongs to the path
+        // (the live URI parser yields `/?x=1`), not the host.
+        None => match rest.find('?') {
+            Some(i) => (scheme, rest[..i].to_string(), format!("/{}", &rest[i..])),
+            None => (scheme, rest, "/".to_string()),
+        },
     }
 }
 
@@ -118,30 +123,35 @@ fn preview_sequence(rules: &RuleSet, req: &CapturedRequest) -> (Vec<SequenceStep
     let mut ran_to_cap = true;
     for _ in 0..PREVIEW_CAP {
         let outcome = evaluate_request_rules_stateful(&rules.rules, req, &mut cursors);
+        // Resolve the fired rule by id (names are not unique), so terminal
+        // detection (unlimited rule = steady state) matches the rule that fired.
+        let is_terminal_rule = |id: &str| {
+            rules
+                .rules
+                .iter()
+                .find(|r| r.id == id)
+                .is_none_or(|r| r.fire_limit.is_none())
+        };
         let terminal = match &outcome {
-            RequestOutcome::Respond { rule, response } => {
+            RequestOutcome::Respond {
+                rule,
+                rule_id,
+                response,
+            } => {
                 steps.push(SequenceStep {
                     outcome: "respond".into(),
                     status: Some(response.status),
                     rule: Some(rule.clone()),
                 });
-                rules
-                    .rules
-                    .iter()
-                    .find(|r| &r.name == rule)
-                    .is_none_or(|r| r.fire_limit.is_none())
+                is_terminal_rule(rule_id)
             }
-            RequestOutcome::Block { rule } => {
+            RequestOutcome::Block { rule, rule_id } => {
                 steps.push(SequenceStep {
                     outcome: "block".into(),
                     status: Some(403),
                     rule: Some(rule.clone()),
                 });
-                rules
-                    .rules
-                    .iter()
-                    .find(|r| &r.name == rule)
-                    .is_none_or(|r| r.fire_limit.is_none())
+                is_terminal_rule(rule_id)
             }
             RequestOutcome::Continue { .. } => {
                 steps.push(SequenceStep {
@@ -197,7 +207,7 @@ pub fn test_rules(rules: &RuleSet, input: &TestInput) -> TestResult {
     let sequence = if seq.len() > 1 { seq } else { Vec::new() };
 
     match rules.evaluate_request(&req) {
-        RequestOutcome::Respond { rule, response } => TestResult {
+        RequestOutcome::Respond { rule, response, .. } => TestResult {
             matched_rules,
             outcome: "respond".to_string(),
             short_circuit: true,
@@ -213,7 +223,7 @@ pub fn test_rules(rules: &RuleSet, input: &TestInput) -> TestResult {
             sequence,
             sequence_loops,
         },
-        RequestOutcome::Block { rule } => TestResult {
+        RequestOutcome::Block { rule, .. } => TestResult {
             matched_rules,
             outcome: "block".to_string(),
             short_circuit: true,
@@ -255,9 +265,20 @@ fn continue_result(
 ) -> TestResult {
     let mut eff = req.headers.clone();
     for (k, v) in set_headers {
-        if let Some(slot) = eff.iter_mut().find(|(hk, _)| hk.eq_ignore_ascii_case(k)) {
-            slot.1.clone_from(v);
-        } else {
+        // Match the live engine (hyper `HeaderMap::insert`): replace the first
+        // occurrence and drop any duplicates, collapsing to a single value.
+        let mut replaced = false;
+        eff.retain_mut(|(hk, hv)| {
+            if hk.eq_ignore_ascii_case(k) {
+                if replaced {
+                    return false;
+                }
+                replaced = true;
+                hv.clone_from(v);
+            }
+            true
+        });
+        if !replaced {
             eff.push((k.clone(), v.clone()));
         }
     }

@@ -51,21 +51,25 @@ function skipSpaces(s: string, i: number): number {
   return i;
 }
 
-function readQuoted(s: string, i: number): [string, number] {
-  i++;
-  let tok = "";
-  while (i < s.length && s[i] !== '"') tok += s[i++];
-  if (i < s.length) i++;
-  return [tok, i];
+function findClosingQuote(s: string, open: number): number {
+  for (let j = open + 1; j < s.length; j++) {
+    if (s[j] === '"') return j;
+  }
+  return -1;
 }
 
 function readToken(s: string, i: number): [string, number] {
   let tok = "";
   while (i < s.length && !/\s/.test(s[i])) {
-    if (s[i] === '"') {
-      const [quoted, next] = readQuoted(s, i);
-      tok += quoted;
-      i = next;
+    const phraseStart = tok === "" || tok.endsWith(":");
+    if (s[i] === '"' && phraseStart) {
+      const close = findClosingQuote(s, i);
+      if (close === -1) {
+        tok += s[i++];
+        continue;
+      }
+      tok += s.slice(i + 1, close);
+      i = close + 1;
     } else {
       tok += s[i++];
     }
@@ -131,8 +135,9 @@ export function parseFilter(input: string): ParsedFilter {
   for (const raw of tokenize(input)) {
     if (!raw) continue;
     const classified = classifyTerm(raw);
-    if (classified.kind === "body") bodyTerms.push(classified.term);
-    else summaryTerms.push(classified.term);
+    if (classified.kind === "body") {
+      if (classified.term.value !== "") bodyTerms.push(classified.term);
+    } else summaryTerms.push(classified.term);
   }
 
   return {
@@ -171,6 +176,13 @@ function numericValueInvalid(key: string, value: string): boolean {
     const t = value.trim();
     // Number("") === 0 (not NaN), so guard the empty string explicitly.
     return t === "" || !Number.isFinite(Number(t));
+  }
+  if (key === "status") {
+    const v = value.trim().toLowerCase();
+    return (
+      v === "" ||
+      (!/^[1-5]xx$/.test(v) && !/^(>=|<=|>|<)\d+$/.test(v) && !Number.isFinite(Number(v)))
+    );
   }
   return false;
 }

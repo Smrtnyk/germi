@@ -47,6 +47,10 @@ struct SessionFlow {
     matched_rule: Option<String>,
     #[serde(default)]
     timestamp_ms: u64,
+    /// The response's own timestamp; falls back to `timestamp_ms` when absent
+    /// (older session files didn't carry it).
+    #[serde(default)]
+    resp_timestamp_ms: u64,
     #[serde(default)]
     comment: Option<String>,
 }
@@ -54,10 +58,14 @@ struct SessionFlow {
 fn b64e(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
+
 fn b64d(s: &str) -> Vec<u8> {
-    base64::engine::general_purpose::STANDARD
-        .decode(s.as_bytes())
-        .unwrap_or_default()
+    crate::body::base64_lenient(s).unwrap_or_else(|| {
+        // Genuinely corrupt data: don't silently pretend the body was empty —
+        // surface it so a damaged session is visible, not silently lossy.
+        tracing::warn!("session: failed to decode a base64 body; using empty body");
+        Vec::new()
+    })
 }
 
 /// Serialize flows into a `.germi` session (JSON bytes).
@@ -67,7 +75,7 @@ pub fn export_session(flows: &[Flow]) -> Vec<u8> {
         flows: flows
             .iter()
             .map(|f| {
-                let (status, resp_version, resp_headers, resp_body, has_response) =
+                let (status, resp_version, resp_headers, resp_body, has_response, resp_timestamp_ms) =
                     match &f.response {
                         Some(r) => (
                             Some(r.status),
@@ -75,8 +83,9 @@ pub fn export_session(flows: &[Flow]) -> Vec<u8> {
                             r.headers.clone(),
                             b64e(&r.body),
                             true,
+                            r.timestamp_ms,
                         ),
-                        None => (None, String::new(), Vec::new(), String::new(), false),
+                        None => (None, String::new(), Vec::new(), String::new(), false, 0),
                     };
                 SessionFlow {
                     method: f.request.method.clone(),
@@ -96,6 +105,7 @@ pub fn export_session(flows: &[Flow]) -> Vec<u8> {
                     ttfb_ms: f.ttfb_ms,
                     matched_rule: f.matched_rule.clone(),
                     timestamp_ms: f.request.timestamp_ms,
+                    resp_timestamp_ms,
                     comment: f.comment.clone(),
                 }
             })
@@ -137,12 +147,17 @@ pub fn import_session(bytes: &[u8]) -> Result<Vec<Flow>> {
                 timestamp_ms: ts,
             };
             let response = if sf.has_response || sf.status.is_some() {
+                let resp_ts = if sf.resp_timestamp_ms != 0 {
+                    sf.resp_timestamp_ms
+                } else {
+                    ts
+                };
                 Some(CapturedResponse {
                     status: sf.status.unwrap_or(0),
                     version: sf.resp_version,
                     headers: sf.resp_headers,
                     body: b64d(&sf.resp_body),
-                    timestamp_ms: ts,
+                    timestamp_ms: resp_ts,
                 })
             } else {
                 None
@@ -185,7 +200,7 @@ mod tests {
                 version: "HTTP/1.1".into(),
                 headers: vec![("Content-Type".into(), "text/plain".into())],
                 body: b"hello".to_vec(),
-                timestamp_ms: 42,
+                timestamp_ms: 50,
             }),
             matched_rule: Some("r".into()),
             duration_ms: Some(7),
@@ -198,11 +213,22 @@ mod tests {
         let f = &back[0];
         assert_eq!(f.request.method, "GET");
         assert_eq!(f.request.body, vec![1, 2, 3]);
+        assert_eq!(f.request.timestamp_ms, 42);
         let r = f.response.as_ref().unwrap();
         assert_eq!(r.status, 200);
         assert_eq!(r.body, b"hello");
+        assert_eq!(r.timestamp_ms, 50, "the response's own timestamp survives the round-trip");
         assert_eq!(f.matched_rule.as_deref(), Some("r"));
         assert_eq!(f.duration_ms, Some(7));
+    }
+
+    #[test]
+    fn lenient_base64_tolerates_whitespace_and_padding() {
+        // "hello" base64 with embedded newline and stripped padding still decodes.
+        assert_eq!(b64d("aGVs\nbG8"), b"hello");
+        assert_eq!(b64d("aGVsbG8="), b"hello");
+        // Genuinely-corrupt input degrades to empty (and logs) rather than panic.
+        assert_eq!(b64d("@@@not base64@@@"), Vec::<u8>::new());
     }
 
     #[test]

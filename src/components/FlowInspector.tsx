@@ -5,21 +5,29 @@ import type { FlowDetail, MessageDetail } from "../types";
 
 const ROW_H = 18;
 const MAX_ROW = 2000;
+const PRETTY_CAP = 512 * 1024;
 
 /** Split body text into bounded-width rows (also chunking single giant lines,
  *  e.g. minified JSON/HTML) so they can be virtualized at a fixed row height. */
 function toRows(text: string): string[] {
   const rows: string[] = [];
   for (const line of text.split("\n")) {
-    if (line.length <= MAX_ROW) {
-      rows.push(line);
-    } else {
-      for (let i = 0; i < line.length; i += MAX_ROW) {
-        rows.push(line.slice(i, i + MAX_ROW));
-      }
-    }
+    if (line.length <= MAX_ROW) rows.push(line);
+    else pushChunks(line, rows);
   }
   return rows.length ? rows : [""];
+}
+
+/** Chunk one over-long line at MAX_ROW, never splitting a surrogate pair. */
+function pushChunks(line: string, rows: string[]): void {
+  let i = 0;
+  while (i < line.length) {
+    let end = Math.min(i + MAX_ROW, line.length);
+    const last = line.charCodeAt(end - 1);
+    if (end < line.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
+    rows.push(line.slice(i, end));
+    i = end;
+  }
 }
 
 /** Virtualized text viewer — renders only visible lines, so multi-MB bodies
@@ -105,6 +113,7 @@ function classify(ct: string, text: string): "image" | "text" | "binary" {
 /** Produce a "pretty" rendering for formats that have one. `canPretty` is false
  *  when pretty would be identical to raw (so the toggle can be hidden). */
 function prettify(ct: string, text: string): { pretty: string; canPretty: boolean } {
+  if (text.length > PRETTY_CAP) return { pretty: text, canPretty: false };
   if (ct.includes("json")) {
     try {
       return { pretty: JSON.stringify(JSON.parse(text), null, 2), canPretty: true };
@@ -154,6 +163,7 @@ function hexDump(b64: string, maxBytes = 64 * 1024): string {
 
 function bodyKind(msg: MessageDetail, ct: string, decode: boolean): "image" | "text" | "binary" {
   if (msg.size === 0) return "text";
+  if (msg.encoding && !msg.decoded) return "binary";
   if (!decode && msg.encoding) return "binary";
   return classify(ct, msg.bodyText);
 }
@@ -161,7 +171,7 @@ function bodyKind(msg: MessageDetail, ct: string, decode: boolean): "image" | "t
 function encodingLabel(msg: MessageDetail, decode: boolean): string | null {
   if (!msg.encoding) return null;
   if (msg.decoded) return `${msg.encoding} · decoded`;
-  return `${msg.encoding}${decode ? "" : " · raw"}`;
+  return `${msg.encoding}${decode ? " · failed" : " · raw"}`;
 }
 
 function MessageHeaders({ headers }: { headers: [string, string][] }) {
@@ -193,6 +203,7 @@ function MessageBody({
   isRawEncoded: boolean;
   showHex: boolean;
 }) {
+  const hex = useMemo(() => hexDump(msg.bodyBase64), [msg.bodyBase64]);
   if (msg.size === 0) {
     return (
       <pre className="body">
@@ -228,7 +239,7 @@ function MessageBody({
             ? `Raw ${msg.encoding} body · ${fmtSize(msg.size)} — turn Decode on to read it.`
             : `Binary content${ct ? ` · ${ct}` : ""} · ${fmtSize(msg.size)} — not shown as text.`}
         </span>
-        {showHex && <VirtualText text={hexDump(msg.bodyBase64)} hex />}
+        {showHex && <VirtualText text={hex} hex />}
       </div>
     );
   }
@@ -252,7 +263,7 @@ function MessageView({
   const kind = bodyKind(msg, ct, decode);
   const encLabel = encodingLabel(msg, decode);
 
-  const { pretty, canPretty } = prettify(ct, msg.bodyText);
+  const { pretty, canPretty } = useMemo(() => prettify(ct, msg.bodyText), [ct, msg.bodyText]);
   const text = view === "pretty" && canPretty ? pretty : msg.bodyText;
 
   return (
@@ -289,6 +300,12 @@ function MessageView({
           <button className="link" onClick={onLoadFull}>
             Load full body
           </button>
+        </div>
+      )}
+
+      {msg.decodeTruncated && (
+        <div className="trunc-banner">
+          Decoded body truncated at 64&nbsp;MiB — too large to fully decode.
         </div>
       )}
 

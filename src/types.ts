@@ -46,6 +46,8 @@ export interface MessageDetail {
   decoded: boolean;
   /** True when the body was capped for display (refetch with full=true). */
   truncated: boolean;
+  /** True when decompression stopped at the 64 MiB cap (decoded body is incomplete). */
+  decodeTruncated: boolean;
 }
 
 export interface FlowDetail {

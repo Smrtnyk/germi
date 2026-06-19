@@ -40,12 +40,33 @@ pub fn export_rules(scenarios: &[Scenario]) -> Vec<u8> {
         version: FORMAT_VERSION,
         scenarios: scenarios.to_vec(),
     };
-    serde_json::to_vec_pretty(&export).unwrap_or_default()
+    serde_json::to_vec_pretty(&export).unwrap_or_else(|e| {
+        tracing::error!("failed to serialize .germi-rules export: {e}");
+        Vec::new()
+    })
+}
+
+/// Just the version field, read first so a newer-format file gets a clear
+/// "unsupported version" message instead of a confusing deserialization error
+/// when its (changed) shape no longer fits the current `RulesExport`.
+#[derive(Deserialize)]
+struct VersionPeek {
+    #[serde(default)]
+    version: u32,
 }
 
 /// Parse a `.germi-rules` bundle, returning its scenarios already re-keyed with
 /// fresh scenario + rule ids. Rejects a file from a newer, incompatible format.
 pub fn parse_rules(bytes: &[u8]) -> Result<Vec<Scenario>> {
+    if let Ok(peek) = serde_json::from_slice::<VersionPeek>(bytes) {
+        if peek.version > FORMAT_VERSION {
+            anyhow::bail!(
+                "unsupported .germi-rules version {} (this build supports up to {})",
+                peek.version,
+                FORMAT_VERSION
+            );
+        }
+    }
     let export: RulesExport = serde_json::from_slice(bytes)?;
     if export.version > FORMAT_VERSION {
         anyhow::bail!(

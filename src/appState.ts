@@ -60,13 +60,20 @@ async function reconcileFlows(
   bump: () => void,
   setError: SetError,
 ): Promise<void> {
+  const knownBefore = new Set(order);
   try {
     const fresh = await api.listFlows();
-    map.clear();
-    order.length = 0;
+    const freshIds = new Set(fresh.map((s) => s.id));
     for (const s of fresh) {
-      order.push(s.id);
+      if (!map.has(s.id)) order.push(s.id);
       map.set(s.id, s);
+    }
+    for (let i = order.length - 1; i >= 0; i--) {
+      const id = order[i];
+      if (knownBefore.has(id) && !freshIds.has(id)) {
+        order.splice(i, 1);
+        map.delete(id);
+      }
     }
     bump();
   } catch (e) {
@@ -214,7 +221,8 @@ async function loadInitialState(opts: {
     opts.setCaInfo(await api.caInfo());
     await opts.loadInitialFlows();
     if (loaded.captureOnStart && !isRunning) {
-      await api.startProxy(loaded.port, loaded.allowRemote);
+      const boundPort = await api.startProxy(loaded.port, loaded.allowRemote);
+      if (boundPort !== loaded.port) opts.setSettings({ ...loaded, port: boundPort });
       opts.setRunning(true);
     }
   } catch (e) {
@@ -240,7 +248,7 @@ function useFlowStore(maxFlows: number, setError: SetError) {
       if (resync) {
         void reconcileFlows(flowsRef.current, orderRef.current, bump, setError);
       }
-    });
+    }, setError);
     return () => {
       channel.onmessage = () => {};
     };
@@ -276,7 +284,7 @@ function useFlowStore(maxFlows: number, setError: SetError) {
   return { flows, flowsRef, orderRef, tick, editComment, loadInitial, refresh };
 }
 
-function useTrafficFilter(flows: FlowSummary[], tick: number, setError: SetError) {
+function useTrafficFilter(flows: FlowSummary[], setError: SetError) {
   const [filter, setFilter] = useState("");
   const [typeChips, setTypeChips] = useState<Set<ResourceKind>>(new Set());
   const [statusChips, setStatusChips] = useState<Set<string>>(new Set());
@@ -319,7 +327,7 @@ function useTrafficFilter(flows: FlowSummary[], tick: number, setError: SetError
       clearTimeout(handle);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deferredFilter, typeChips, statusChips, tick]);
+  }, [deferredFilter, typeChips, statusChips]);
 
   const matchedIds = useMemo(
     () => intersectMatches(hasFilter, summaryMatched, bodyMatchIds, parsed.bodyTerms.length > 0),
@@ -404,7 +412,11 @@ function useFlowDetail(
   return { detail, setDetail };
 }
 
-function useProxyControl(settings: ProxySettings, setError: SetError) {
+function useProxyControl(
+  settings: ProxySettings,
+  setError: SetError,
+  onPortBound: (port: number) => void,
+) {
   const [running, setRunning] = useState(false);
   const [systemProxy, setSystemProxy] = useState(false);
 
@@ -419,7 +431,8 @@ function useProxyControl(settings: ProxySettings, setError: SetError) {
         await api.stopProxy();
         setRunning(false);
       } else {
-        await api.startProxy(settings.port, settings.allowRemote);
+        const boundPort = await api.startProxy(settings.port, settings.allowRemote);
+        if (boundPort !== settings.port) onPortBound(boundPort);
         setRunning(true);
       }
     } catch (e) {
@@ -460,12 +473,7 @@ function useSettings() {
   return { settings, setSettings, settingsOpen, setSettingsOpen };
 }
 
-function useRuleHits(
-  flowTick: number,
-  activeScenarioId: string | null,
-  active: boolean,
-  setError: SetError,
-) {
+function useRuleHits(activeScenarioId: string | null, active: boolean, setError: SetError) {
   const [ruleHits, setRuleHits] = useState<Record<string, number>>({});
 
   useEffect(() => {
@@ -474,14 +482,13 @@ function useRuleHits(
       void api.ruleHits().then((h) => {
         if (!cancelled) setRuleHits(h);
       });
-    const handle = window.setTimeout(poll, 250);
+    poll();
     const interval = active ? window.setInterval(poll, 1500) : null;
     return () => {
       cancelled = true;
-      clearTimeout(handle);
       if (interval !== null) clearInterval(interval);
     };
-  }, [flowTick, activeScenarioId, active]);
+  }, [activeScenarioId, active]);
 
   function resetRuleState(scenarioId: string | null) {
     void api
@@ -497,7 +504,6 @@ function useRuleHits(
 function useAutoresponder(
   setError: SetError,
   setRightTab: (tab: RightTab) => void,
-  flowTick: number,
   rightTab: RightTab,
 ) {
   const [autoresponder, setAutoresponder] = useState<AutoResponder>({
@@ -507,23 +513,51 @@ function useAutoresponder(
   const [selectRuleId, setSelectRuleId] = useState<string | null>(null);
   const [pickScenarioId, setPickScenarioId] = useState("");
   const saveTimer = useRef<number | null>(null);
+  const pendingSave = useRef<AutoResponder | null>(null);
   const { ruleHits, resetRuleState } = useRuleHits(
-    flowTick,
     autoresponder.activeScenarioId,
     rightTab === "autoresponder",
     setError,
   );
 
+  function cancelSave() {
+    if (saveTimer.current !== null) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    pendingSave.current = null;
+  }
+
+  async function flushSave() {
+    if (saveTimer.current !== null) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    const next = pendingSave.current;
+    pendingSave.current = null;
+    if (next === null) return;
+    try {
+      await api.setAutoresponder(next);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   function saveAutoresponder(next: AutoResponder) {
     setAutoresponder(next);
+    pendingSave.current = next;
     if (saveTimer.current !== null) clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
-      void api.setAutoresponder(next).catch((e) => setError(String(e)));
+      const pending = pendingSave.current;
+      saveTimer.current = null;
+      pendingSave.current = null;
+      if (pending !== null) void api.setAutoresponder(pending).catch((e) => setError(String(e)));
     }, 300);
   }
 
   async function mockFlows(ids: string[], scenarioId: string | null): Promise<boolean> {
     setError(null);
+    await flushSave();
     try {
       const result = await api.mockFlows(ids, scenarioId);
       setAutoresponder(result.autoresponder);
@@ -538,6 +572,7 @@ function useAutoresponder(
 
   async function exportRules(scenarioId: string | null) {
     setError(null);
+    await flushSave();
     try {
       await api.exportRules(scenarioId);
     } catch (e) {
@@ -547,6 +582,7 @@ function useAutoresponder(
 
   async function importRules(replace: boolean) {
     setError(null);
+    cancelSave();
     try {
       const n = await api.importRules(replace);
       if (n > 0) setAutoresponder(await api.getAutoresponder());
@@ -625,14 +661,16 @@ export function useAppState() {
 
   const settings = useSettings();
   const flowStore = useFlowStore(settings.settings.maxFlows, setError);
-  const filtering = useTrafficFilter(flowStore.flows, flowStore.tick, setError);
+  const filtering = useTrafficFilter(flowStore.flows, setError);
   const selection = useSelection(flowStore.flows);
   const selectedSummary = selection.selectedId
     ? flowStore.flowsRef.current.get(selection.selectedId)
     : undefined;
   const inspector = useFlowDetail(selection.selectedId, decode, fullBody, selectedSummary);
-  const proxy = useProxyControl(settings.settings, setError);
-  const ar = useAutoresponder(setError, setRightTab, flowStore.tick, rightTab);
+  const proxy = useProxyControl(settings.settings, setError, (port) =>
+    saveSettings({ ...settings.settings, port }),
+  );
+  const ar = useAutoresponder(setError, setRightTab, rightTab);
   const columns = usePersistentColumns(settings.settings.headerColumns);
   const session = useSession(setError, () => {
     selection.clearSelection();
@@ -660,6 +698,13 @@ export function useAppState() {
   function saveSettings(next: ProxySettings) {
     settings.setSettings(next);
     persistSettings(next, settings.settings.headerColumns, flowStore.refresh, setError);
+  }
+
+  function applyImportedSettings(next: ProxySettings) {
+    const headersChanged =
+      JSON.stringify(next.headerColumns) !== JSON.stringify(settings.settings.headerColumns);
+    settings.setSettings(next);
+    if (headersChanged) void flowStore.refresh().catch((e) => setError(String(e)));
   }
 
   function handleRowClick(id: string, e: ReactMouseEvent) {
@@ -707,6 +752,7 @@ export function useAppState() {
     session,
     trafficResize,
     saveSettings,
+    applyImportedSettings,
     handleRowClick,
     clearTraffic,
     refreshCa,

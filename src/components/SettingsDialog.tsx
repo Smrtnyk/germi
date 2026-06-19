@@ -414,6 +414,7 @@ function InterceptionSection({ settings, onChange }: SectionProps) {
 interface Props {
   settings: ProxySettings;
   onChange: (s: ProxySettings) => void;
+  onImportApplied: (s: ProxySettings) => void;
   columnOrder: string[];
   onColumnOrderChange: (order: string[]) => void;
   running: boolean;
@@ -424,6 +425,7 @@ interface Props {
 export function SettingsDialog({
   settings,
   onChange,
+  onImportApplied,
   columnOrder,
   onColumnOrderChange,
   running,
@@ -446,7 +448,7 @@ export function SettingsDialog({
   async function importSettings() {
     setErr(null);
     try {
-      onChange(await api.importSettings());
+      onImportApplied(await api.importSettings());
     } catch (e) {
       setErr(String(e));
     }

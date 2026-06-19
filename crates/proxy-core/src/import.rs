@@ -8,9 +8,8 @@ use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
 
 use anyhow::Result;
-use base64::Engine;
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::flow::{now_ms, CapturedRequest, CapturedResponse, Flow};
 use crate::tester::parse_url;
@@ -63,7 +62,9 @@ struct HarRequest {
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct HarResponse {
-    #[serde(default)]
+    // Lenient: a float / negative / out-of-range status from an off-spec exporter
+    // becomes 0 instead of failing serde and aborting the WHOLE import.
+    #[serde(default, deserialize_with = "lenient_status")]
     status: u16,
     #[serde(default)]
     http_version: String,
@@ -101,14 +102,25 @@ fn pairs(headers: Vec<NameValue>) -> Vec<(String, String)> {
     headers.into_iter().map(|h| (h.name, h.value)).collect()
 }
 
+/// Accept any JSON number for an HTTP status, coercing out-of-range/float/negative
+/// to 0 rather than failing the entire `serde_json::from_slice`.
+fn lenient_status<'de, D: Deserializer<'de>>(d: D) -> Result<u16, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    let n = v
+        .as_u64()
+        .or_else(|| v.as_f64().map(|f| f as u64))
+        .unwrap_or(0);
+    Ok(u16::try_from(n).unwrap_or(0))
+}
+
 fn decode_har_body(content: &Content) -> Vec<u8> {
     if content.text.is_empty() {
         return Vec::new();
     }
     if content.encoding.as_deref() == Some("base64") {
-        base64::engine::general_purpose::STANDARD
-            .decode(content.text.as_bytes())
-            .unwrap_or_default()
+        // Lenient: tolerate whitespace/line-wraps and missing padding instead of
+        // silently dropping the body of a real-world HAR.
+        crate::body::base64_lenient(&content.text).unwrap_or_default()
     } else {
         content.text.clone().into_bytes()
     }
@@ -187,6 +199,10 @@ struct SessionRaw {
     server: Option<Vec<u8>>,
 }
 
+/// Total decompressed-bytes budget for a whole SAZ import (members are also each
+/// capped individually); a hostile archive with many members can't exceed this.
+const SAZ_TOTAL_BUDGET: u64 = 512 * 1024 * 1024;
+
 /// Parse a Fiddler SAZ (Session Archive Zip) into flows.
 pub fn parse_saz(bytes: &[u8]) -> Result<Vec<Flow>> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
@@ -197,6 +213,9 @@ pub fn parse_saz(bytes: &[u8]) -> Result<Vec<Flow>> {
 
     // Group by integer session number (never lexical — widths vary).
     let mut sessions: BTreeMap<u64, SessionRaw> = BTreeMap::new();
+    // Bound total memory across ALL members (each is already per-member capped),
+    // so an archive with a huge *number* of members can't exhaust memory.
+    let mut total_bytes: u64 = 0;
     for name in names {
         let Some(caps) = re.captures(&name) else {
             continue;
@@ -207,6 +226,10 @@ pub fn parse_saz(bytes: &[u8]) -> Result<Vec<Flow>> {
         let Ok(n) = caps[1].parse::<u64>() else {
             continue;
         };
+        if total_bytes > SAZ_TOTAL_BUDGET {
+            tracing::warn!("SAZ import exceeded {SAZ_TOTAL_BUDGET} bytes; remaining sessions skipped");
+            break;
+        }
         let is_client = caps[2].eq_ignore_ascii_case("c");
         let entry = zip.by_name(&name).map_err(|_| {
             anyhow::anyhow!("could not read '{name}' (encrypted SAZ is not supported)")
@@ -218,6 +241,7 @@ pub fn parse_saz(bytes: &[u8]) -> Result<Vec<Flow>> {
             .take(crate::body::MAX_DECOMPRESSED_BYTES as u64)
             .read_to_end(&mut buf)
             .ok();
+        total_bytes = total_bytes.saturating_add(buf.len() as u64);
         let slot = sessions.entry(n).or_default();
         if is_client {
             slot.client = Some(buf);
@@ -429,6 +453,34 @@ mod tests {
     fn tolerates_minimal_har() {
         let flows = parse_har(br#"{"log":{"entries":[]}}"#).unwrap();
         assert!(flows.is_empty());
+    }
+
+    #[test]
+    fn tolerates_off_spec_status_without_aborting_import() {
+        // A float, an out-of-range, and a valid status across three entries: the
+        // bad ones coerce to 0 instead of failing the whole parse.
+        let har = r#"{"log":{"entries":[
+          {"request":{"url":"https://a/1"},"response":{"status":200.5,"headers":[{"name":"x","value":"1"}],"content":{}}},
+          {"request":{"url":"https://a/2"},"response":{"status":99999,"headers":[{"name":"x","value":"1"}],"content":{}}},
+          {"request":{"url":"https://a/3"},"response":{"status":204,"headers":[{"name":"x","value":"1"}],"content":{}}}
+        ]}}"#;
+        let flows = parse_har(har.as_bytes()).expect("a malformed status must not abort the import");
+        assert_eq!(flows.len(), 3);
+        // 200.5 truncates to 200; 99999 is out of u16 range so it falls back to 0.
+        assert_eq!(flows[0].response.as_ref().unwrap().status, 200);
+        assert_eq!(flows[1].response.as_ref().unwrap().status, 0);
+        assert_eq!(flows[2].response.as_ref().unwrap().status, 204);
+    }
+
+    #[test]
+    fn har_base64_tolerates_whitespace() {
+        // "hi" base64 with an embedded newline still decodes.
+        let har = r#"{"log":{"entries":[
+          {"request":{"url":"https://a/b"},"response":{"status":200,"headers":[],
+            "content":{"encoding":"base64","text":"aG\nk="}}}
+        ]}}"#;
+        let flows = parse_har(har.as_bytes()).unwrap();
+        assert_eq!(flows[0].response.as_ref().unwrap().body, b"hi");
     }
 
     #[test]

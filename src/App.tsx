@@ -151,6 +151,7 @@ function AppDialogs({
   settingsOpen,
   settings,
   onSettingsChange,
+  onSettingsImported,
   columnOrder,
   onColumnOrderChange,
   running,
@@ -163,6 +164,7 @@ function AppDialogs({
   settingsOpen: boolean;
   settings: ProxySettings;
   onSettingsChange: (s: ProxySettings) => void;
+  onSettingsImported: (s: ProxySettings) => void;
   columnOrder: string[];
   onColumnOrderChange: (order: string[]) => void;
   running: boolean;
@@ -176,6 +178,7 @@ function AppDialogs({
         <SettingsDialog
           settings={settings}
           onChange={onSettingsChange}
+          onImportApplied={onSettingsImported}
           columnOrder={columnOrder}
           onColumnOrderChange={onColumnOrderChange}
           running={running}
@@ -289,6 +292,7 @@ export function App() {
         settingsOpen={s.settings.settingsOpen}
         settings={s.settings.settings}
         onSettingsChange={s.saveSettings}
+        onSettingsImported={s.applyImportedSettings}
         columnOrder={s.columns.columnOrder}
         onColumnOrderChange={s.columns.setColumnOrder}
         running={s.proxy.running}

@@ -64,6 +64,10 @@ impl CertAuthority {
         let der_path = dir.join("germi-ca.der");
 
         if cert_path.exists() && key_path.exists() && der_path.exists() {
+            // Re-assert owner-only perms so a key written by an older,
+            // world-readable build is repaired in place on this upgraded load
+            // (not only when the key is freshly written).
+            repair_key_perms(&key_path);
             return Ok(Self {
                 cert_pem: fs::read_to_string(&cert_path).context("read CA cert")?,
                 key_pem: fs::read_to_string(&key_path).context("read CA key")?,
@@ -71,8 +75,7 @@ impl CertAuthority {
             });
         }
 
-        fs::create_dir_all(dir).context("create CA dir")?;
-        restrict_dir(dir);
+        create_ca_dir(dir).context("create CA dir")?;
         let ca = Self::generate()?;
         fs::write(&cert_path, &ca.cert_pem).context("write CA cert")?;
         write_key_private(&key_path, &ca.key_pem).context("write CA key")?;
@@ -83,8 +86,7 @@ impl CertAuthority {
     /// Persist the CA material (cert PEM, key PEM, cert DER) under `dir`. The
     /// private key is written owner-only (see [`write_key_private`]).
     pub fn save(&self, dir: &Path) -> Result<()> {
-        fs::create_dir_all(dir).context("create CA dir")?;
-        restrict_dir(dir);
+        create_ca_dir(dir).context("create CA dir")?;
         fs::write(dir.join("germi-ca.pem"), &self.cert_pem).context("write CA cert")?;
         write_key_private(&dir.join("germi-ca.key"), &self.key_pem).context("write CA key")?;
         fs::write(dir.join("germi-ca.der"), &self.cert_der).context("write CA der")?;
@@ -130,15 +132,31 @@ fn write_key_private(path: &Path, contents: &str) -> std::io::Result<()> {
     fs::write(path, contents)
 }
 
-/// Restrict the CA directory to the owner (best-effort; ignored on non-unix).
+/// Create the CA directory owner-only (`0700`) from the start — closing the
+/// window where a default-umask `0755` dir is briefly world-listable — and
+/// tighten an already-existing dir too. Only the newly-created leaf gets the
+/// mode, so existing parent app-data dirs keep their own permissions.
 #[cfg(unix)]
-fn restrict_dir(dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+fn create_ca_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
 #[cfg(not(unix))]
-fn restrict_dir(_dir: &Path) {}
+fn create_ca_dir(dir: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dir)
+}
+
+/// Re-assert owner-only perms on an existing key file (best-effort).
+#[cfg(unix)]
+fn repair_key_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn repair_key_perms(_path: &Path) {}
 
 #[cfg(test)]
 mod tests {
@@ -156,6 +174,23 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600, "CA key must be readable only by owner");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_repairs_world_readable_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("germi-ca-repair-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        CertAuthority::load_or_generate(&dir).unwrap();
+        let key = dir.join("germi-ca.key");
+        // Simulate an old, world-readable key left on disk by an earlier build.
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+        // A subsequent load (fast path) must repair it back to owner-only.
+        CertAuthority::load_or_generate(&dir).unwrap();
+        let mode = fs::metadata(&key).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "load must repair a world-readable key");
         let _ = fs::remove_dir_all(&dir);
     }
 

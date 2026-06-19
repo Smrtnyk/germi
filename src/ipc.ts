@@ -67,9 +67,12 @@ export const api = {
  * or 200 events) over a single long-lived channel. Returns the channel so the
  * caller can null its `onmessage` on unmount (see the Tauri channel leak note).
  */
-export function subscribeFlows(onBatch: (events: FlowEvent[]) => void): Channel<FlowEvent[]> {
+export function subscribeFlows(
+  onBatch: (events: FlowEvent[]) => void,
+  onError?: (message: string) => void,
+): Channel<FlowEvent[]> {
   const channel = new Channel<FlowEvent[]>();
   channel.onmessage = onBatch;
-  void invoke("subscribe_flows", { channel });
+  invoke("subscribe_flows", { channel }).catch((e) => onError?.(String(e)));
   return channel;
 }

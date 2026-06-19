@@ -2,6 +2,23 @@
 //! and when displaying live-captured bodies in the inspector.
 
 use std::io::Read;
+use std::sync::LazyLock;
+
+/// Decode standard base64 leniently: tolerate ASCII whitespace / line wraps and
+/// missing padding (some tools emit either), so a reformatted SAZ/HAR/session
+/// body still loads. Returns `None` only on genuinely-invalid input.
+pub fn base64_lenient(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    static ENGINE: LazyLock<base64::engine::GeneralPurpose> = LazyLock::new(|| {
+        base64::engine::GeneralPurpose::new(
+            &base64::alphabet::STANDARD,
+            base64::engine::GeneralPurposeConfig::new()
+                .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+        )
+    });
+    let cleaned: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    ENGINE.decode(&cleaned).ok()
+}
 
 /// Hard ceiling on the size of any single *decompressed* body. A compression
 /// bomb (a few KB inflating to gigabytes) is capped here so import / inspector
@@ -11,39 +28,80 @@ use std::io::Read;
 pub const MAX_DECOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
 
 /// The first non-identity `Content-Encoding` token, lowercased (e.g. "gzip").
+/// Informational only (the inspector's encoding label); use [`content_encodings_of`]
+/// + [`decode_body`] to actually decode, which handles the full chain in order.
 pub fn content_encoding_of(headers: &[(String, String)]) -> Option<String> {
+    content_encodings_of(headers).into_iter().next()
+}
+
+/// Every non-identity `Content-Encoding` token, lowercased, in header order
+/// (the order the encodings were *applied*). To decode, undo them in reverse.
+pub fn content_encodings_of(headers: &[(String, String)]) -> Vec<String> {
     headers
         .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
-        .map(|(_, v)| {
-            v.split(',')
-                .next()
-                .unwrap_or(v)
-                .trim()
-                .to_ascii_lowercase()
-        })
+        .filter(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+        .flat_map(|(_, v)| v.split(','))
+        .map(|e| e.trim().to_ascii_lowercase())
         .filter(|e| !e.is_empty() && e != "identity")
+        .collect()
+}
+
+/// Decode the full `Content-Encoding` chain of a message body, undoing each
+/// applied encoding in reverse (last-applied = outermost). Returns the decoded
+/// bytes and whether the decompression cap truncated the result, or `None` when
+/// there is no encoding or a layer fails to decode (callers fall back to raw).
+pub fn decode_body(headers: &[(String, String)], body: &[u8]) -> Option<(Vec<u8>, bool)> {
+    let chain = content_encodings_of(headers);
+    if chain.is_empty() {
+        return None;
+    }
+    let mut data = body.to_vec();
+    let mut truncated = false;
+    for enc in chain.iter().rev() {
+        let (decoded, t) = try_decompress_checked(enc, &data)?;
+        data = decoded;
+        if t {
+            // A truncated layer means the inner layers can't be decoded
+            // faithfully; stop and report the partial result as truncated.
+            truncated = true;
+            break;
+        }
+    }
+    Some((data, truncated))
 }
 
 /// Decompress `body` per `encoding` (gzip / deflate / br). Returns `None` if the
 /// encoding is unknown or decompression fails (e.g. the body isn't actually
-/// compressed) — callers fall back to the raw bytes.
+/// compressed) — callers fall back to the raw bytes. Output is truncated to
+/// [`MAX_DECOMPRESSED_BYTES`] (see [`try_decompress_checked`] to detect that).
 pub fn try_decompress(encoding: &str, body: &[u8]) -> Option<Vec<u8>> {
+    try_decompress_checked(encoding, body).map(|(b, _)| b)
+}
+
+/// Like [`try_decompress`] but also reports whether the output hit the
+/// decompression cap (and was therefore truncated).
+pub fn try_decompress_checked(encoding: &str, body: &[u8]) -> Option<(Vec<u8>, bool)> {
     try_decompress_capped(encoding, body, MAX_DECOMPRESSED_BYTES)
 }
 
-/// Decompress with an explicit output cap (the public entry point uses
-/// [`MAX_DECOMPRESSED_BYTES`]). Output exceeding `cap` is truncated to `cap`
-/// rather than allocated in full, so a decompression bomb cannot exhaust memory.
-fn try_decompress_capped(encoding: &str, body: &[u8], cap: usize) -> Option<Vec<u8>> {
-    fn read_all(r: impl Read, cap: usize) -> Option<Vec<u8>> {
+/// Decompress with an explicit output cap. Output exceeding `cap` is truncated
+/// to `cap` rather than allocated in full, so a decompression bomb cannot
+/// exhaust memory; the returned bool is `true` when truncation occurred.
+fn try_decompress_capped(encoding: &str, body: &[u8], cap: usize) -> Option<(Vec<u8>, bool)> {
+    fn read_all(r: impl Read, cap: usize) -> Option<(Vec<u8>, bool)> {
         let mut out = Vec::new();
-        // `take` bounds how much we pull out of the decoder, so a tiny hostile
-        // payload that would inflate to gigabytes stops at `cap` bytes.
-        r.take(cap as u64).read_to_end(&mut out).ok().map(|_| out)
+        // Pull at most cap+1 bytes: `take` bounds a hostile payload that would
+        // inflate to gigabytes, and the extra byte lets us detect truncation.
+        r.take(cap as u64 + 1).read_to_end(&mut out).ok()?;
+        let truncated = out.len() > cap;
+        if truncated {
+            out.truncate(cap);
+        }
+        Some((out, truncated))
     }
     if encoding.contains("gzip") {
-        read_all(flate2::read::GzDecoder::new(body), cap)
+        // MultiGzDecoder reads every concatenated member, not just the first.
+        read_all(flate2::read::MultiGzDecoder::new(body), cap)
     } else if encoding.contains("deflate") {
         read_all(flate2::read::ZlibDecoder::new(body), cap)
             .or_else(|| read_all(flate2::read::DeflateDecoder::new(body), cap))
@@ -83,17 +141,54 @@ mod tests {
         enc.write_all(&vec![b'A'; 100_000]).unwrap();
         let gz = enc.finish().unwrap();
         assert!(gz.len() < 1_000, "payload should compress tiny");
-        let out = try_decompress_capped("gzip", &gz, 4096).unwrap();
+        let (out, truncated) = try_decompress_capped("gzip", &gz, 4096).unwrap();
         assert_eq!(out.len(), 4096, "decompressed output is capped");
-        // The full (uncapped public API) decompresses everything.
-        assert_eq!(try_decompress("gzip", &gz).unwrap().len(), 100_000);
+        assert!(truncated, "hitting the cap is reported as truncation");
+        // The full (uncapped public API) decompresses everything, untruncated.
+        let (full, t) = try_decompress_checked("gzip", &gz).unwrap();
+        assert_eq!(full.len(), 100_000);
+        assert!(!t, "within the cap is not truncated");
     }
 
     #[test]
-    fn picks_first_encoding_token() {
+    fn multi_member_gzip_is_fully_decoded() {
+        // Two concatenated gzip members must both decode (not just the first).
+        let member = |s: &[u8]| {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(s).unwrap();
+            e.finish().unwrap()
+        };
+        let mut concat = member(b"hello ");
+        concat.extend_from_slice(&member(b"world"));
+        assert_eq!(try_decompress("gzip", &concat).unwrap(), b"hello world");
+    }
+
+    #[test]
+    fn decode_body_undoes_chained_encodings() {
+        // Content-Encoding: deflate, gzip => deflate applied first, gzip last;
+        // decode reverses (undo gzip, then deflate) to recover the original.
+        let mut def = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        def.write_all(b"chained body").unwrap();
+        let deflated = def.finish().unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&deflated).unwrap();
+        let both = gz.finish().unwrap();
+
+        let headers = vec![("Content-Encoding".to_string(), "deflate, gzip".to_string())];
+        let (decoded, truncated) = decode_body(&headers, &both).unwrap();
+        assert_eq!(decoded, b"chained body");
+        assert!(!truncated);
+        // No content-encoding => nothing to decode.
+        assert!(decode_body(&[], b"plain").is_none());
+    }
+
+    #[test]
+    fn encoding_tokens() {
         let h = vec![("Content-Encoding".to_string(), "br, gzip".to_string())];
         assert_eq!(content_encoding_of(&h).as_deref(), Some("br"));
+        assert_eq!(content_encodings_of(&h), vec!["br".to_string(), "gzip".to_string()]);
         let none = vec![("Content-Encoding".to_string(), "identity".to_string())];
         assert_eq!(content_encoding_of(&none), None);
+        assert!(content_encodings_of(&none).is_empty());
     }
 }

@@ -43,6 +43,7 @@ use hudsucker::rustls::crypto::aws_lc_rs;
 use hudsucker::Proxy;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::task::JoinHandle;
 
 pub use ca::CertAuthority;
 pub use flow::{FlowDetail, FlowEvent, FlowSummary, MessageDetail, ResourceKind};
@@ -79,8 +80,9 @@ pub struct ProxyController {
     shared: Arc<Shared>,
     /// Behind a lock so the CA can be regenerated at runtime.
     ca: RwLock<CertAuthority>,
-    /// `Some(shutdown_sender)` while the proxy is running.
-    running: Mutex<Option<oneshot::Sender<()>>>,
+    /// `Some((shutdown_sender, task))` while the proxy is running. The join
+    /// handle lets `stop()` wait for the listener to actually release.
+    running: Mutex<Option<(oneshot::Sender<()>, JoinHandle<()>)>>,
 }
 
 impl ProxyController {
@@ -172,20 +174,24 @@ impl ProxyController {
             .build()
             .map_err(|e| anyhow!("failed to build proxy: {e:?}"))?;
 
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             if let Err(e) = proxy.start().await {
                 tracing::error!("proxy exited with error: {e}");
             }
         });
 
-        *guard = Some(shutdown_tx);
+        *guard = Some((shutdown_tx, task));
         Ok(local_addr)
     }
 
-    /// Gracefully stop the proxy if running.
+    /// Gracefully stop the proxy if running. Waits for the proxy task to finish
+    /// (the listener socket is released) before returning, so an immediate
+    /// restart on the same port doesn't fail with "address already in use".
     pub async fn stop(&self) {
-        if let Some(tx) = self.running.lock().await.take() {
+        let taken = self.running.lock().await.take();
+        if let Some((tx, task)) = taken {
             let _ = tx.send(());
+            let _ = task.await;
         }
     }
 
@@ -255,10 +261,8 @@ impl ProxyController {
             if !crate::flow::is_textual(headers) {
                 return false; // skip binary blobs (images/fonts/media)
             }
-            let bytes = match crate::body::content_encoding_of(headers) {
-                Some(enc) => {
-                    crate::body::try_decompress(&enc, body).unwrap_or_else(|| body.to_vec())
-                }
+            let bytes = match crate::body::decode_body(headers, body) {
+                Some((decoded, _truncated)) => decoded,
                 None => body.to_vec(),
             };
             let text = String::from_utf8_lossy(&bytes);
@@ -378,31 +382,27 @@ impl ProxyController {
     }
 
     pub fn set_autoresponder(&self, autoresponder: AutoResponder) {
-        let prev_active = self
-            .shared
-            .autoresponder
-            .read()
-            .ok()
-            .and_then(|ar| ar.active_scenario_id.clone());
-        if let Ok(mut guard) = self.shared.autoresponder.write() {
-            *guard = autoresponder;
-        }
-        let (live_ids, new_active) = {
-            let Ok(ar) = self.shared.autoresponder.read() else {
-                return;
-            };
-            let ids: std::collections::HashSet<String> = ar
-                .scenarios
-                .iter()
-                .flat_map(|s| s.rules.iter().map(|r| r.id.clone()))
-                .collect();
-            (ids, ar.active_scenario_id.clone())
+        let new_active = autoresponder.active_scenario_id.clone();
+        // Only the active scenario is ever evaluated, so only its rule ids have
+        // meaningful cursors — scope retention to those.
+        let live: std::collections::HashSet<String> = autoresponder
+            .active()
+            .map(|s| s.rules.iter().map(|r| r.id.clone()).collect())
+            .unwrap_or_default();
+
+        let Ok(mut ar) = self.shared.autoresponder.write() else {
+            return;
         };
+        let prev_active = ar.active_scenario_id.clone();
+        *ar = autoresponder;
+        // Reset cursors while still holding the autoresponder write lock so the
+        // swap + reset are atomic against an in-flight request (which takes the
+        // read lock then cursors, in that order — so this never deadlocks).
         if let Ok(mut cursors) = self.shared.cursors.lock() {
             if prev_active == new_active {
-                let live: std::collections::HashSet<&str> =
-                    live_ids.iter().map(String::as_str).collect();
-                cursors.reset_missing(&live);
+                let live_refs: std::collections::HashSet<&str> =
+                    live.iter().map(String::as_str).collect();
+                cursors.reset_missing(&live_refs);
             } else {
                 cursors.reset();
             }

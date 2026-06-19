@@ -523,7 +523,7 @@ function FireLimitFields({
           <NumberDraftInput
             value={rule.fireLimit}
             min={1}
-            max={Number.POSITIVE_INFINITY}
+            max={4294967295}
             onCommit={(n) => onPatch({ fireLimit: n })}
           />
           <span className="muted small">

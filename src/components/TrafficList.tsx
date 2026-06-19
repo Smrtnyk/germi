@@ -237,14 +237,16 @@ export function TrafficList({
               onClick={(e) => e.stopPropagation()}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") commitComment(f.id);
-                else if (e.key === "Escape") {
+                if (e.key === "Enter") {
+                  cancelEdit.current = true;
+                  commitComment(f.id);
+                } else if (e.key === "Escape") {
                   cancelEdit.current = true;
                   setEditingId(null);
                 }
               }}
-              onBlur={() => {
-                if (cancelEdit.current) {
+              onBlur={(e) => {
+                if (cancelEdit.current || !e.currentTarget.isConnected) {
                   cancelEdit.current = false;
                   return;
                 }

@@ -189,13 +189,35 @@ pub struct SyntheticResponse {
 pub enum RequestOutcome {
     /// Forward the request upstream, after applying these header edits.
     Continue { set_headers: Vec<(String, String)> },
-    /// Short-circuit with a synthesized response. Carries the rule name.
+    /// Short-circuit with a synthesized response. Carries the rule name + id.
     Respond {
         rule: String,
+        rule_id: String,
         response: SyntheticResponse,
     },
-    /// Drop the request. Carries the rule name.
-    Block { rule: String },
+    /// Drop the request. Carries the rule name + id.
+    Block { rule: String, rule_id: String },
+}
+
+/// Whether an action runs in the request phase (`handle_request`).
+fn is_request_phase(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Respond { .. }
+            | Action::MapLocal { .. }
+            | Action::Block
+            | Action::SetRequestHeader { .. }
+    )
+}
+
+/// Whether an action runs in the response phase (`handle_response`).
+fn is_response_phase(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::SetResponseHeader { .. }
+            | Action::SetStatus { .. }
+            | Action::RewriteResponseBody { .. }
+    )
 }
 
 #[derive(Default, Debug)]
@@ -255,6 +277,7 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
                 cursors.record_fire(rule);
                 return RequestOutcome::Respond {
                     rule: rule.name.clone(),
+                    rule_id: rule.id.clone(),
                     response: SyntheticResponse {
                         status: *status,
                         headers: hs,
@@ -272,6 +295,7 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
                     cursors.record_fire(rule);
                     return RequestOutcome::Respond {
                         rule: rule.name.clone(),
+                        rule_id: rule.id.clone(),
                         response: SyntheticResponse {
                             status: *status,
                             headers: vec![("content-type".to_string(), ct)],
@@ -284,6 +308,7 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
                 cursors.record_fire(rule);
                 return RequestOutcome::Block {
                     rule: rule.name.clone(),
+                    rule_id: rule.id.clone(),
                 };
             }
             Action::SetRequestHeader { name, value } => {
@@ -298,10 +323,15 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
     RequestOutcome::Continue { set_headers }
 }
 
-fn has_exhausted_repeat(rules: &[Rule], req: &CapturedRequest, cursors: &RuleCursors) -> bool {
-    rules
-        .iter()
-        .any(|r| r.enabled && r.repeat && r.matcher.matches(req) && cursors.is_exhausted(r))
+/// Whether a request-phase repeat group on this URL has run dry and should loop.
+/// A rule that can never fire (`fire_limit == Some(0)`) is not a looping group.
+fn is_repeat_loop(rule: &Rule, req: &CapturedRequest, cursors: &RuleCursors) -> bool {
+    rule.enabled
+        && rule.repeat
+        && is_request_phase(&rule.action)
+        && matches!(rule.fire_limit, Some(limit) if limit > 0)
+        && rule.matcher.matches(req)
+        && cursors.is_exhausted(rule)
 }
 
 pub fn evaluate_request_rules_stateful(
@@ -313,10 +343,16 @@ pub fn evaluate_request_rules_stateful(
     if !matches!(outcome, RequestOutcome::Continue { .. }) {
         return outcome;
     }
-    if !has_exhausted_repeat(rules, req, cursors) {
+    if !rules.iter().any(|r| is_repeat_loop(r, req, cursors)) {
         return outcome;
     }
-    for rule in rules.iter().filter(|r| r.matcher.matches(req)) {
+    // Only revive the looping (enabled, repeat) request-phase rules — never a
+    // finite one-shot or a disabled sibling sharing the URL, whose cursors must
+    // stay exhausted.
+    for rule in rules
+        .iter()
+        .filter(|r| r.enabled && r.repeat && is_request_phase(&r.action) && r.matcher.matches(req))
+    {
         cursors.reset_rule(&rule.id);
     }
     first_match(rules, req, cursors)
@@ -328,66 +364,98 @@ pub fn evaluate_request_rules(rules: &[Rule], req: &CapturedRequest) -> RequestO
     evaluate_request_rules_stateful(rules, req, &mut scratch)
 }
 
-/// Apply response-phase rules in order, mutating `resp`. Returns the last rule
-/// that changed it, if any.
-pub fn apply_response_rules(
+/// Apply response-phase rules in order, mutating `resp`, honoring each rule's
+/// `fire_limit`/`repeat` via `cursors`. Returns the last rule that changed it.
+pub fn apply_response_rules_stateful(
     rules: &[Rule],
     req: &CapturedRequest,
     resp: &mut CapturedResponse,
+    cursors: &mut RuleCursors,
 ) -> Option<String> {
     let mut matched = None;
-    for rule in rules.iter().filter(|r| r.enabled) {
+    for rule in rules
+        .iter()
+        .filter(|r| r.enabled && is_response_phase(&r.action))
+    {
         if !rule.matcher.matches(req) {
             continue;
         }
-        match &rule.action {
+        if !cursors.allows_fire(rule) {
+            // A spent repeat rule loops (reset and fire again); a spent finite
+            // rule stays spent.
+            if rule.repeat && matches!(rule.fire_limit, Some(l) if l > 0) {
+                cursors.reset_rule(&rule.id);
+            } else {
+                continue;
+            }
+        }
+        let fired = match &rule.action {
             Action::SetResponseHeader { name, value } => {
                 set_header(&mut resp.headers, name, value);
-                matched = Some(rule.name.clone());
+                true
             }
             Action::SetStatus { status } => {
                 resp.status = *status;
-                matched = Some(rule.name.clone());
+                true
             }
             Action::RewriteResponseBody {
                 find,
                 replace,
                 regex,
-            } => {
-                // The captured body holds the raw network bytes, which for most
-                // real responses are gzip/br/deflate-compressed — decode first so
-                // find/replace operates on actual text (otherwise from_utf8 fails
-                // and the rule silently no-ops on compressed responses).
-                let encoding = crate::body::content_encoding_of(&resp.headers);
-                let decoded = match &encoding {
-                    Some(enc) => crate::body::try_decompress(enc, &resp.body)
-                        .unwrap_or_else(|| resp.body.clone()),
-                    None => resp.body.clone(),
-                };
-                if let Ok(text) = String::from_utf8(decoded) {
-                    let new = if *regex {
-                        match cached_regex(find) {
-                            Some(re) => re.replace_all(&text, replace.as_str()).into_owned(),
-                            None => text,
-                        }
-                    } else {
-                        text.replace(find, replace)
-                    };
-                    resp.body = new.into_bytes();
-                    // We replaced the body with its decompressed form, so drop the
-                    // now-stale Content-Encoding; the client gets identity bytes
-                    // (Content-Length is recomputed downstream in build_parts).
-                    if encoding.is_some() {
-                        resp.headers
-                            .retain(|(k, _)| !k.eq_ignore_ascii_case("content-encoding"));
-                    }
-                    matched = Some(rule.name.clone());
-                }
-            }
-            _ => {}
+            } => rewrite_response_body(resp, find, replace, *regex),
+            _ => false,
+        };
+        if fired {
+            cursors.record_fire(rule);
+            matched = Some(rule.name.clone());
         }
     }
     matched
+}
+
+/// Side-effect-free response apply (scratch cursor) — for the offline tester and
+/// previews, where rules must not consume their fire budget.
+pub fn apply_response_rules(
+    rules: &[Rule],
+    req: &CapturedRequest,
+    resp: &mut CapturedResponse,
+) -> Option<String> {
+    let mut scratch = RuleCursors::default();
+    apply_response_rules_stateful(rules, req, resp, &mut scratch)
+}
+
+/// Find/replace in a response body, decoding its Content-Encoding chain first so
+/// the rewrite operates on real text. Returns whether the body was changed.
+/// A body that exceeded the decompression cap is left untouched — rewriting +
+/// forwarding a truncated identity body would corrupt the response on the wire.
+fn rewrite_response_body(resp: &mut CapturedResponse, find: &str, replace: &str, regex: bool) -> bool {
+    let had_encoding = !crate::body::content_encodings_of(&resp.headers).is_empty();
+    let (decoded, truncated) = match crate::body::decode_body(&resp.headers, &resp.body) {
+        Some((d, t)) => (d, t),
+        None => (resp.body.clone(), false),
+    };
+    if truncated {
+        return false;
+    }
+    let Ok(text) = String::from_utf8(decoded) else {
+        return false;
+    };
+    let new = if regex {
+        match cached_regex(find) {
+            Some(re) => re.replace_all(&text, replace).into_owned(),
+            None => return false,
+        }
+    } else {
+        text.replace(find, replace)
+    };
+    resp.body = new.into_bytes();
+    // The body is now identity bytes, so drop the stale Content-Encoding
+    // (Content-Length is recomputed downstream in build_parts).
+    if had_encoding {
+        resp.headers
+            .retain(|(k, _)| !k.eq_ignore_ascii_case("content-encoding"));
+    }
+    true
 }
 
 impl RuleSet {
@@ -466,6 +534,20 @@ impl AutoResponder {
     ) -> Option<String> {
         match self.active() {
             Some(s) => apply_response_rules(&s.rules, req, resp),
+            None => None,
+        }
+    }
+
+    /// Apply response-phase rules of the active scenario, advancing `cursors`
+    /// (the live handler path — honors `fire_limit`/`repeat`).
+    pub fn apply_response_stateful(
+        &self,
+        req: &CapturedRequest,
+        resp: &mut CapturedResponse,
+        cursors: &mut RuleCursors,
+    ) -> Option<String> {
+        match self.active() {
+            Some(s) => apply_response_rules_stateful(&s.rules, req, resp, cursors),
             None => None,
         }
     }
@@ -648,7 +730,7 @@ mod tests {
             rules: vec![respond_rule("mock", "/health")],
         };
         match rs.evaluate_request(&req("GET", "https", "example.com", "/health")) {
-            RequestOutcome::Respond { response, rule } => {
+            RequestOutcome::Respond { response, rule, .. } => {
                 assert_eq!(rule, "mock");
                 assert_eq!(response.status, 200);
                 assert_eq!(response.body, b"mock");
@@ -1412,5 +1494,148 @@ mod tests {
             cursors.snapshot().is_empty(),
             "Off must never mutate cursors"
         );
+    }
+
+    #[test]
+    fn repeat_sibling_does_not_revive_non_repeat_rule() {
+        // A one-shot rule sharing a URL with a repeat rule must fire exactly
+        // once; only the repeat rule loops when the group resets.
+        let mut once = respond_rule_limited("once", "/dup", Some(1), false);
+        once.id = "once".into();
+        let mut looping = respond_rule_limited("loop", "/dup", Some(1), true);
+        looping.id = "loop".into();
+        let rules = vec![once, looping];
+        let mut cursors = RuleCursors::default();
+        let r = || req("GET", "https", "h", "/dup");
+
+        let order: Vec<Option<String>> = (0..5)
+            .map(|_| {
+                responded_rule_name(&evaluate_request_rules_stateful(&rules, &r(), &mut cursors))
+                    .map(str::to_string)
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                Some("once".to_string()),
+                Some("loop".to_string()),
+                Some("loop".to_string()),
+                Some("loop".to_string()),
+                Some("loop".to_string()),
+            ],
+            "the one-shot fires once; only the repeat rule loops"
+        );
+        assert_eq!(
+            cursors.snapshot().get("once").copied(),
+            Some(1),
+            "the non-repeat one-shot must record exactly one fire"
+        );
+    }
+
+    #[test]
+    fn dead_repeat_zero_does_not_revive_sibling() {
+        // A repeat rule that can never fire (limit 0) is not a looping group, so
+        // it must not reset a sibling one-shot's cursor every request.
+        let mut dead = respond_rule_limited("dead", "/z", Some(0), true);
+        dead.id = "dead".into();
+        let mut once = respond_rule_limited("once", "/z", Some(1), false);
+        once.id = "once".into();
+        let rules = vec![dead, once];
+        let mut cursors = RuleCursors::default();
+        let r = || req("GET", "https", "h", "/z");
+
+        assert_eq!(
+            responded_rule_name(&evaluate_request_rules_stateful(&rules, &r(), &mut cursors)),
+            Some("once"),
+            "first request: the one-shot fires"
+        );
+        for _ in 0..3 {
+            assert!(
+                matches!(
+                    evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+                    RequestOutcome::Continue { .. }
+                ),
+                "a dead (limit 0) repeat sibling must not revive the spent one-shot"
+            );
+        }
+    }
+
+    fn set_status_rule(id: &str, status: u16, limit: Option<u32>, repeat: bool) -> Rule {
+        Rule {
+            id: id.into(),
+            name: id.into(),
+            enabled: true,
+            fire_limit: limit,
+            repeat,
+            matcher: Matcher {
+                method: None,
+                url: "/r".into(),
+                url_match: MatchKind::Contains,
+            },
+            action: Action::SetStatus { status },
+        }
+    }
+
+    fn resp() -> CapturedResponse {
+        CapturedResponse {
+            status: 200,
+            version: "HTTP/1.1".into(),
+            headers: vec![],
+            body: vec![],
+            timestamp_ms: 0,
+        }
+    }
+
+    #[test]
+    fn response_rule_honors_fire_limit() {
+        let rules = vec![set_status_rule("once", 503, Some(1), false)];
+        let mut cursors = RuleCursors::default();
+        let r = req("GET", "https", "h", "/r");
+
+        let mut a = resp();
+        assert_eq!(
+            apply_response_rules_stateful(&rules, &r, &mut a, &mut cursors).as_deref(),
+            Some("once")
+        );
+        assert_eq!(a.status, 503, "first matching response is overridden");
+
+        let mut b = resp();
+        assert_eq!(
+            apply_response_rules_stateful(&rules, &r, &mut b, &mut cursors),
+            None,
+            "a spent one-shot response rule must not fire again"
+        );
+        assert_eq!(b.status, 200, "second response is left untouched");
+    }
+
+    #[test]
+    fn response_rule_repeat_loops() {
+        let rules = vec![set_status_rule("loop", 503, Some(1), true)];
+        let mut cursors = RuleCursors::default();
+        let r = req("GET", "https", "h", "/r");
+
+        for _ in 0..4 {
+            let mut resp = resp();
+            assert_eq!(
+                apply_response_rules_stateful(&rules, &r, &mut resp, &mut cursors).as_deref(),
+                Some("loop"),
+                "a repeat response rule keeps firing"
+            );
+            assert_eq!(resp.status, 503);
+        }
+    }
+
+    #[test]
+    fn response_apply_scratch_is_side_effect_free() {
+        let rules = vec![set_status_rule("once", 503, Some(1), false)];
+        let r = req("GET", "https", "h", "/r");
+        for _ in 0..3 {
+            let mut resp = resp();
+            assert_eq!(
+                apply_response_rules(&rules, &r, &mut resp).as_deref(),
+                Some("once"),
+                "the scratch preview re-applies every call (no state)"
+            );
+        }
     }
 }

@@ -207,6 +207,9 @@ pub struct MessageDetail {
     pub decoded: bool,
     /// True when the body was capped for display (fetch with `full` for all of it).
     pub truncated: bool,
+    /// True when decompression itself hit the 64 MiB cap, so the decoded body is
+    /// incomplete regardless of `full` — `size` is a floor, not the real length.
+    pub decode_truncated: bool,
 }
 
 /// Bodies larger than this are capped for display unless `full` is requested —
@@ -241,12 +244,13 @@ impl MessageDetail {
     fn new(headers: &[(String, String)], body: &[u8], decode: bool, full: bool) -> Self {
         use std::borrow::Cow;
         let encoding = crate::body::content_encoding_of(headers);
-        let (bytes, decoded): (Cow<[u8]>, bool) = match (decode, &encoding) {
-            (true, Some(enc)) => match crate::body::try_decompress(enc, body) {
-                Some(d) => (Cow::Owned(d), true),
-                None => (Cow::Borrowed(body), false),
-            },
-            _ => (Cow::Borrowed(body), false),
+        let (bytes, decoded, decode_truncated): (Cow<[u8]>, bool, bool) = if decode {
+            match crate::body::decode_body(headers, body) {
+                Some((d, t)) => (Cow::Owned(d), true, t),
+                None => (Cow::Borrowed(body), false, false),
+            }
+        } else {
+            (Cow::Borrowed(body), false, false)
         };
 
         let total = bytes.len();
@@ -258,8 +262,11 @@ impl MessageDetail {
         };
 
         // Skip base64 for text bodies (the UI renders those from `body_text`);
-        // raw-compressed bytes still need it for the hex view.
-        let needs_base64 = !is_textual(headers) || (!decoded && encoding.is_some());
+        // raw-compressed bytes — and binary bytes mislabeled with a text
+        // content-type — still need it for the hex view.
+        let needs_base64 = !is_textual(headers)
+            || (!decoded && encoding.is_some())
+            || std::str::from_utf8(display).is_err();
 
         Self {
             headers: headers.to_vec(),
@@ -273,6 +280,7 @@ impl MessageDetail {
             encoding,
             decoded,
             truncated,
+            decode_truncated,
         }
     }
 }

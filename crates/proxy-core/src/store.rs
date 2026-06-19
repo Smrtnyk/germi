@@ -30,9 +30,7 @@ impl FlowStore {
     pub fn set_max(&mut self, max: usize) {
         self.max = max.max(1);
         while self.order.len() > self.max {
-            if let Some(old) = self.order.pop_front() {
-                self.flows.remove(&old);
-            }
+            self.evict_oldest();
         }
     }
 
@@ -41,10 +39,25 @@ impl FlowStore {
         if self.flows.insert(flow.id.clone(), flow.clone()).is_none() {
             self.order.push_back(flow.id);
             while self.order.len() > self.max {
-                if let Some(old) = self.order.pop_front() {
-                    self.flows.remove(&old);
-                }
+                self.evict_oldest();
             }
+        }
+    }
+
+    /// Evict one flow to honor the cap. Prefer the oldest *completed* flow so an
+    /// in-flight flow isn't dropped before its response is recorded (which would
+    /// strand a forever-"pending" row and silently lose the response). Fall back
+    /// to the absolute oldest only when every retained flow is still in-flight.
+    fn evict_oldest(&mut self) {
+        let victim = self
+            .order
+            .iter()
+            .find(|id| self.flows.get(*id).is_some_and(|f| f.response.is_some()))
+            .or_else(|| self.order.front())
+            .cloned();
+        if let Some(id) = victim {
+            self.flows.remove(&id);
+            self.order.retain(|x| x != &id);
         }
     }
 
@@ -122,5 +135,70 @@ impl FlowStore {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.order.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flow::CapturedRequest;
+
+    fn flow(id: &str) -> Flow {
+        Flow {
+            id: id.to_string(),
+            request: CapturedRequest {
+                method: "GET".into(),
+                uri: format!("https://h/{id}"),
+                scheme: "https".into(),
+                host: "h".into(),
+                path: format!("/{id}"),
+                version: "HTTP/1.1".into(),
+                headers: vec![],
+                body: vec![],
+                timestamp_ms: 0,
+            },
+            response: None,
+            matched_rule: None,
+            duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
+        }
+    }
+
+    fn response() -> CapturedResponse {
+        CapturedResponse {
+            status: 200,
+            version: "HTTP/1.1".into(),
+            headers: vec![],
+            body: vec![],
+            timestamp_ms: 0,
+        }
+    }
+
+    #[test]
+    fn eviction_keeps_in_flight_over_completed() {
+        let mut store = FlowStore::new(2);
+        store.insert(flow("a")); // in-flight (oldest)
+        store.insert(flow("b"));
+        store.set_response("b", response(), 1, None, None); // completed
+        // Inserting a third flow at cap 2 must evict the completed "b", not the
+        // still-pending oldest "a" whose response hasn't arrived yet.
+        store.insert(flow("c"));
+        assert!(store.get("a").is_some(), "in-flight flow must be retained");
+        assert!(store.get("b").is_none(), "the completed flow is evicted instead");
+        assert!(store.get("c").is_some());
+        assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn eviction_falls_back_to_oldest_when_all_in_flight() {
+        let mut store = FlowStore::new(2);
+        store.insert(flow("a"));
+        store.insert(flow("b"));
+        store.insert(flow("c")); // all in-flight → evict absolute oldest "a"
+        assert!(store.get("a").is_none());
+        assert!(store.get("b").is_some());
+        assert!(store.get("c").is_some());
+        assert_eq!(store.len(), 2);
     }
 }

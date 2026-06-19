@@ -119,11 +119,13 @@ fn strip_port(host: &str) -> &str {
 }
 
 /// `host` matches `pattern` when equal to it or a subdomain of it. Tolerates a
-/// leading `*.`, trailing dot, and surrounding whitespace in the pattern.
+/// single leading `*.`, a `:port` suffix, bracketed IPv6 (`[::1]`), trailing
+/// dot, and surrounding whitespace in the pattern — normalized the same way as
+/// the incoming host so a port/bracketed pattern still matches.
 fn host_matches(host: &str, pattern: &str) -> bool {
-    let pat = pattern
-        .trim()
-        .trim_start_matches("*.")
+    let trimmed = pattern.trim();
+    let without_wildcard = trimmed.strip_prefix("*.").unwrap_or(trimmed);
+    let pat = strip_port(without_wildcard)
         .trim_end_matches('.')
         .to_ascii_lowercase();
     if pat.is_empty() {
@@ -202,5 +204,26 @@ mod tests {
         assert!(s.is_excluded("mail.google.com"));
         assert!(s.is_excluded("google.com"));
         assert!(!s.is_excluded("example.org"));
+    }
+
+    #[test]
+    fn pattern_with_port_and_brackets_is_normalized() {
+        // A pattern carrying a :port still matches the (port-stripped) host.
+        let s = settings(&["localhost:3000"]);
+        assert!(s.is_excluded("localhost"));
+        assert!(s.is_excluded("localhost:3000"));
+        // A bracketed IPv6 pattern matches the bracketless normalized host.
+        let v6 = settings(&["[::1]:8080"]);
+        assert!(v6.is_excluded("[::1]:8080"));
+        assert!(v6.is_excluded("::1"));
+    }
+
+    #[test]
+    fn repeated_wildcard_prefix_does_not_over_strip() {
+        // Only one leading "*." is removed, so a malformed double wildcard does
+        // NOT collapse to a bare suffix that would over-match every subdomain.
+        let s = settings(&["*.*.example.com"]);
+        assert!(!s.is_excluded("example.com"));
+        assert!(!s.is_excluded("api.example.com"));
     }
 }
