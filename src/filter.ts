@@ -90,6 +90,26 @@ function tokenize(s: string): string[] {
   return out;
 }
 
+/** Split a filter string into its raw whitespace-separated segments, preserving
+ *  quotes (unlike `tokenize`). Used to render removable filter-term pills: drop a
+ *  segment and `.join(" ")` reconstructs the exact remaining query. */
+export function rawSegments(s: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /\s/.test(s[i])) i++;
+    if (i >= s.length) break;
+    const start = i;
+    let inQuote = false;
+    while (i < s.length && (inQuote || !/\s/.test(s[i]))) {
+      if (s[i] === '"') inQuote = !inQuote;
+      i++;
+    }
+    out.push(s.slice(start, i));
+  }
+  return out;
+}
+
 type ClassifiedTerm = { kind: "summary"; term: SummaryTerm } | { kind: "body"; term: BodyTerm };
 
 function bodyTermOf(key: string, value: string, neg: boolean): BodyTerm {

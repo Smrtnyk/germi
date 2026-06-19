@@ -8,6 +8,8 @@ import { xml } from "@codemirror/lang-xml";
 import { linter, lintGutter } from "@codemirror/lint";
 import { oneDark } from "@codemirror/theme-one-dark";
 
+import { useTheme } from "../theme";
+
 /** Pick CodeMirror language extensions from a Content-Type. */
 function languageFor(contentType: string) {
   const ct = contentType.toLowerCase();
@@ -28,12 +30,13 @@ interface Props {
 /** A content-type-aware code editor (CodeMirror 6) for mock response bodies. */
 export function BodyEditor({ value, onChange, contentType }: Props) {
   const extensions = useMemo(() => languageFor(contentType), [contentType]);
+  const theme = useTheme();
   return (
     <CodeMirror
       className="cm-body"
       value={value}
       onChange={onChange}
-      theme={oneDark}
+      theme={theme === "dark" ? oneDark : "light"}
       extensions={extensions}
       minHeight="160px"
       maxHeight="440px"
