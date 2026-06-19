@@ -439,14 +439,20 @@ function useSelection(flows: FlowSummary[]) {
     setSelectedIds(new Set());
   }
 
+  function deselect(ids: string[]) {
+    const gone = new Set(ids);
+    setSelectedIds((prev) => new Set([...prev].filter((id) => !gone.has(id))));
+    setSelectedId((cur) => (cur !== null && gone.has(cur) ? null : cur));
+  }
+
   return {
     selectedId,
     selectedIds,
-    setSelectedIds,
     onRowClick,
     selectByKeyboard,
     selectAll,
     clearSelection,
+    deselect,
   };
 }
 
@@ -949,6 +955,12 @@ export function useAppState() {
     void ar.mockFlows([id], ar.autoresponder.activeScenarioId);
   }
 
+  function dropMockFlows(ids: string[], scenarioId: string | null) {
+    void ar.mockFlows(ids, scenarioId).then((ok) => {
+      if (ok) selection.deselect(ids);
+    });
+  }
+
   function filterToHost(host: string) {
     filtering.setFilter(`host:${host}`);
     filterInputRef.current?.focus();
@@ -1044,6 +1056,7 @@ export function useAppState() {
     handleRowClick,
     handleKeySelect,
     mockFlow,
+    dropMockFlows,
     filterToHost,
     excludeHost,
     copyFlowAsCurl,

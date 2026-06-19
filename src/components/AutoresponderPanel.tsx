@@ -1,6 +1,15 @@
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  type DragEvent as ReactDragEvent,
+  type ReactNode,
+} from "react";
 
 import { api } from "../ipc";
+import { decodeFlowIds, FLOW_DRAG_MIME, hasFlowDrag } from "../dnd";
 import type { Action, ActionKind, AutoResponder, Rule, Scenario } from "../types";
 import { useResizable } from "../useResizable";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -10,7 +19,7 @@ import { RuleTester } from "./RuleTester";
 // only when a mock body is actually edited — keeps app startup light.
 const BodyEditor = lazy(() => import("./BodyEditor").then((m) => ({ default: m.BodyEditor })));
 
-interface Props {
+export interface AutoresponderPanelProps {
   ar: AutoResponder;
   onChange: (ar: AutoResponder) => void;
   /** When set (e.g. via "Mock this"), select this rule for editing. */
@@ -19,6 +28,7 @@ interface Props {
   ruleHits: Record<string, number>;
   onExportRules: (scenarioId: string | null) => void;
   onImportRules: (replace: boolean) => void;
+  onDropMock: (ids: string[], scenarioId: string | null) => void;
 }
 
 const ACTION_KINDS: { value: ActionKind; label: string }[] = [
@@ -194,12 +204,13 @@ function RuleListItem({
         onDragStart();
       }}
       onDragOver={(e) => {
-        if (!draggable) return;
+        if (!draggable || hasFlowDrag(e.dataTransfer.types)) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
         onDragOver();
       }}
       onDrop={(e) => {
+        if (hasFlowDrag(e.dataTransfer.types)) return;
         e.preventDefault();
         onDrop();
       }}
@@ -343,6 +354,50 @@ function useRuleSelection(selectRuleId?: string | null) {
   };
 }
 
+interface FlowDropZone {
+  onDragOver: (e: ReactDragEvent) => void;
+  onDragLeave: (e: ReactDragEvent) => void;
+  onDrop: (e: ReactDragEvent) => void;
+}
+
+interface FlowDrop {
+  zone: string | null;
+  zoneProps: (zone: string, scenarioId: string | null | (() => string)) => FlowDropZone;
+}
+
+function useFlowDrop(onDropMock: (ids: string[], scenarioId: string | null) => void): FlowDrop {
+  const [zone, setZone] = useState<string | null>(null);
+
+  function over(e: ReactDragEvent, z: string) {
+    if (!hasFlowDrag(e.dataTransfer.types)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    setZone((cur) => (cur === z ? cur : z));
+  }
+  function leave(e: ReactDragEvent, z: string) {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+      setZone((cur) => (cur === z ? null : cur));
+    }
+  }
+  function drop(e: ReactDragEvent, scenarioId: string | null) {
+    if (!hasFlowDrag(e.dataTransfer.types)) return;
+    e.preventDefault();
+    setZone(null);
+    const ids = decodeFlowIds(e.dataTransfer.getData(FLOW_DRAG_MIME));
+    if (ids.length > 0) onDropMock(ids, scenarioId);
+  }
+
+  function zoneProps(z: string, scenarioId: string | null | (() => string)): FlowDropZone {
+    return {
+      onDragOver: (e) => over(e, z),
+      onDragLeave: (e) => leave(e, z),
+      onDrop: (e) => drop(e, typeof scenarioId === "function" ? scenarioId() : scenarioId),
+    };
+  }
+
+  return { zone, zoneProps };
+}
+
 function RuleList({
   rules,
   shownRules,
@@ -467,6 +522,8 @@ function ScenarioView({
   onResetState,
   ruleHits,
   onExport,
+  dropActive,
+  dropProps,
 }: {
   active: Scenario;
   onPatch: (patch: Partial<Scenario>) => void;
@@ -475,6 +532,8 @@ function ScenarioView({
   onResetState: () => void;
   ruleHits: Record<string, number>;
   onExport: () => void;
+  dropActive: boolean;
+  dropProps: FlowDropZone;
 }) {
   const sel = useRuleSelection(selectRuleId);
   const {
@@ -505,7 +564,7 @@ function ScenarioView({
   const selectedRule = active.rules.find((r) => r.id === selectedRuleId) ?? null;
 
   return (
-    <div className="scenario-body">
+    <div className={`scenario-body ${dropActive ? "drop-target" : ""}`} {...dropProps}>
       <div className="scenario-head">
         <input
           className="scenario-name"
@@ -578,6 +637,82 @@ function ScenarioView({
   );
 }
 
+function ScenarioTabs({
+  ar,
+  zone,
+  zoneProps,
+  onActivate,
+  onAdd,
+  onImport,
+  onReplace,
+  onExportAll,
+}: {
+  ar: AutoResponder;
+  zone: string | null;
+  zoneProps: FlowDrop["zoneProps"];
+  onActivate: (id: string | null) => void;
+  onAdd: () => void;
+  onImport: () => void;
+  onReplace: () => void;
+  onExportAll: () => void;
+}) {
+  return (
+    <div className="scenario-tabs">
+      {ar.scenarios.map((s) => (
+        <button
+          key={s.id}
+          className={`stab ${s.id === ar.activeScenarioId ? "active" : ""} ${
+            zone === s.id ? "drop-target" : ""
+          }`}
+          onClick={() => onActivate(s.id)}
+          {...zoneProps(s.id, s.id)}
+        >
+          {s.name}
+          {s.id === ar.activeScenarioId && <span className="live-dot" />}
+        </button>
+      ))}
+      <button
+        className={`stab add ${zone === "__new__" ? "drop-target" : ""}`}
+        onClick={onAdd}
+        title="New scenario — or drop requests here to mock them into a new one"
+        {...zoneProps("__new__", () => crypto.randomUUID())}
+      >
+        +
+      </button>
+      <div className="spacer" />
+      <button
+        className={`stab off ${ar.activeScenarioId === null ? "active" : ""}`}
+        onClick={() => onActivate(null)}
+        title="Disable mocking — capture only"
+      >
+        ⏻ Off
+      </button>
+      <button
+        className="btn small"
+        title="Import scenarios from a .germi-rules file (added to your existing scenarios)"
+        onClick={onImport}
+      >
+        Import
+      </button>
+      <button
+        className="btn small"
+        title="Replace all scenarios with the contents of a .germi-rules file"
+        onClick={onReplace}
+      >
+        Replace…
+      </button>
+      <button
+        className="btn small"
+        title="Export all scenarios to a shareable .germi-rules file"
+        disabled={ar.scenarios.length === 0}
+        onClick={onExportAll}
+      >
+        Export all
+      </button>
+    </div>
+  );
+}
+
 export function AutoresponderPanel({
   ar,
   onChange,
@@ -586,9 +721,11 @@ export function AutoresponderPanel({
   ruleHits,
   onExportRules,
   onImportRules,
-}: Props) {
+  onDropMock,
+}: AutoresponderPanelProps) {
   const [pendingDelete, setPendingDelete] = useState<Scenario | null>(null);
   const [pendingReplace, setPendingReplace] = useState(false);
+  const { zone, zoneProps } = useFlowDrop(onDropMock);
 
   const active = ar.scenarios.find((s) => s.id === ar.activeScenarioId) ?? null;
 
@@ -618,58 +755,26 @@ export function AutoresponderPanel({
 
   return (
     <div className="autoresponder">
-      <div className="scenario-tabs">
-        {ar.scenarios.map((s) => (
-          <button
-            key={s.id}
-            className={`stab ${s.id === ar.activeScenarioId ? "active" : ""}`}
-            onClick={() => activate(s.id)}
-          >
-            {s.name}
-            {s.id === ar.activeScenarioId && <span className="live-dot" />}
-          </button>
-        ))}
-        <button className="stab add" onClick={addScenario} title="New scenario">
-          +
-        </button>
-        <div className="spacer" />
-        <button
-          className={`stab off ${ar.activeScenarioId === null ? "active" : ""}`}
-          onClick={() => activate(null)}
-          title="Disable mocking — capture only"
-        >
-          ⏻ Off
-        </button>
-        <button
-          className="btn small"
-          title="Import scenarios from a .germi-rules file (added to your existing scenarios)"
-          onClick={() => onImportRules(false)}
-        >
-          Import
-        </button>
-        <button
-          className="btn small"
-          title="Replace all scenarios with the contents of a .germi-rules file"
-          onClick={() => setPendingReplace(true)}
-        >
-          Replace…
-        </button>
-        <button
-          className="btn small"
-          title="Export all scenarios to a shareable .germi-rules file"
-          disabled={ar.scenarios.length === 0}
-          onClick={() => onExportRules(null)}
-        >
-          Export all
-        </button>
-      </div>
+      <ScenarioTabs
+        ar={ar}
+        zone={zone}
+        zoneProps={zoneProps}
+        onActivate={activate}
+        onAdd={addScenario}
+        onImport={() => onImportRules(false)}
+        onReplace={() => setPendingReplace(true)}
+        onExportAll={() => onExportRules(null)}
+      />
 
       {!active ? (
-        <div className="off-state">
+        <div
+          className={`off-state ${zone === "__off__" ? "drop-target" : ""}`}
+          {...zoneProps("__off__", null)}
+        >
           <h3>Autoresponder is off</h3>
           <p className="muted">
             Capturing traffic only — nothing is mocked. Pick a scenario tab above to make its rules
-            live, or create a new one.
+            live, create a new one, or drag requests here to mock them.
           </p>
           {ar.scenarios.length === 0 && (
             <button className="btn primary" onClick={addScenario}>
@@ -687,6 +792,8 @@ export function AutoresponderPanel({
           onResetState={() => onResetState(active.id)}
           ruleHits={ruleHits}
           onExport={() => onExportRules(active.id)}
+          dropActive={zone === "__body__"}
+          dropProps={zoneProps("__body__", active.id)}
         />
       )}
 

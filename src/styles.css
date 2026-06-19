@@ -23,6 +23,7 @@
   --sel-bg: #173a36;
   --sel-multi-bg: rgba(96, 165, 250, 0.13);
   --row-mock-bg: rgba(45, 212, 191, 0.05);
+  --drop-overlay: rgba(45, 212, 191, 0.13);
   --bar-accent-bg: #13302c;
   --chip-on-bg: #112e2e;
   --banner-warn-bg: #2a2410;
@@ -82,6 +83,7 @@
   --sel-bg: #cbeee7;
   --sel-multi-bg: rgba(37, 99, 235, 0.14);
   --row-mock-bg: rgba(13, 148, 136, 0.1);
+  --drop-overlay: rgba(13, 148, 136, 0.13);
   --bar-accent-bg: #d4f1ec;
   --chip-on-bg: #d4f1ec;
   --banner-warn-bg: #fbf1d6;
@@ -1891,6 +1893,46 @@ code {
 .off-state p {
   max-width: 460px;
   margin: 0;
+}
+
+.flow-drag-ghost {
+  position: absolute;
+  top: -1000px;
+  left: -1000px;
+  padding: 5px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--accent-dim);
+  color: #04201c;
+  font: 600 var(--fs-sm) var(--sans);
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+}
+.stab.drop-target {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.scenario-body,
+.off-state {
+  position: relative;
+}
+.scenario-body.drop-target::after,
+.off-state.drop-target::after {
+  content: "⚡ Drop to mock these requests";
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius);
+  background: var(--drop-overlay);
+  color: var(--accent);
+  font: 600 var(--fs-lg) var(--sans);
+  pointer-events: none;
 }
 
 /* ---- status bar ---- */
