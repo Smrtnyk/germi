@@ -11,9 +11,6 @@ use proxy_core::{Action, AutoResponder, MatchKind, Rule, Scenario};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 const DB_FILE: &str = "autoresponder.sqlite3";
-const LEGACY_FILE: &str = "autoresponder.json";
-const LEGACY_BACKUP_FILE: &str = "autoresponder.json.migrated";
-const SCHEMA_VERSION: &str = "1";
 const SORT_STEP: f64 = 1024.0;
 
 pub struct RuleStore {
@@ -26,70 +23,10 @@ impl RuleStore {
         let store = Self {
             path: dir.join(DB_FILE),
         };
-        let mut connection = store.connect()?;
+        let connection = store.connect()?;
         Self::create_schema(&connection)?;
-
-        if !Self::is_initialized(&connection)? {
-            let legacy = dir.join(LEGACY_FILE);
-            let initial = if legacy.exists() {
-                let text = std::fs::read_to_string(&legacy).map_err(|e| {
-                    format!("failed to read legacy autoresponder configuration: {e}")
-                })?;
-                serde_json::from_str::<AutoResponder>(&text).map_err(|e| {
-                    format!("failed to parse legacy autoresponder configuration: {e}")
-                })?
-            } else {
-                AutoResponder::example()
-            };
-            Self::replace_with_connection(&mut connection, &initial)?;
-            if legacy.exists() {
-                let backup = dir.join(LEGACY_BACKUP_FILE);
-                if !backup.exists() {
-                    std::fs::rename(&legacy, backup).map_err(|e| e.to_string())?;
-                }
-            }
-        }
-
         let autoresponder = Self::load_with_connection(&connection)?;
         Ok((store, autoresponder))
-    }
-
-    fn is_initialized(connection: &Connection) -> Result<bool, String> {
-        let version = connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key = 'schema_version'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
-        if version.is_some() {
-            return Ok(true);
-        }
-
-        // Development builds created before the version marker already wrote
-        // active-scenario metadata. Preserve those databases instead of
-        // treating them as a fresh install and replacing them with examples.
-        let has_existing_data = connection
-            .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM metadata
-                    UNION ALL
-                    SELECT 1 FROM scenarios
-                 )",
-                [],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(|e| e.to_string())?;
-        if has_existing_data {
-            connection
-                .execute(
-                    "INSERT INTO metadata (key, value) VALUES ('schema_version', ?1)",
-                    [SCHEMA_VERSION],
-                )
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(has_existing_data)
     }
 
     fn connect(&self) -> Result<Connection, String> {
@@ -216,12 +153,6 @@ impl RuleStore {
             }
         }
         set_active_metadata(&transaction, autoresponder.active_scenario_id.as_deref())?;
-        transaction
-            .execute(
-                "INSERT INTO metadata (key, value) VALUES ('schema_version', ?1)",
-                [SCHEMA_VERSION],
-            )
-            .map_err(|e| e.to_string())?;
         transaction.commit().map_err(|e| e.to_string())
     }
 
@@ -609,58 +540,15 @@ mod tests {
     }
 
     #[test]
-    fn migrates_legacy_json_once_and_preserves_full_rule_details() {
-        let dir = test_dir("migration");
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let legacy = autoresponder();
-        std::fs::write(
-            dir.join(LEGACY_FILE),
-            serde_json::to_vec_pretty(&legacy).expect("serialize legacy"),
-        )
-        .expect("write legacy");
-
+    fn new_store_starts_empty() {
+        let dir = test_dir("empty");
         let (store, loaded) = RuleStore::open(&dir).expect("open store");
 
         assert!(dir.join(DB_FILE).exists());
-        assert!(dir.join(LEGACY_BACKUP_FILE).exists());
-        assert!(!dir.join(LEGACY_FILE).exists());
-        assert_eq!(loaded.active_scenario_id.as_deref(), Some("scenario"));
-        assert_eq!(loaded.scenarios[0].rules.len(), 3);
-        assert!(matches!(
-            &loaded.scenarios[0].rules[1].action,
-            Action::Respond { body, .. } if body == "second"
-        ));
+        assert!(loaded.scenarios.is_empty());
+        assert!(loaded.active_scenario_id.is_none());
 
         drop(store);
-        let (reopened_store, reopened) = RuleStore::open(&dir).expect("reopen migrated store");
-        assert_eq!(reopened.scenarios[0].rules.len(), 3);
-        assert!(matches!(
-            &reopened.scenarios[0].rules[1].action,
-            Action::Respond { body, .. } if body == "second"
-        ));
-
-        drop(reopened_store);
-        std::fs::remove_dir_all(dir).expect("remove temp dir");
-    }
-
-    #[test]
-    fn malformed_legacy_json_is_left_untouched() {
-        let dir = test_dir("malformed-migration");
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let legacy_path = dir.join(LEGACY_FILE);
-        std::fs::write(&legacy_path, "{not valid json").expect("write malformed legacy");
-
-        let error = RuleStore::open(&dir)
-            .err()
-            .expect("malformed legacy configuration should fail");
-
-        assert!(error.contains("failed to parse legacy autoresponder configuration"));
-        assert_eq!(
-            std::fs::read_to_string(&legacy_path).expect("legacy remains readable"),
-            "{not valid json"
-        );
-        assert!(!dir.join(LEGACY_BACKUP_FILE).exists());
-
         std::fs::remove_dir_all(dir).expect("remove temp dir");
     }
 
