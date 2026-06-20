@@ -114,7 +114,7 @@ body {
 /* ---- scrollbars: custom classic thumbs, always visible, never overlay ---- */
 .flow-scroll::-webkit-scrollbar,
 .body::-webkit-scrollbar,
-.rule-list::-webkit-scrollbar,
+.rule-list-viewport::-webkit-scrollbar,
 .rule-editor::-webkit-scrollbar,
 .modal::-webkit-scrollbar {
   width: 12px;
@@ -122,7 +122,7 @@ body {
 }
 .flow-scroll::-webkit-scrollbar-thumb,
 .body::-webkit-scrollbar-thumb,
-.rule-list::-webkit-scrollbar-thumb,
+.rule-list-viewport::-webkit-scrollbar-thumb,
 .rule-editor::-webkit-scrollbar-thumb,
 .modal::-webkit-scrollbar-thumb {
   background: var(--scrollbar-thumb);
@@ -132,7 +132,7 @@ body {
 }
 .flow-scroll::-webkit-scrollbar-thumb:hover,
 .body::-webkit-scrollbar-thumb:hover,
-.rule-list::-webkit-scrollbar-thumb:hover,
+.rule-list-viewport::-webkit-scrollbar-thumb:hover,
 .rule-editor::-webkit-scrollbar-thumb:hover,
 .modal::-webkit-scrollbar-thumb:hover {
   background: var(--muted);
@@ -140,7 +140,7 @@ body {
 }
 .flow-scroll::-webkit-scrollbar-corner,
 .body::-webkit-scrollbar-corner,
-.rule-list::-webkit-scrollbar-corner,
+.rule-list-viewport::-webkit-scrollbar-corner,
 .rule-editor::-webkit-scrollbar-corner,
 .modal::-webkit-scrollbar-corner {
   background: transparent;
@@ -1124,12 +1124,29 @@ textarea {
 }
 .rule-list {
   border-right: 1px solid var(--line);
-  overflow: auto;
-  scrollbar-gutter: stable;
+  overflow: hidden;
   padding: 8px;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+}
+.rule-list-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+.rule-list-canvas {
+  position: relative;
+  width: 100%;
+}
+.rule-item-slot {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  padding-bottom: var(--space-2);
+  box-sizing: border-box;
 }
 .rule-item {
   display: grid;
@@ -1139,6 +1156,8 @@ textarea {
   padding: 7px 8px;
   border-radius: var(--radius);
   cursor: pointer;
+  height: 100%;
+  box-sizing: border-box;
 }
 .rule-item:hover {
   background: var(--bg-1);

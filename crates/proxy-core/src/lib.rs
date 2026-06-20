@@ -485,8 +485,18 @@ impl ProxyController {
     /// scenario (the given id, else the active one, else a new "My mocks"),
     /// which becomes active. Returns the updated autoresponder + new rule ids.
     pub fn mock_flows(&self, ids: &[String], scenario_id: Option<&str>) -> MockResult {
-        let flows: Vec<crate::flow::Flow> = match self.shared.store.lock() {
-            Ok(store) => ids.iter().filter_map(|id| store.get(id).cloned()).collect(),
+        let base = crate::flow::now_ms();
+        let new_rules: Vec<(String, Rule)> = match self.shared.store.lock() {
+            Ok(store) => ids
+                .iter()
+                .filter_map(|id| store.get(id))
+                .enumerate()
+                .map(|(i, flow)| {
+                    let rule_id = format!("rule-{base}-{i}");
+                    let rule = rules::respond_rule_from_flow(flow, rule_id.clone());
+                    (rule_id, rule)
+                })
+                .collect(),
             Err(_) => Vec::new(),
         };
 
@@ -506,13 +516,12 @@ impl ProxyController {
         ar.active_scenario_id = Some(target_id.clone());
 
         // One rule per request — no collapsing (Fiddler-style).
-        let mut new_rule_ids = Vec::new();
+        let mut new_rule_ids = Vec::with_capacity(new_rules.len());
         if let Some(scenario) = ar.scenarios.iter_mut().find(|s| s.id == target_id) {
-            let base = crate::flow::now_ms();
-            for (i, flow) in flows.iter().enumerate() {
-                let rid = format!("rule-{base}-{i}");
-                new_rule_ids.push(rid.clone());
-                scenario.rules.push(rules::respond_rule_from_flow(flow, rid));
+            scenario.rules.reserve(new_rules.len());
+            for (rule_id, rule) in new_rules {
+                new_rule_ids.push(rule_id);
+                scenario.rules.push(rule);
             }
         }
 
@@ -527,7 +536,7 @@ impl ProxyController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flow::CapturedRequest;
+    use crate::flow::{CapturedRequest, CapturedResponse};
 
     fn controller() -> ProxyController {
         ProxyController::new(CertAuthority::generate().expect("generate in-memory CA"))
@@ -594,6 +603,20 @@ mod tests {
         }
     }
 
+    fn completed_flow(id: &str) -> crate::flow::Flow {
+        let mut flow = flow(id);
+        flow.request.path = format!("/{id}");
+        flow.request.uri = format!("https://example.com/{id}");
+        flow.response = Some(CapturedResponse {
+            status: 200,
+            version: "HTTP/1.1".to_string(),
+            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+            body: format!("response-{id}").into_bytes(),
+            timestamp_ms: 1,
+        });
+        flow
+    }
+
     #[test]
     fn remove_flows_drops_only_selected_and_emits_event() {
         let c = controller();
@@ -635,6 +658,35 @@ mod tests {
             "removing ids that were never captured must not emit an event"
         );
         assert_eq!(c.shared.store.lock().expect("lock store").len(), 1);
+    }
+
+    #[test]
+    fn bulk_mock_builds_rules_for_large_selections_in_input_order() {
+        let c = controller();
+        let ids: Vec<String> = (0..400).map(|i| format!("flow-{i}")).collect();
+        for id in &ids {
+            c.shared.record_new(completed_flow(id));
+        }
+
+        let result = c.mock_flows(&ids, Some("bulk"));
+
+        assert_eq!(result.new_rule_ids.len(), ids.len());
+        let scenario = result
+            .autoresponder
+            .scenarios
+            .iter()
+            .find(|scenario| scenario.id == "bulk")
+            .expect("bulk scenario");
+        assert_eq!(scenario.rules.len(), ids.len());
+        assert_eq!(scenario.rules[0].matcher.url, "https://example.com/flow-0");
+        assert_eq!(
+            scenario.rules.last().expect("last rule").matcher.url,
+            "https://example.com/flow-399"
+        );
+        assert!(matches!(
+            &scenario.rules[0].action,
+            Action::Respond { body, .. } if body == "response-flow-0"
+        ));
     }
 
     #[test]
