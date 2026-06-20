@@ -96,6 +96,13 @@ pub enum Action {
         body: String,
         #[serde(default)]
         content_type: Option<String>,
+        /// Optional `Content-Encoding` to apply to the served body (e.g.
+        /// `gzip` / `br` / `deflate`). When set, `body` is stored decoded
+        /// (human-editable in the editor) and compressed on the wire at serve
+        /// time; when `None`, `body` is sent as identity bytes. Single token
+        /// only — no chained encodings — to match the editor's single toggle.
+        #[serde(default)]
+        content_encoding: Option<String>,
     },
     /// Serve a local file as the response body (Fiddler "Map Local").
     MapLocal {
@@ -211,6 +218,9 @@ pub enum ActionSummary {
     Respond {
         status: u16,
         content_type: Option<String>,
+        /// Mirrors [`Action::Respond::content_encoding`] for the rule-list badge.
+        #[serde(default)]
+        content_encoding: Option<String>,
     },
     MapLocal {
         status: u16,
@@ -234,10 +244,12 @@ impl From<&Action> for ActionSummary {
             Action::Respond {
                 status,
                 content_type,
+                content_encoding,
                 ..
             } => Self::Respond {
                 status: *status,
                 content_type: content_type.clone(),
+                content_encoding: content_encoding.clone(),
             },
             Action::MapLocal { status, .. } => Self::MapLocal { status: *status },
             Action::Block => Self::Block,
@@ -379,6 +391,7 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
                 headers,
                 body,
                 content_type,
+                content_encoding,
             } => {
                 let mut hs = headers.clone();
                 if let Some(ct) = content_type {
@@ -386,6 +399,21 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
                         hs.push(("content-type".to_string(), ct.clone()));
                     }
                 }
+                // When the rule opts into a Content-Encoding, compress the
+                // stored (decoded) body for the wire and stamp the header. A
+                // normalized-but-unsupported value falls back to identity so a
+                // typo in the toggle never produces a corrupt response. Identity
+                // is sent as raw bytes with no header, exactly like before.
+                let body_bytes = match normalize_encoding(content_encoding.as_deref()) {
+                    Some(enc) => match crate::body::compress_body(&enc, body.as_bytes()) {
+                        Some(compressed) => {
+                            hs.push(("content-encoding".to_string(), enc));
+                            compressed
+                        }
+                        None => body.clone().into_bytes(),
+                    },
+                    None => body.clone().into_bytes(),
+                };
                 cursors.record_fire(rule);
                 return RequestOutcome::Respond {
                     rule: rule.name.clone(),
@@ -393,7 +421,7 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
                     response: SyntheticResponse {
                         status: *status,
                         headers: hs,
-                        body: body.clone().into_bytes(),
+                        body: body_bytes,
                     },
                 };
             }
@@ -602,6 +630,7 @@ impl RuleSet {
                     headers: vec![],
                     body: "{\"status\":\"ok\",\"mocked\":\"by germi\"}".to_string(),
                     content_type: Some("application/json".to_string()),
+                    content_encoding: None,
                 },
             }],
         }
@@ -694,6 +723,7 @@ pub fn blank_rule(id: String) -> Rule {
             headers: Vec::new(),
             body: "{\n  \"mocked\": true\n}".to_string(),
             content_type: Some("application/json".to_string()),
+            content_encoding: None,
         },
     }
 }
@@ -701,14 +731,46 @@ pub fn blank_rule(id: String) -> Rule {
 /// Build a `Respond` rule seeded from a captured flow — matcher targets the same
 /// method + path, action replays the captured response (status, content-type,
 /// body). This is the "Mock this" / bulk "Add to scenario" seed.
+///
+/// The seeded body is always **decoded** (identity text), regardless of the
+/// original `Content-Encoding`: the editor shows readable text, and the
+/// original encoding is preserved in `content_encoding` so the engine
+/// re-compresses on serve and the wire matches the original. A body that can't
+/// be decoded (unknown encoding, or a decode-truncated bomb) falls back to the
+/// raw bytes with no encoding — the user gets *something* to look at rather than
+/// a destroyed gzip stream mislabeled as `application/json`.
 pub fn respond_rule_from_flow(flow: &Flow, id: String) -> Rule {
-    let (status, body, content_type, headers) = match &flow.response {
+    let (status, body, content_type, headers, content_encoding) = match &flow.response {
         Some(r) => {
             let ct = r
                 .headers
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                 .map(|(_, v)| v.clone());
+            // The original Content-Encoding token (single-token; a chain is
+            // dropped since the rule's toggle is single-token). Used to set the
+            // rule's `content_encoding` so the engine re-compresses on serve.
+            let original_encoding = crate::body::content_encoding_of(&r.headers);
+            // Get the body into identity (decoded) form for the editor, and
+            // decide whether to keep the encoding toggle.
+            //
+            // Three cases:
+            // 1. decode_body succeeds → the body was raw compressed (a live
+            //    capture). Use the decoded text + keep the encoding toggle.
+            // 2. decode_body fails but the body is already textual → the body
+            //    was pre-decoded by an importer (HAR/SAZ both decompress on
+            //    import but keep the Content-Encoding header). Use the body
+            //    as-is + KEEP the encoding toggle so the engine re-compresses
+            //    on serve (the wire should match the original).
+            // 3. decode_body fails and the body is NOT textual → genuinely
+            //    undecodable binary. Fall back to raw bytes with NO encoding
+            //    toggle — serving a truncated/undecodable body labeled gzip
+            //    would corrupt the response.
+            let (decoded, encoding) = match crate::body::decode_body(&r.headers, &r.body) {
+                Some((decoded, false)) => (decoded, original_encoding),
+                _ if crate::body::looks_textual(&r.body) => (r.body.clone(), original_encoding),
+                _ => (r.body.clone(), None),
+            };
             // Seed the real response headers — minus content-type (its own field)
             // and length/encoding/hop-by-hop headers the engine recomputes.
             let headers: Vec<(String, String)> = r
@@ -719,12 +781,13 @@ pub fn respond_rule_from_flow(flow: &Flow, id: String) -> Rule {
                 .collect();
             (
                 r.status,
-                String::from_utf8_lossy(&r.body).into_owned(),
+                String::from_utf8_lossy(&decoded).into_owned(),
                 ct,
                 headers,
+                encoding,
             )
         }
-        None => (200, String::new(), None, Vec::new()),
+        None => (200, String::new(), None, Vec::new(), None),
     };
 
     // One rule per request, host-specific: the matcher targets the flow's full
@@ -757,6 +820,7 @@ pub fn respond_rule_from_flow(flow: &Flow, id: String) -> Rule {
             headers,
             body,
             content_type,
+            content_encoding,
         },
     }
 }
@@ -779,6 +843,21 @@ fn is_seed_excluded(name: &str) -> bool {
             | "trailer"
             | "upgrade"
     )
+}
+
+/// Normalize a `Content-Encoding` toggle value: trim/lowercase, drop empty and
+/// `identity` (both mean "no encoding"). Returns the canonical single token to
+/// stamp as the header value and pass to `compress_body`, or `None` when the
+/// response should be served as identity bytes. Does NOT validate that the
+/// token is a supported encoding — `compress_body` returns `None` for unknown
+/// ones and the caller falls back to identity.
+fn normalize_encoding(encoding: Option<&str>) -> Option<String> {
+    let enc = encoding?.trim().to_ascii_lowercase();
+    if enc.is_empty() || enc == "identity" {
+        None
+    } else {
+        Some(enc)
+    }
 }
 
 /// Insert or replace a header (case-insensitive on the name).
@@ -825,6 +904,7 @@ mod tests {
                 headers: vec![],
                 body: name.to_string(),
                 content_type: Some("text/plain".to_string()),
+                content_encoding: None,
             },
         }
     }
@@ -1086,6 +1166,295 @@ mod tests {
     }
 
     #[test]
+    fn rule_from_flow_decodes_gzipped_body_and_seeds_encoding() {
+        use std::io::Write;
+        // A captured gzip response: the seeded rule must store the DECODED body
+        // (readable in the editor) and carry content_encoding=gzip so the engine
+        // re-compresses on serve. Before this fix the raw gzip bytes were
+        // lossy-UTF-8'd into the body and the encoding was dropped, producing a
+        // corrupt non-gzip non-JSON response on the wire.
+        let original = br#"{"ok":true,"items":[1,2,3]}"#;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(original).unwrap();
+        let gz = enc.finish().unwrap();
+
+        let flow = Flow {
+            id: "f".into(),
+            request: CapturedRequest {
+                method: "GET".into(),
+                uri: "https://x/api".into(),
+                scheme: "https".into(),
+                host: "x".into(),
+                path: "/api".into(),
+                version: "HTTP/1.1".into(),
+                headers: vec![],
+                body: vec![],
+                timestamp_ms: 0,
+            },
+            response: Some(CapturedResponse {
+                status: 200,
+                version: "HTTP/1.1".into(),
+                headers: vec![
+                    ("Content-Type".into(), "application/json".into()),
+                    ("Content-Encoding".into(), "gzip".into()),
+                ],
+                body: gz,
+                timestamp_ms: 0,
+            }),
+            matched_rule: None,
+            duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
+        };
+
+        let rule = respond_rule_from_flow(&flow, "r".into());
+        match &rule.action {
+            Action::Respond { body, content_encoding, .. } => {
+                assert_eq!(body.as_bytes(), original, "seeded body must be the decoded text");
+                assert_eq!(
+                    content_encoding.as_deref(),
+                    Some("gzip"),
+                    "the original encoding must be preserved as the serve-time toggle",
+                );
+            }
+            other => panic!("expected Respond, got {other:?}"),
+        }
+
+        // End-to-end: when the rule fires, the engine must re-compress and stamp
+        // the content-encoding header, so a client receives a valid gzip stream
+        // that decodes back to the original body.
+        let rules = vec![rule];
+        let outcome = evaluate_request_rules(&rules, &req("GET", "https", "x", "/api"));
+        match outcome {
+            RequestOutcome::Respond { response, .. } => {
+                let has_enc = response
+                    .headers
+                    .iter()
+                    .any(|(k, v)| k.eq_ignore_ascii_case("content-encoding") && v == "gzip");
+                assert!(has_enc, "served response must carry content-encoding: gzip");
+                let decoded = crate::body::try_decompress("gzip", &response.body)
+                    .expect("served body must be a valid gzip stream");
+                assert_eq!(decoded, original.to_vec(), "wire body decodes to the original");
+            }
+            other => panic!("expected Respond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rule_from_flow_keeps_encoding_for_pre_decoded_textual_body() {
+        // HAR/SAZ importers decompress the body but KEEP the Content-Encoding
+        // header. The body is already decoded text, decode_body fails (it's not
+        // gzip), but looks_textual passes — so the rule must keep the body as-is
+        // AND keep the encoding toggle, so the engine re-compresses on serve
+        // and the wire matches the original response.
+        let flow = Flow {
+            id: "f".into(),
+            request: CapturedRequest {
+                method: "GET".into(),
+                uri: "https://x/api".into(),
+                scheme: "https".into(),
+                host: "x".into(),
+                path: "/api".into(),
+                version: "HTTP/1.1".into(),
+                headers: vec![],
+                body: vec![],
+                timestamp_ms: 0,
+            },
+            response: Some(CapturedResponse {
+                status: 200,
+                version: "HTTP/1.1".into(),
+                headers: vec![
+                    ("Content-Type".into(), "application/json".into()),
+                    ("Content-Encoding".into(), "gzip".into()),
+                ],
+                body: b"{\"ok\":true}".to_vec(),
+                timestamp_ms: 0,
+            }),
+            matched_rule: None,
+            duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
+        };
+        let rule = respond_rule_from_flow(&flow, "r".into());
+        match rule.action {
+            Action::Respond { body, content_encoding, .. } => {
+                assert_eq!(body, "{\"ok\":true}");
+                assert_eq!(
+                    content_encoding.as_deref(),
+                    Some("gzip"),
+                    "a pre-decoded textual body must keep the encoding toggle so the engine re-compresses on serve",
+                );
+            }
+            other => panic!("expected Respond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rule_from_flow_drops_encoding_for_undecodable_binary() {
+        // A genuinely binary body that declares gzip but can't be decoded (corrupt
+        // gzip stream or a stale header on binary content): decode_body fails AND
+        // looks_textual fails → drop the encoding toggle, serve raw bytes as
+        // identity. Forwarding undecodable binary labeled gzip would corrupt the
+        // response.
+        let binary: Vec<u8> = [0x00, 0xff, 0xfe, 0x80, 0x9c, 0x01, 0x02, 0x88].repeat(20);
+        let flow = Flow {
+            id: "f".into(),
+            request: CapturedRequest {
+                method: "GET".into(),
+                uri: "https://x/api".into(),
+                scheme: "https".into(),
+                host: "x".into(),
+                path: "/api".into(),
+                version: "HTTP/1.1".into(),
+                headers: vec![],
+                body: vec![],
+                timestamp_ms: 0,
+            },
+            response: Some(CapturedResponse {
+                status: 200,
+                version: "HTTP/1.1".into(),
+                headers: vec![
+                    ("Content-Type".into(), "application/octet-stream".into()),
+                    ("Content-Encoding".into(), "gzip".into()),
+                ],
+                body: binary.clone(),
+                timestamp_ms: 0,
+            }),
+            matched_rule: None,
+            duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
+        };
+        let rule = respond_rule_from_flow(&flow, "r".into());
+        match rule.action {
+            Action::Respond { content_encoding, .. } => {
+                assert_eq!(
+                    content_encoding, None,
+                    "an undecodable binary body must not keep the encoding toggle",
+                );
+            }
+            other => panic!("expected Respond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_encodes_respond_body_when_toggle_set() {
+        // A hand-authored rule with content_encoding=gzip: the engine compresses
+        // the (decoded) body on the wire and stamps the header. Identity toggle
+        // (None) sends raw bytes with no encoding header, as before.
+        let gzip_rule = Rule {
+            id: "gz".into(),
+            name: "gz".into(),
+            enabled: true,
+            fire_limit: None,
+            repeat: false,
+            matcher: Matcher {
+                method: None,
+                url: "/g".into(),
+                url_match: MatchKind::Contains,
+            },
+            action: Action::Respond {
+                status: 200,
+                headers: vec![],
+                body: "{\"mocked\":true}".to_string(),
+                content_type: Some("application/json".to_string()),
+                content_encoding: Some("gzip".to_string()),
+            },
+        };
+        let identity_rule = Rule {
+            id: "id".into(),
+            name: "id".into(),
+            enabled: true,
+            fire_limit: None,
+            repeat: false,
+            matcher: Matcher {
+                method: None,
+                url: "/i".into(),
+                url_match: MatchKind::Contains,
+            },
+            action: Action::Respond {
+                status: 200,
+                headers: vec![],
+                body: "{\"mocked\":true}".to_string(),
+                content_type: Some("application/json".to_string()),
+                content_encoding: None,
+            },
+        };
+
+        // gzip rule → compressed wire body + header.
+        let gz_outcome = evaluate_request_rules(&[gzip_rule], &req("GET", "https", "h", "/g"));
+        match gz_outcome {
+            RequestOutcome::Respond { response, .. } => {
+                assert!(
+                    response.headers.iter().any(|(k, v)|
+                        k.eq_ignore_ascii_case("content-encoding") && v == "gzip"),
+                    "gzip toggle must stamp content-encoding: gzip",
+                );
+                assert_ne!(
+                    response.body, b"{\"mocked\":true}",
+                    "wire body must be compressed, not the raw text",
+                );
+                let decoded = crate::body::try_decompress("gzip", &response.body)
+                    .expect("wire body must be a valid gzip stream");
+                assert_eq!(decoded, b"{\"mocked\":true}");
+            }
+            other => panic!("expected Respond, got {other:?}"),
+        }
+
+        // identity rule → raw body, no encoding header.
+        let id_outcome = evaluate_request_rules(&[identity_rule], &req("GET", "https", "h", "/i"));
+        match id_outcome {
+            RequestOutcome::Respond { response, .. } => {
+                assert!(
+                    !response.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-encoding")),
+                    "identity toggle must not stamp content-encoding",
+                );
+                assert_eq!(response.body, b"{\"mocked\":true}");
+            }
+            other => panic!("expected Respond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_falls_back_to_identity_for_unknown_encoding() {
+        // A toggle value the engine can't compress (typo / unsupported): fall
+        // back to identity bytes with NO encoding header, rather than emitting a
+        // corrupt response labeled with an encoding it doesn't have.
+        let rule = Rule {
+            id: "x".into(),
+            name: "x".into(),
+            enabled: true,
+            fire_limit: None,
+            repeat: false,
+            matcher: Matcher {
+                method: None,
+                url: "/x".into(),
+                url_match: MatchKind::Contains,
+            },
+            action: Action::Respond {
+                status: 200,
+                headers: vec![],
+                body: "hello".to_string(),
+                content_type: Some("text/plain".to_string()),
+                content_encoding: Some("snappy".to_string()),
+            },
+        };
+        match evaluate_request_rules(&[rule], &req("GET", "https", "h", "/x")) {
+            RequestOutcome::Respond { response, .. } => {
+                assert!(
+                    !response
+                        .headers
+                        .iter()
+                        .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding")),
+                    "unsupported encoding must not stamp a content-encoding header",
+                );
+                assert_eq!(response.body, b"hello", "body is sent as identity bytes");
+            }
+            other => panic!("expected Respond, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn mock_rule_is_host_specific() {
         let req = |host: &str, path: &str| CapturedRequest {
             method: "GET".into(),
@@ -1213,6 +1582,7 @@ mod tests {
                 headers: vec![],
                 body: String::new(),
                 content_type: None,
+                content_encoding: None,
             },
         };
         let rules = vec![status_rule("down", 503), status_rule("up", 200)];

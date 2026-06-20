@@ -91,6 +91,14 @@ export type Action =
       headers: [string, string][];
       body: string;
       contentType: string | null;
+      /**
+       * Optional Content-Encoding applied to the served body on the wire
+       * (e.g. "gzip" / "br" / "deflate"). When set, `body` is stored decoded
+       * (editable as text) and compressed at serve time. Mirrors the Rust
+       * `Action::Respond::content_encoding` field. Optional for back-compat
+       * with older persisted rules (treated as identity / `null`).
+       */
+      contentEncoding: string | null;
     }
   | { kind: "mapLocal"; path: string; status: number }
   | { kind: "block" }
@@ -112,7 +120,7 @@ export interface Rule {
 }
 
 export type ActionSummary =
-  | { kind: "respond"; status: number; contentType: string | null }
+  | { kind: "respond"; status: number; contentType: string | null; contentEncoding: string | null }
   | { kind: "mapLocal"; status: number }
   | { kind: "block" }
   | { kind: "setRequestHeader"; name: string }

@@ -139,6 +139,7 @@ mod tests {
                 headers: vec![("x-test".to_string(), "1".to_string())],
                 body: "{\"a\":1}".to_string(),
                 content_type: Some("application/json".to_string()),
+                content_encoding: None,
             },
         }
     }
@@ -199,11 +200,13 @@ mod tests {
                 body,
                 content_type,
                 headers,
+                content_encoding,
             } => {
                 assert_eq!(*status, 201);
                 assert_eq!(body, "{\"a\":1}");
                 assert_eq!(content_type.as_deref(), Some("application/json"));
                 assert_eq!(headers, &vec![("x-test".to_string(), "1".to_string())]);
+                assert_eq!(*content_encoding, None, "identity toggle round-trips as None");
             }
             other => panic!("expected Respond, got {other:?}"),
         }
@@ -304,6 +307,7 @@ mod tests {
                 headers: vec![("x-a".into(), "1".into()), ("x-b".into(), "2".into())],
                 body: "teapot".into(),
                 content_type: Some("text/plain".into()),
+                content_encoding: None,
             }),
             one_rule_scenario(Action::MapLocal {
                 path: "/tmp/some/file.json".into(),
@@ -330,7 +334,7 @@ mod tests {
 
         assert!(matches!(
             &back[0].rules[0].action,
-            Action::Respond { status: 418, body, content_type, headers }
+            Action::Respond { status: 418, body, content_type, headers, content_encoding: None }
                 if body == "teapot"
                     && content_type.as_deref() == Some("text/plain")
                     && headers.len() == 2
@@ -378,6 +382,53 @@ mod tests {
         assert_eq!(r.matcher.method.as_deref(), Some("DELETE"));
         assert_eq!(r.matcher.url, r"^https://api\.test/v\d+/");
         assert_eq!(r.matcher.url_match, MatchKind::Regex);
+    }
+
+    #[test]
+    fn round_trip_preserves_content_encoding_toggle() {
+        // A Respond rule that opts into gzip on the wire must keep that toggle
+        // across export/import, and the field must serialize as camelCase
+        // (`contentEncoding`) so the TS mirror matches.
+        let scenarios = vec![one_rule_scenario(Action::Respond {
+            status: 200,
+            headers: vec![],
+            body: "{\"ok\":true}".into(),
+            content_type: Some("application/json".into()),
+            content_encoding: Some("gzip".into()),
+        })];
+        let json = String::from_utf8(export_rules(&scenarios)).expect("utf8 json");
+        assert!(
+            json.contains("\"contentEncoding\": \"gzip\""),
+            "content_encoding must serialize as camelCase contentEncoding, got: {json}"
+        );
+        let back = parse_rules(&export_rules(&scenarios)).expect("round-trip");
+        assert!(matches!(
+            &back[0].rules[0].action,
+            Action::Respond { content_encoding, .. } if content_encoding.as_deref() == Some("gzip")
+        ));
+    }
+
+    #[test]
+    fn parse_tolerates_respond_rule_without_content_encoding() {
+        // A hand-authored / older bundle that omits contentEncoding must still
+        // parse via serde default (identity toggle), so existing .germi-rules
+        // files keep working after the field is added.
+        let bytes = br#"{
+            "version": 1,
+            "scenarios": [{
+                "id": "s", "name": "S",
+                "rules": [{
+                    "id": "r", "name": "r",
+                    "matcher": { "url": "/x" },
+                    "action": { "kind": "respond", "status": 200, "body": "hi" }
+                }]
+            }]
+        }"#;
+        let back = parse_rules(bytes).expect("older bundle parses via serde default");
+        assert!(matches!(
+            &back[0].rules[0].action,
+            Action::Respond { content_encoding: None, .. }
+        ));
     }
 
     #[test]

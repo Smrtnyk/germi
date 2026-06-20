@@ -524,6 +524,7 @@ mod tests {
                 headers: vec![("x-test".to_string(), id.to_string())],
                 body: body.to_string(),
                 content_type: Some("text/plain".to_string()),
+                content_encoding: None,
             },
         }
     }

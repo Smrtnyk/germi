@@ -86,6 +86,7 @@ function defaultAction(kind: ActionKind): Action {
         headers: [],
         body: '{\n  "mocked": true\n}',
         contentType: "application/json",
+        contentEncoding: null,
       };
     case "mapLocal":
       return { kind: "mapLocal", path: "", status: 200 };
@@ -113,7 +114,7 @@ function middleTruncate(s: string, max = 46): string {
 function actionSummary(a: ActionSummary): string {
   switch (a.kind) {
     case "respond":
-      return `${a.status}${a.contentType ? " " + a.contentType.split(";")[0] : ""}`;
+      return `${a.status}${a.contentType ? " " + a.contentType.split(";")[0] : ""}${a.contentEncoding ? ` · ${a.contentEncoding}` : ""}`;
     case "mapLocal":
       return `file → ${a.status}`;
     case "block":
@@ -158,6 +159,11 @@ function ruleWarnings(rule: Rule): string[] {
     if (dup) w.push(`Duplicate header "${dup}" — only the last value is sent.`);
     if (names.includes("content-type")) {
       w.push("Content-Type is in the Headers table — use the dedicated field to avoid duplicates.");
+    }
+    if (names.includes("content-encoding")) {
+      w.push(
+        "Content-Encoding is in the Headers table — use the dedicated toggle below to avoid duplicates.",
+      );
     }
   }
   return w;
@@ -1449,6 +1455,26 @@ function formatJson(body: string): string | null {
   }
 }
 
+/**
+ * Whether a Content-Type is text-editable inline. Mirrors the inspector's
+ * `is_textual` (crates/proxy-core/src/flow.rs) + `classify` (FlowInspector):
+ * text/*, JSON, JS, XML/HTML/SVG, CSS, form-urlencoded, CSV, GraphQL are
+ * editable; images (except SVG), fonts, audio/video, wasm, octet-stream, PDF,
+ * zip etc. are binary — a CodeMirror text editor would show U+FFFD garbage for
+ * them, and edits can't produce a valid binary asset anyway. For those the
+ * editor is replaced with a hint to use Map Local.
+ */
+function isTextualContentType(contentType: string): boolean {
+  const ct = contentType.toLowerCase().split(";")[0].trim();
+  if (!ct) return true; // empty default → editable (the starter rule is JSON)
+  if (ct.startsWith("text/")) return true;
+  if (ct.includes("svg")) return true; // image/svg+xml is text
+  if (/(json|javascript|ecmascript|xml|html|x-www-form-urlencoded|csv|graphql)/.test(ct)) {
+    return true;
+  }
+  return false;
+}
+
 function StatusField({ status, onChange }: { status: number; onChange: (s: number) => void }) {
   return (
     <div className="status-field">
@@ -1469,6 +1495,43 @@ function StatusField({ status, onChange }: { status: number; onChange: (s: numbe
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+const ENCODING_OPTIONS = ["", "gzip", "br", "deflate"] as const;
+
+/**
+ * Pick the Content-Encoding the rule applies to the served body on the wire.
+ * `""` (None) sends the body as identity bytes — today's default. Any other
+ * value re-compresses the (always-decoded, editable) body at serve time and
+ * stamps the `Content-Encoding` header. The editor always shows decoded text.
+ */
+function ContentEncodingField({
+  encoding,
+  onChange,
+}: {
+  encoding: string | null;
+  onChange: (e: string | null) => void;
+}) {
+  const value = encoding ?? "";
+  return (
+    <div className="row">
+      <label>Content-Encoding</label>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value || null)}
+        title="Compress the served body on the wire. The editor always shows decoded text; the engine re-encodes when the rule fires."
+      >
+        {ENCODING_OPTIONS.map((opt) => (
+          <option key={opt} value={opt}>
+            {opt === "" ? "none (identity)" : opt}
+          </option>
+        ))}
+      </select>
+      {value && (
+        <span className="muted small">⚡ response will be {value}-encoded on the wire</span>
+      )}
     </div>
   );
 }
@@ -1602,6 +1665,7 @@ function ActionFields({
   switch (action.kind) {
     case "respond": {
       const contentType = action.contentType ?? "";
+      const textual = isTextualContentType(contentType);
       return (
         <>
           <StatusField status={action.status} onChange={(s) => setAction({ status: s })} />
@@ -1613,27 +1677,41 @@ function ActionFields({
               onChange={(e) => setAction({ contentType: e.target.value })}
             />
           </div>
+          <ContentEncodingField
+            encoding={action.contentEncoding}
+            onChange={(e) => setAction({ contentEncoding: e })}
+          />
           <HeadersTable headers={action.headers} onChange={(h) => setAction({ headers: h })} />
-          <div className="row body-head">
-            <label>Body</label>
-            <button
-              className="btn small"
-              title="Pretty-print JSON"
-              onClick={() => {
-                const f = formatJson(action.body);
-                if (f !== null) setAction({ body: f });
-              }}
-            >
-              Format
-            </button>
-          </div>
-          <Suspense fallback={<div className="muted pad small">Loading editor…</div>}>
-            <BodyEditor
-              value={action.body}
-              contentType={contentType}
-              onChange={(b) => setAction({ body: b })}
-            />
-          </Suspense>
+          {textual ? (
+            <>
+              <div className="row body-head">
+                <label>Body</label>
+                <button
+                  className="btn small"
+                  title="Pretty-print JSON"
+                  onClick={() => {
+                    const f = formatJson(action.body);
+                    if (f !== null) setAction({ body: f });
+                  }}
+                >
+                  Format
+                </button>
+              </div>
+              <Suspense fallback={<div className="muted pad small">Loading editor…</div>}>
+                <BodyEditor
+                  value={action.body}
+                  contentType={contentType}
+                  onChange={(b) => setAction({ body: b })}
+                />
+              </Suspense>
+            </>
+          ) : (
+            <div className="muted pad small">
+              Binary content type — inline editing isn’t supported for {contentType.split(";")[0]}.
+              Use <strong>Map Local</strong> to serve the file directly, or set a text Content-Type
+              (e.g. <code>application/json</code>) to edit the body inline.
+            </div>
+          )}
         </>
       );
     }

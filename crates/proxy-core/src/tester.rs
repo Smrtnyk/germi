@@ -215,12 +215,14 @@ pub(crate) fn test_rule_slice(rules: &[Rule], input: &TestInput) -> TestResult {
             short_circuit: true,
             fired_rule: Some(rule.clone()),
             effective_request_headers: req.headers,
-            response: Some(TestResponse {
-                status: response.status,
-                headers: client_headers(response.headers),
-                body: String::from_utf8_lossy(&response.body).into_owned(),
-                source: format!("Synthesized by rule \u{201c}{rule}\u{201d} — request never hit the network"),
-            }),
+            response: Some(preview_response(
+                response.status,
+                response.headers,
+                response.body,
+                format!(
+                    "Synthesized by rule \u{201c}{rule}\u{201d} — request never hit the network"
+                ),
+            )),
             notes,
             sequence,
             sequence_loops,
@@ -312,15 +314,36 @@ fn continue_result(
         short_circuit: false,
         fired_rule: fired,
         effective_request_headers: eff,
-        response: Some(TestResponse {
-            status: resp.status,
-            headers: client_headers(resp.headers),
-            body: String::from_utf8_lossy(&resp.body).into_owned(),
-            source,
-        }),
+        response: Some(preview_response(resp.status, resp.headers, resp.body, source)),
         notes,
         sequence,
         sequence_loops,
+    }
+}
+
+/// Build the preview [`TestResponse`] the tester shows for "what the client
+/// receives". The wire body may be Content-Encoded (a `Respond` rule with a
+/// `content_encoding` toggle, or an encoded sample upstream response); for the
+/// preview we decode it back to readable text (best-effort, falling back to a
+/// lossy string) so the user sees the *content*, while keeping the
+/// `content-encoding` header visible to signal the wire is compressed.
+/// content-length / transfer-encoding are stripped to match the live pipeline
+/// (`handler::build_parts` recomputes them).
+fn preview_response(
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    source: String,
+) -> TestResponse {
+    let display_body = match crate::body::decode_body(&headers, &body) {
+        Some((decoded, false)) => String::from_utf8_lossy(&decoded).into_owned(),
+        _ => String::from_utf8_lossy(&body).into_owned(),
+    };
+    TestResponse {
+        status,
+        headers: client_headers(headers),
+        body: display_body,
+        source,
     }
 }
 
@@ -346,6 +369,7 @@ mod tests {
                 headers: vec![],
                 body: "{\"ok\":true}".into(),
                 content_type: Some("application/json".into()),
+                content_encoding: None,
             },
         }
     }
@@ -444,6 +468,7 @@ mod tests {
                     ],
                     body: "hi".into(),
                     content_type: None,
+                    content_encoding: None,
                 },
             }],
         };
@@ -502,6 +527,7 @@ mod tests {
                 headers: vec![],
                 body: format!("body-{id}"),
                 content_type: None,
+                content_encoding: None,
             },
         }
     }
