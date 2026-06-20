@@ -123,7 +123,7 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       group: "Scenarios",
       label: `Activate scenario: ${sc.name}`,
       disabled: sc.id === ar.activeScenarioId,
-      run: () => s.ar.saveAutoresponder({ ...ar, activeScenarioId: sc.id }),
+      run: () => s.ar.activateScenario(sc.id),
     });
   }
   if (ar.activeScenarioId !== null) {
@@ -131,7 +131,7 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       id: "scenario-off",
       group: "Scenarios",
       label: "Autoresponder: turn off",
-      run: () => s.ar.saveAutoresponder({ ...ar, activeScenarioId: null }),
+      run: () => s.ar.activateScenario(null),
     });
   }
   return actions;
@@ -497,13 +497,29 @@ export function App() {
                 }}
                 auto={{
                   ar: s.ar.autoresponder,
-                  onChange: s.ar.saveAutoresponder,
+                  scenarioActions: {
+                    activate: s.ar.activateScenario,
+                    create: s.ar.createScenario,
+                    rename: s.ar.renameScenario,
+                    delete: s.ar.deleteScenario,
+                    resetState: s.ar.resetRuleState,
+                  },
+                  ruleActions: {
+                    create: s.ar.createRule,
+                    load: s.ar.loadRule,
+                    update: s.ar.updateRule,
+                    delete: s.ar.deleteRule,
+                    duplicate: s.ar.duplicateRule,
+                    reorder: s.ar.reorderRule,
+                  },
+                  transferActions: {
+                    exportRules: s.ar.exportRules,
+                    importRules: s.ar.importRules,
+                    dropMock: s.dropMockFlows,
+                  },
                   selectRuleId: s.ar.selectRuleId,
-                  onResetState: s.ar.resetRuleState,
                   ruleHits: s.ar.ruleHits,
-                  onExportRules: s.ar.exportRules,
-                  onImportRules: s.ar.importRules,
-                  onDropMock: s.dropMockFlows,
+                  bulkMockProgress: s.ar.bulkMockProgress,
                 }}
               />
             )}

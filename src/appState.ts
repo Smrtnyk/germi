@@ -16,14 +16,26 @@ import { useSplitRatio } from "./useResizable";
 import { useToasts, type Notify } from "./toast";
 import { toCurl } from "./curl";
 import { nextIdAfterDelete } from "./selection";
+import {
+  appendBulkRuleSummaries,
+  appendRuleSummary,
+  insertRuleSummaryAfter,
+  removeRuleSummary,
+  reorderRuleSummary,
+  replaceRuleSummary,
+} from "./autoresponderState";
 import type {
-  AutoResponder,
+  AutoResponderSummary,
+  BulkMockEvent,
   CaInfo,
   FlowDetail,
   FlowEvent,
   FlowSummary,
   ProxySettings,
   ResourceKind,
+  Rule,
+  RuleSummary,
+  ScenarioSummary,
 } from "./types";
 
 export type RightTab = "inspector" | "autoresponder";
@@ -252,7 +264,7 @@ function persistSettings(
 
 async function loadInitialState(opts: {
   setRunning: (running: boolean) => void;
-  setAutoresponder: (ar: AutoResponder) => void;
+  setAutoresponder: (ar: AutoResponderSummary) => void;
   setSettings: (s: ProxySettings) => void;
   setCaInfo: (ca: CaInfo) => void;
   loadInitialFlows: () => Promise<void>;
@@ -261,7 +273,7 @@ async function loadInitialState(opts: {
   try {
     const isRunning = await api.proxyStatus();
     opts.setRunning(isRunning);
-    opts.setAutoresponder(await api.getAutoresponder());
+    opts.setAutoresponder(await api.getAutoresponderSummary());
     const loaded = await api.getSettings();
     opts.setSettings(loaded);
     opts.setCaInfo(await api.caInfo());
@@ -614,73 +626,190 @@ function useAutoresponder(
   notify: Notify,
   autoresponderActive: boolean,
 ) {
-  const [autoresponder, setAutoresponder] = useState<AutoResponder>({
+  const [autoresponder, setAutoresponder] = useState<AutoResponderSummary>({
     scenarios: [],
     activeScenarioId: null,
   });
   const [selectRuleId, setSelectRuleId] = useState<string | null>(null);
-  const saveTimer = useRef<number | null>(null);
-  const pendingSave = useRef<AutoResponder | null>(null);
+  const [bulkMockProgress, setBulkMockProgress] = useState<BulkMockEvent | null>(null);
   const { ruleHits, resetRuleState } = useRuleHits(
     autoresponder.activeScenarioId,
     autoresponderActive,
     setError,
   );
 
-  function cancelSave() {
-    if (saveTimer.current !== null) {
-      clearTimeout(saveTimer.current);
-      saveTimer.current = null;
-    }
-    pendingSave.current = null;
-  }
-
-  async function flushSave() {
-    if (saveTimer.current !== null) {
-      clearTimeout(saveTimer.current);
-      saveTimer.current = null;
-    }
-    const next = pendingSave.current;
-    pendingSave.current = null;
-    if (next === null) return;
+  const refresh = useCallback(async () => {
     try {
-      await api.setAutoresponder(next);
+      setAutoresponder(await api.getAutoresponderSummary());
     } catch (e) {
       setError(String(e));
     }
-  }
+  }, [setError]);
 
-  function saveAutoresponder(next: AutoResponder) {
-    setAutoresponder(next);
-    pendingSave.current = next;
-    if (saveTimer.current !== null) clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => {
-      const pending = pendingSave.current;
-      saveTimer.current = null;
-      pendingSave.current = null;
-      if (pending !== null) void api.setAutoresponder(pending).catch((e) => setError(String(e)));
-    }, 300);
-  }
+  const activateScenario = useCallback(
+    (scenarioId: string | null) => {
+      setAutoresponder((current) => ({ ...current, activeScenarioId: scenarioId }));
+      void api.setActiveScenario(scenarioId).catch((e) => {
+        setError(String(e));
+        void refresh();
+      });
+    },
+    [refresh, setError],
+  );
+
+  const createScenario = useCallback(async (): Promise<ScenarioSummary | null> => {
+    try {
+      const scenario = await api.createScenario();
+      setAutoresponder((current) => ({
+        scenarios: [...current.scenarios, scenario],
+        activeScenarioId: scenario.id,
+      }));
+      return scenario;
+    } catch (e) {
+      setError(String(e));
+      return null;
+    }
+  }, [setError]);
+
+  const renameScenario = useCallback(
+    (scenarioId: string, name: string) => {
+      setAutoresponder((current) => ({
+        ...current,
+        scenarios: current.scenarios.map((scenario) =>
+          scenario.id === scenarioId ? { ...scenario, name } : scenario,
+        ),
+      }));
+      void api.renameScenario(scenarioId, name).catch((e) => {
+        setError(String(e));
+        void refresh();
+      });
+    },
+    [refresh, setError],
+  );
+
+  const deleteScenario = useCallback(
+    (scenarioId: string) => {
+      setAutoresponder((current) => ({
+        scenarios: current.scenarios.filter((scenario) => scenario.id !== scenarioId),
+        activeScenarioId: current.activeScenarioId === scenarioId ? null : current.activeScenarioId,
+      }));
+      void api.deleteScenario(scenarioId).catch((e) => {
+        setError(String(e));
+        void refresh();
+      });
+    },
+    [refresh, setError],
+  );
+
+  const createRule = useCallback(
+    async (scenarioId: string): Promise<RuleSummary | null> => {
+      try {
+        const rule = await api.createRule(scenarioId);
+        setAutoresponder((current) => appendRuleSummary(current, scenarioId, rule));
+        return rule;
+      } catch (e) {
+        setError(String(e));
+        return null;
+      }
+    },
+    [setError],
+  );
+
+  const loadRule = useCallback(
+    async (ruleId: string): Promise<Rule | null> => {
+      try {
+        return await api.getRule(ruleId);
+      } catch (e) {
+        setError(String(e));
+        return null;
+      }
+    },
+    [setError],
+  );
+
+  const updateRule = useCallback(
+    async (scenarioId: string, rule: Rule): Promise<RuleSummary | null> => {
+      try {
+        const summary = await api.updateRule(scenarioId, rule);
+        setAutoresponder((current) => replaceRuleSummary(current, scenarioId, summary));
+        return summary;
+      } catch (e) {
+        setError(String(e));
+        return null;
+      }
+    },
+    [setError],
+  );
+
+  const deleteRule = useCallback(
+    (scenarioId: string, ruleId: string) => {
+      setAutoresponder((current) => removeRuleSummary(current, scenarioId, ruleId));
+      void api.deleteRule(scenarioId, ruleId).catch((e) => {
+        setError(String(e));
+        void refresh();
+      });
+    },
+    [refresh, setError],
+  );
+
+  const duplicateRule = useCallback(
+    async (scenarioId: string, ruleId: string): Promise<RuleSummary | null> => {
+      try {
+        const copy = await api.duplicateRule(scenarioId, ruleId);
+        setAutoresponder((current) => insertRuleSummaryAfter(current, scenarioId, ruleId, copy));
+        return copy;
+      } catch (e) {
+        setError(String(e));
+        return null;
+      }
+    },
+    [setError],
+  );
+
+  const reorderRule = useCallback(
+    (scenarioId: string, ruleId: string, toId: string) => {
+      if (ruleId === toId) return;
+      setAutoresponder((current) => reorderRuleSummary(current, scenarioId, ruleId, toId));
+      void api.reorderRule(scenarioId, ruleId, toId).catch((e) => {
+        setError(String(e));
+        void refresh();
+      });
+    },
+    [refresh, setError],
+  );
 
   async function mockFlows(ids: string[], scenarioId: string | null): Promise<boolean> {
     setError(null);
-    await flushSave();
+    setBulkMockProgress({
+      type: "progress",
+      completed: 0,
+      total: ids.length,
+      phase: "generating",
+    });
     try {
-      const result = await api.mockFlows(ids, scenarioId);
-      setAutoresponder(result.autoresponder);
+      const result = await api.mockFlows(ids, scenarioId, (event) => {
+        if (event.type === "progress") {
+          setBulkMockProgress(event);
+          return;
+        }
+        setAutoresponder((current) =>
+          appendBulkRuleSummaries(current, event.scenarioId, event.rules),
+        );
+      });
       setSelectRuleId(result.newRuleIds[0] ?? null);
       setRightTab("autoresponder");
       const n = result.newRuleIds.length;
       notify("success", n > 1 ? `Created ${plural(n, "mock rule")}` : "Mock rule created");
+      window.setTimeout(() => setBulkMockProgress(null), 500);
       return true;
     } catch (e) {
+      setBulkMockProgress(null);
       setError(String(e));
       return false;
     }
   }
 
   async function exportRules(scenarioId: string | null) {
-    await flushSave();
     try {
       const ok = await api.exportRules(scenarioId);
       if (ok) notify("success", scenarioId ? "Scenario exported" : "All scenarios exported");
@@ -690,11 +819,10 @@ function useAutoresponder(
   }
 
   async function importRules(replace: boolean) {
-    cancelSave();
     try {
       const n = await api.importRules(replace);
       if (n > 0) {
-        setAutoresponder(await api.getAutoresponder());
+        await refresh();
         notify("success", `Imported ${plural(n, "scenario")}`);
       }
     } catch (e) {
@@ -706,7 +834,17 @@ function useAutoresponder(
     autoresponder,
     setAutoresponder,
     selectRuleId,
-    saveAutoresponder,
+    bulkMockProgress,
+    activateScenario,
+    createScenario,
+    renameScenario,
+    deleteScenario,
+    createRule,
+    loadRule,
+    updateRule,
+    deleteRule,
+    duplicateRule,
+    reorderRule,
     mockFlows,
     exportRules,
     importRules,

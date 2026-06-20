@@ -1803,6 +1803,21 @@ code {
   overflow-x: auto;
   scrollbar-width: thin;
 }
+.bulk-mock-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--accent-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+.bulk-mock-progress progress {
+  flex: 1;
+  min-width: 100px;
+  accent-color: var(--accent);
+}
 .stab {
   font: inherit;
   color: var(--muted);

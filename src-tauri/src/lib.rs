@@ -2,6 +2,7 @@
 
 mod commands;
 mod persist;
+mod rule_store;
 mod state;
 
 use std::sync::Arc;
@@ -33,16 +34,16 @@ pub fn run() {
             let ca = ProxyController::load_or_generate_ca(&ca_dir)
                 .map_err(|e| format!("failed to initialize CA: {e}"))?;
             let controller = Arc::new(ProxyController::new(ca));
-            // Restore persisted scenarios (else the seeded example remains).
-            if let Some(ar) = persist::load_autoresponder(&ca_dir) {
-                controller.set_autoresponder(ar);
-            }
+            let (rule_store, autoresponder) = rule_store::RuleStore::open(&ca_dir)
+                .map_err(|e| format!("failed to initialize autoresponder database: {e}"))?;
+            controller.set_autoresponder(autoresponder);
             // Restore persisted proxy settings (host exclusions).
             if let Some(settings) = persist::load_settings(&ca_dir) {
                 controller.set_settings(settings);
             }
             app.manage(AppState {
                 controller,
+                rule_store: Arc::new(rule_store),
                 ca_dir,
                 flow_forwarder: std::sync::Mutex::new(None),
                 prior_system_proxy: std::sync::Mutex::new(None),
@@ -59,15 +60,24 @@ pub fn run() {
             commands::clear_flows,
             commands::remove_flows,
             commands::set_flow_comment,
-            commands::get_autoresponder,
-            commands::set_autoresponder,
+            commands::get_autoresponder_summary,
+            commands::get_rule,
+            commands::set_active_scenario,
+            commands::create_scenario,
+            commands::rename_scenario,
+            commands::delete_scenario,
+            commands::create_rule,
+            commands::update_rule,
+            commands::delete_rule,
+            commands::duplicate_rule,
+            commands::reorder_rule,
             commands::reset_rule_state,
             commands::rule_hits,
             commands::get_settings,
             commands::set_settings,
             commands::export_settings,
             commands::import_settings,
-            commands::test_rules,
+            commands::test_scenario,
             commands::mock_flows,
             commands::ca_info,
             commands::export_ca,

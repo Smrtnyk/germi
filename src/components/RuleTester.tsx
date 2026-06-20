@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 
 import { api } from "../ipc";
-import type { RuleSet, SequenceStep, TestInput, TestResult } from "../types";
+import type { SequenceStep, TestInput, TestResult } from "../types";
 
 interface Props {
-  /** The full rule set to simulate (tested as a whole, in order). */
-  rules: RuleSet;
+  /** The backend-owned scenario to simulate as a whole, in order. */
+  scenarioId: string;
   seedMethod?: string;
   seedUrl?: string;
 }
@@ -40,7 +40,7 @@ function SequenceStrip({ sequence, loops }: { sequence: SequenceStep[]; loops: b
   );
 }
 
-export function RuleTester({ rules, seedMethod, seedUrl }: Props) {
+export function RuleTester({ scenarioId, seedMethod, seedUrl }: Props) {
   const [method, setMethod] = useState(seedMethod ?? "GET");
   const [url, setUrl] = useState(seedUrl ?? "https://api.example.com/health");
   const [reqBody, setReqBody] = useState("");
@@ -70,7 +70,7 @@ export function RuleTester({ rules, seedMethod, seedUrl }: Props) {
       respBody,
     };
     try {
-      setResult(await api.testRules(rules, input));
+      setResult(await api.testScenario(scenarioId, input));
     } catch (e) {
       setError(String(e));
     }

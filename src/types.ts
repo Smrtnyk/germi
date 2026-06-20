@@ -111,19 +111,33 @@ export interface Rule {
   action: Action;
 }
 
-export interface RuleSet {
-  rules: Rule[];
-}
+export type ActionSummary =
+  | { kind: "respond"; status: number; contentType: string | null }
+  | { kind: "mapLocal"; status: number }
+  | { kind: "block" }
+  | { kind: "setRequestHeader"; name: string }
+  | { kind: "setResponseHeader"; name: string }
+  | { kind: "setStatus"; status: number }
+  | { kind: "rewriteResponseBody" };
 
-/** A named, switchable group of rules. Exactly one scenario is active at a time. */
-export interface Scenario {
+export interface RuleSummary {
   id: string;
   name: string;
-  rules: Rule[];
+  enabled: boolean;
+  fireLimit: number | null;
+  repeat: boolean;
+  matcher: Matcher;
+  action: ActionSummary;
 }
 
-export interface AutoResponder {
-  scenarios: Scenario[];
+export interface ScenarioSummary {
+  id: string;
+  name: string;
+  rules: RuleSummary[];
+}
+
+export interface AutoResponderSummary {
+  scenarios: ScenarioSummary[];
   /** Id of the active scenario, or null for Off (passthrough). */
   activeScenarioId: string | null;
 }
@@ -151,9 +165,18 @@ export interface CaInfo {
 }
 
 export interface MockResult {
-  autoresponder: AutoResponder;
+  scenarioId: string;
   newRuleIds: string[];
 }
+
+export type BulkMockEvent =
+  | {
+      type: "progress";
+      completed: number;
+      total: number;
+      phase: "generating" | "saving";
+    }
+  | { type: "created"; scenarioId: string; rules: RuleSummary[] };
 
 // ---- rule tester (mirror crates/proxy-core/src/tester.rs) ----
 
