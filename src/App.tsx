@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateActio
 
 import { useAppState, type RightMode, type RightTab } from "./appState";
 import { hasFlowDrag } from "./dnd";
-import type { AutoResponder, CaInfo, FlowDetail, FlowSummary, ProxySettings } from "./types";
+import type { CaInfo, FlowDetail, FlowSummary, ProxySettings } from "./types";
 import { Toolbar } from "./components/Toolbar";
 import { FilterChips } from "./components/FilterChips";
 import { TrafficList } from "./components/TrafficList";
@@ -198,66 +198,6 @@ function handleShortcut(
     e.preventDefault();
     setCheatOpen(true);
   }
-}
-
-function SelectionBar({
-  flows,
-  selectedIds,
-  clearSelection,
-  autoresponder,
-  pickScenarioId,
-  setPickScenarioId,
-  onMock,
-  onDelete,
-}: {
-  flows: FlowSummary[];
-  selectedIds: Set<string>;
-  clearSelection: () => void;
-  autoresponder: AutoResponder;
-  pickScenarioId: string;
-  setPickScenarioId: (id: string) => void;
-  onMock: (ids: string[], scenarioId: string | null) => Promise<boolean>;
-  onDelete: () => void;
-}) {
-  if (selectedIds.size < 2) return null;
-
-  const pick =
-    pickScenarioId || autoresponder.activeScenarioId || autoresponder.scenarios[0]?.id || "__new__";
-
-  async function addToScenario() {
-    const ids = flows.filter((f) => selectedIds.has(f.id)).map((f) => f.id);
-    if (ids.length === 0) return;
-    const ok = await onMock(ids, pick === "__new__" ? null : pick);
-    if (ok) {
-      clearSelection();
-      setPickScenarioId("");
-    }
-  }
-
-  return (
-    <div className="selection-bar">
-      <span>
-        <strong>{selectedIds.size}</strong> selected
-      </span>
-      <select value={pick} onChange={(e) => setPickScenarioId(e.target.value)}>
-        {autoresponder.scenarios.map((s) => (
-          <option key={s.id} value={s.id}>
-            {s.name}
-          </option>
-        ))}
-        <option value="__new__">+ New scenario</option>
-      </select>
-      <button className="btn primary" onClick={addToScenario}>
-        Add to scenario
-      </button>
-      <button className="btn ghost danger" onClick={onDelete} title="Delete the selected requests">
-        Delete
-      </button>
-      <button className="btn" onClick={clearSelection}>
-        Clear
-      </button>
-    </div>
-  );
 }
 
 function RightPanelHeader({
@@ -500,16 +440,6 @@ export function App() {
                 searching={s.filtering.searching}
                 matchCount={s.matchCount}
                 total={s.flowStore.flows.length}
-              />
-              <SelectionBar
-                flows={s.flowStore.flows}
-                selectedIds={s.selection.selectedIds}
-                clearSelection={s.selection.clearSelection}
-                autoresponder={s.ar.autoresponder}
-                pickScenarioId={s.ar.pickScenarioId}
-                setPickScenarioId={s.ar.setPickScenarioId}
-                onMock={s.ar.mockFlows}
-                onDelete={s.deleteSelected}
               />
               <TrafficList
                 flows={s.flowStore.flows}
