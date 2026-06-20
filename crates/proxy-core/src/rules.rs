@@ -176,6 +176,118 @@ pub struct AutoResponder {
     pub active_scenario_id: Option<String>,
 }
 
+/// Lightweight autoresponder state for the frontend. Rule response bodies and
+/// full header tables stay in Rust and are fetched only for the selected rule.
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoResponderSummary {
+    pub scenarios: Vec<ScenarioSummary>,
+    pub active_scenario_id: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioSummary {
+    pub id: String,
+    pub name: String,
+    pub rules: Vec<RuleSummary>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleSummary {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub fire_limit: Option<u32>,
+    pub repeat: bool,
+    pub matcher: Matcher,
+    pub action: ActionSummary,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ActionSummary {
+    Respond {
+        status: u16,
+        content_type: Option<String>,
+    },
+    MapLocal {
+        status: u16,
+    },
+    Block,
+    SetRequestHeader {
+        name: String,
+    },
+    SetResponseHeader {
+        name: String,
+    },
+    SetStatus {
+        status: u16,
+    },
+    RewriteResponseBody,
+}
+
+impl From<&Action> for ActionSummary {
+    fn from(action: &Action) -> Self {
+        match action {
+            Action::Respond {
+                status,
+                content_type,
+                ..
+            } => Self::Respond {
+                status: *status,
+                content_type: content_type.clone(),
+            },
+            Action::MapLocal { status, .. } => Self::MapLocal { status: *status },
+            Action::Block => Self::Block,
+            Action::SetRequestHeader { name, .. } => Self::SetRequestHeader { name: name.clone() },
+            Action::SetResponseHeader { name, .. } => {
+                Self::SetResponseHeader { name: name.clone() }
+            }
+            Action::SetStatus { status } => Self::SetStatus { status: *status },
+            Action::RewriteResponseBody { .. } => Self::RewriteResponseBody,
+        }
+    }
+}
+
+impl From<&Rule> for RuleSummary {
+    fn from(rule: &Rule) -> Self {
+        Self {
+            id: rule.id.clone(),
+            name: rule.name.clone(),
+            enabled: rule.enabled,
+            fire_limit: rule.fire_limit,
+            repeat: rule.repeat,
+            matcher: rule.matcher.clone(),
+            action: ActionSummary::from(&rule.action),
+        }
+    }
+}
+
+impl From<&Scenario> for ScenarioSummary {
+    fn from(scenario: &Scenario) -> Self {
+        Self {
+            id: scenario.id.clone(),
+            name: scenario.name.clone(),
+            rules: scenario.rules.iter().map(RuleSummary::from).collect(),
+        }
+    }
+}
+
+impl From<&AutoResponder> for AutoResponderSummary {
+    fn from(autoresponder: &AutoResponder) -> Self {
+        Self {
+            scenarios: autoresponder
+                .scenarios
+                .iter()
+                .map(ScenarioSummary::from)
+                .collect(),
+            active_scenario_id: autoresponder.active_scenario_id.clone(),
+        }
+    }
+}
+
 /// A response built entirely by a rule (no upstream request was made).
 #[derive(Clone, Debug)]
 pub struct SyntheticResponse {
@@ -562,6 +674,27 @@ impl AutoResponder {
             }],
             active_scenario_id: None,
         }
+    }
+}
+
+pub fn blank_rule(id: String) -> Rule {
+    Rule {
+        id,
+        name: "New rule".to_string(),
+        enabled: true,
+        fire_limit: None,
+        repeat: false,
+        matcher: Matcher {
+            method: None,
+            url: String::new(),
+            url_match: MatchKind::Contains,
+        },
+        action: Action::Respond {
+            status: 200,
+            headers: Vec::new(),
+            body: "{\n  \"mocked\": true\n}".to_string(),
+            content_type: Some("application/json".to_string()),
+        },
     }
 }
 

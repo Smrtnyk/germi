@@ -1,13 +1,12 @@
-//! Persistence for the autoresponder config (scenarios) under the app data dir,
-//! alongside the CA. Plain JSON — the config is small and human-inspectable.
+//! Persistence for small proxy-wide settings. Autoresponder scenarios and rules
+//! live in the normalized `SQLite` store in `rule_store.rs`.
 
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use proxy_core::{AutoResponder, ProxySettings};
+use proxy_core::ProxySettings;
 
-const FILE: &str = "autoresponder.json";
 const SETTINGS_FILE: &str = "settings.json";
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -33,25 +32,6 @@ fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     result
-}
-
-/// Load the saved autoresponder, or `None` if absent / unreadable / malformed.
-pub fn load_autoresponder(dir: &Path) -> Option<AutoResponder> {
-    let text = std::fs::read_to_string(dir.join(FILE)).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-/// Best-effort save. Logs (does not panic) on failure — the app-data dir is not
-/// auto-created on Linux, so create it first.
-pub fn save_autoresponder(dir: &Path, ar: &AutoResponder) {
-    let result = std::fs::create_dir_all(dir).and_then(|()| {
-        let text = serde_json::to_string_pretty(ar)
-            .map_err(std::io::Error::other)?;
-        write_atomic(&dir.join(FILE), text.as_bytes())
-    });
-    if let Err(e) = result {
-        tracing::warn!("failed to persist autoresponder: {e}");
-    }
 }
 
 /// Load saved proxy settings, or `None` if absent / unreadable / malformed.

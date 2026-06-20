@@ -95,16 +95,18 @@ Engine (proxy-core — these work without the GUI system libs):
 - **serde ↔ TS mirroring:** every DTO crossing the IPC boundary uses
   `#[serde(rename_all = "camelCase")]` (and `rename_all_fields = "camelCase"` on
   enums — enum-level `rename_all` does NOT rename variant fields). `src/types.ts`
-  must mirror these exactly. Use `#[serde(default)]` on new fields so persisted
-  config (`autoresponder.json`) from older versions still deserializes.
+  must mirror these exactly. Use `#[serde(default)]` on new fields so legacy and
+  exported rule JSON from older versions still deserializes.
 - **Tauri commands:** async commands must return `Result<_, String>` and must
   **clone the `Arc` out of `State` before any `.await`** (never hold the `State`
   borrow across an await). JS passes camelCase arg names; Rust receives
   snake_case (Tauri converts).
-- **Persistence:** the CA (`germi-ca.{pem,key,der}`), `autoresponder.json`, and
-  `settings.json` (proxy-wide settings, e.g. host exclusions) live in the OS
-  app-data dir (`AppState.ca_dir`); `src-tauri/src/persist.rs` handles the latter
-  two. Scenarios + settings are loaded on startup and saved on change (debounced).
+- **Persistence:** the CA (`germi-ca.{pem,key,der}`),
+  `autoresponder.sqlite3`, and `settings.json` (proxy-wide settings, e.g. host
+  exclusions) live in the OS app-data dir (`AppState.ca_dir`).
+  `src-tauri/src/rule_store.rs` owns normalized scenario/rule persistence and
+  migrates the old `autoresponder.json` once; `src-tauri/src/persist.rs` handles
+  settings.
   **Traffic is deliberately NOT auto-persisted** (privacy: captured tokens/bodies
   shouldn't silently hit disk) — it's explicit Save/Open of a lossless `.germi`
   session file (`proxy-core/src/session.rs`, base64 bodies). Don't add background
@@ -119,7 +121,9 @@ Engine (proxy-core — these work without the GUI system libs):
   override by exporting those vars.
 - **Frontend perf:** the traffic list and inspector body are virtualized
   (`@tanstack/react-virtual`); **CodeMirror is lazy-loaded** (`React.lazy`) in
-  `AutoresponderPanel.tsx` so it doesn't bloat startup. Keep it that way.
+  `AutoresponderPanel.tsx` so it doesn't bloat startup. Autoresponder IPC carries
+  lightweight rule summaries; full headers/bodies are fetched only for the
+  selected rule. Keep those boundaries intact.
 - **Mock rules are one-per-request, full-URL match** (Fiddler-style, no
   collapsing) — see `respond_rule_from_flow` in `rules.rs`. The `respond` action's
   `headers` field is honored by the engine; Content-Type has its own dedicated

@@ -14,7 +14,16 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { api } from "../ipc";
 import { decodeFlowIds, FLOW_DRAG_MIME, hasFlowDrag, RULE_DRAG_MIME } from "../dnd";
-import type { Action, ActionKind, AutoResponder, Rule, Scenario } from "../types";
+import type {
+  Action,
+  ActionKind,
+  ActionSummary,
+  AutoResponderSummary,
+  BulkMockEvent,
+  Rule,
+  RuleSummary,
+  ScenarioSummary,
+} from "../types";
 import { useResizable } from "../useResizable";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
@@ -24,16 +33,38 @@ import { RuleTester } from "./RuleTester";
 // only when a mock body is actually edited — keeps app startup light.
 const BodyEditor = lazy(() => import("./BodyEditor").then((m) => ({ default: m.BodyEditor })));
 
+interface ScenarioActions {
+  activate: (scenarioId: string | null) => void;
+  create: () => Promise<ScenarioSummary | null>;
+  rename: (scenarioId: string, name: string) => void;
+  delete: (scenarioId: string) => void;
+  resetState: (scenarioId: string | null) => void;
+}
+
+interface RuleActions {
+  create: (scenarioId: string) => Promise<RuleSummary | null>;
+  load: (ruleId: string) => Promise<Rule | null>;
+  update: (scenarioId: string, rule: Rule) => Promise<RuleSummary | null>;
+  delete: (scenarioId: string, ruleId: string) => void;
+  duplicate: (scenarioId: string, ruleId: string) => Promise<RuleSummary | null>;
+  reorder: (scenarioId: string, ruleId: string, toId: string) => void;
+}
+
+interface TransferActions {
+  exportRules: (scenarioId: string | null) => void;
+  importRules: (replace: boolean) => void;
+  dropMock: (ids: string[], scenarioId: string | null) => void;
+}
+
 export interface AutoresponderPanelProps {
-  ar: AutoResponder;
-  onChange: (ar: AutoResponder) => void;
+  ar: AutoResponderSummary;
+  scenarioActions: ScenarioActions;
+  ruleActions: RuleActions;
+  transferActions: TransferActions;
   /** When set (e.g. via "Mock this"), select this rule for editing. */
   selectRuleId?: string | null;
-  onResetState: (scenarioId: string | null) => void;
   ruleHits: Record<string, number>;
-  onExportRules: (scenarioId: string | null) => void;
-  onImportRules: (replace: boolean) => void;
-  onDropMock: (ids: string[], scenarioId: string | null) => void;
+  bulkMockProgress: BulkMockEvent | null;
 }
 
 const ACTION_KINDS: { value: ActionKind; label: string }[] = [
@@ -79,7 +110,7 @@ function middleTruncate(s: string, max = 46): string {
   return `${s.slice(0, head)}…${s.slice(s.length - tail)}`;
 }
 
-function actionSummary(a: Action): string {
+function actionSummary(a: ActionSummary): string {
   switch (a.kind) {
     case "respond":
       return `${a.status}${a.contentType ? " " + a.contentType.split(";")[0] : ""}`;
@@ -98,23 +129,11 @@ function actionSummary(a: Action): string {
   }
 }
 
-function ruleSummary(r: Rule): string {
+function ruleSummary(r: RuleSummary): string {
   return `${r.matcher.method || "ANY"} · ${r.matcher.url || "*"} → ${actionSummary(r.action)}`;
 }
 
-function newRule(): Rule {
-  return {
-    id: crypto.randomUUID(),
-    name: "New rule",
-    enabled: true,
-    fireLimit: null,
-    repeat: false,
-    matcher: { method: null, url: "", urlMatch: "contains" },
-    action: defaultAction("respond"),
-  };
-}
-
-function fireBadge(rule: Rule): string | null {
+function fireBadge(rule: RuleSummary): string | null {
   if (rule.fireLimit === null) return null;
   if (rule.repeat) return "loop";
   return rule.fireLimit === 1 ? "once" : `x${rule.fireLimit}`;
@@ -184,14 +203,14 @@ function RuleListItem({
   onDrop,
   onDragEnd,
 }: {
-  rule: Rule;
+  rule: RuleSummary;
   selected: boolean;
   hits: number;
   draggable: boolean;
   dragOver: boolean;
   onSelect: () => void;
   onToggle: (enabled: boolean) => void;
-  onContextMenu: (e: ReactMouseEvent) => void;
+  onContextMenu: (event: ReactMouseEvent) => void;
   onDragStart: () => void;
   onDragOver: () => void;
   onDrop: () => void;
@@ -255,106 +274,89 @@ function RuleListItem({
 
 type SaveState = "idle" | "saving" | "saved";
 
-interface ScenarioRules {
-  saveState: SaveState;
-  patch: (p: Partial<Scenario>) => void;
-  addRule: () => void;
-  patchRule: (id: string, p: Partial<Rule>) => void;
-  deleteRule: (id: string) => void;
-  duplicateRule: (id: string) => void;
-  reorder: (dragId: string | null, toId: string) => void;
-  moveToTop: (id: string) => void;
-  moveToBottom: (id: string) => void;
-}
-
-function useScenarioRules(
-  active: Scenario,
-  onPatch: (patch: Partial<Scenario>) => void,
+function useSelectedRule(
+  scenarioId: string,
   selectedRuleId: string | null,
-  setSelectedRuleId: (id: string | null) => void,
-): ScenarioRules {
+  onLoadRule: (ruleId: string) => Promise<Rule | null>,
+  onUpdateRule: (scenarioId: string, rule: Rule) => Promise<RuleSummary | null>,
+) {
+  const [rule, setRule] = useState<Rule | null>(null);
+  const [loading, setLoading] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const saveTimer = useRef<number | null>(null);
+  const pendingRule = useRef<Rule | null>(null);
+  const loadGeneration = useRef(0);
+  const loadRuleRef = useRef(onLoadRule);
+  const updateRuleRef = useRef(onUpdateRule);
+  loadRuleRef.current = onLoadRule;
+  updateRuleRef.current = onUpdateRule;
+
+  useEffect(() => {
+    const generation = ++loadGeneration.current;
+    if (!selectedRuleId) {
+      setRule(null);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    const load = async () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+      const pending = pendingRule.current;
+      pendingRule.current = null;
+      if (pending) await updateRuleRef.current(scenarioId, pending);
+      return loadRuleRef.current(selectedRuleId);
+    };
+    void load().then((loaded) => {
+      if (loadGeneration.current === generation) {
+        setRule(loaded);
+        setLoading(false);
+        setSaveState("idle");
+      }
+    });
+  }, [scenarioId, selectedRuleId]);
 
   useEffect(() => {
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
+      const pending = pendingRule.current;
+      if (pending) void updateRuleRef.current(scenarioId, pending);
     };
-  }, []);
+  }, [scenarioId]);
 
-  function patch(p: Partial<Scenario>) {
-    onPatch(p);
+  function patch(changes: Partial<Rule>) {
+    if (!rule) return;
+    const next = { ...rule, ...changes };
+    setRule(next);
+    pendingRule.current = next;
     setSaveState("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => setSaveState("saved"), 650);
-  }
-  function setRules(rules: Rule[]) {
-    patch({ rules });
-  }
-  function addRule() {
-    const r = newRule();
-    setRules([...active.rules, r]);
-    setSelectedRuleId(r.id);
-  }
-  function patchRule(id: string, p: Partial<Rule>) {
-    setRules(active.rules.map((r) => (r.id === id ? { ...r, ...p } : r)));
-  }
-  function deleteRule(id: string) {
-    setRules(active.rules.filter((r) => r.id !== id));
-    if (selectedRuleId === id) setSelectedRuleId(null);
-  }
-  function duplicateRule(id: string) {
-    const idx = active.rules.findIndex((r) => r.id === id);
-    if (idx === -1) return;
-    const orig = active.rules[idx];
-    const copy: Rule = {
-      ...orig,
-      id: crypto.randomUUID(),
-      name: `${orig.name} copy`,
-      matcher: { ...orig.matcher },
-      action: structuredClone(orig.action),
-    };
-    setRules([...active.rules.slice(0, idx + 1), copy, ...active.rules.slice(idx + 1)]);
-    setSelectedRuleId(copy.id);
-  }
-  function reorder(dragId: string | null, toId: string) {
-    if (!dragId || dragId === toId) return;
-    const arr = [...active.rules];
-    const from = arr.findIndex((r) => r.id === dragId);
-    const to = arr.findIndex((r) => r.id === toId);
-    if (from === -1 || to === -1) return;
-    const [moved] = arr.splice(from, 1);
-    arr.splice(to, 0, moved);
-    setRules(arr);
-  }
-  function moveToTop(id: string) {
-    const arr = [...active.rules];
-    const idx = arr.findIndex((r) => r.id === id);
-    if (idx <= 0) return;
-    const [moved] = arr.splice(idx, 1);
-    arr.unshift(moved);
-    setRules(arr);
-  }
-  function moveToBottom(id: string) {
-    const arr = [...active.rules];
-    const idx = arr.findIndex((r) => r.id === id);
-    if (idx === -1 || idx === arr.length - 1) return;
-    const [moved] = arr.splice(idx, 1);
-    arr.push(moved);
-    setRules(arr);
+    saveTimer.current = window.setTimeout(() => {
+      const pending = pendingRule.current;
+      pendingRule.current = null;
+      saveTimer.current = null;
+      if (!pending) return;
+      void updateRuleRef.current(scenarioId, pending).then((summary) => {
+        if (summary) setSaveState("saved");
+      });
+    }, 300);
   }
 
-  return {
-    saveState,
-    patch,
-    addRule,
-    patchRule,
-    deleteRule,
-    duplicateRule,
-    reorder,
-    moveToTop,
-    moveToBottom,
-  };
+  function clearPending() {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = null;
+    pendingRule.current = null;
+  }
+
+  async function flush() {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = null;
+    const pending = pendingRule.current;
+    pendingRule.current = null;
+    if (pending) await updateRuleRef.current(scenarioId, pending);
+  }
+
+  return { rule, loading, saveState, patch, clearPending, flush };
 }
 
 function useRuleSelection(selectRuleId?: string | null) {
@@ -431,42 +433,45 @@ interface RuleMenuActions {
   onDelete: (id: string) => void;
 }
 
-function ruleMenuItems(rule: Rule, canReorder: boolean, a: RuleMenuActions): MenuItem[] {
+function ruleMenuItems(
+  rule: RuleSummary,
+  canReorder: boolean,
+  actions: RuleMenuActions,
+): MenuItem[] {
   const items: MenuItem[] = [];
   if (canReorder) {
     items.push(
-      { label: "Move to top", onClick: () => a.onMoveToTop(rule.id), disabled: false },
-      { label: "Move to bottom", onClick: () => a.onMoveToBottom(rule.id), disabled: false },
+      { label: "Move to top", onClick: () => actions.onMoveToTop(rule.id) },
+      { label: "Move to bottom", onClick: () => actions.onMoveToBottom(rule.id) },
       { label: "", sep: true, onClick: () => {} },
     );
   }
   items.push(
-    { label: "Duplicate rule", onClick: () => a.onDuplicate(rule.id) },
+    { label: "Duplicate rule", onClick: () => actions.onDuplicate(rule.id) },
     {
       label: rule.enabled ? "Disable rule" : "Enable rule",
-      onClick: () => a.onToggle(rule.id, !rule.enabled),
+      onClick: () => actions.onToggle(rule.id, !rule.enabled),
     },
     { label: "", sep: true, onClick: () => {} },
-    { label: "Delete rule", onClick: () => a.onDelete(rule.id), danger: true },
+    { label: "Delete rule", onClick: () => actions.onDelete(rule.id), danger: true },
   );
   return items;
 }
 
-interface RuleMenu {
-  openMenu: (e: ReactMouseEvent, rule: Rule) => void;
-  menuEl: ReactElement | null;
-}
-
-function useRuleMenu(canReorder: boolean, actions: RuleMenuActions): RuleMenu {
-  const [menu, setMenu] = useState<{ x: number; y: number; rule: Rule } | null>(null);
-
-  function openMenu(e: ReactMouseEvent, rule: Rule) {
-    e.preventDefault();
-    e.stopPropagation();
-    setMenu({ x: e.clientX, y: e.clientY, rule });
+function useRuleMenu(
+  canReorder: boolean,
+  actions: RuleMenuActions,
+): {
+  openMenu: (event: ReactMouseEvent, rule: RuleSummary) => void;
+  menuElement: ReactElement | null;
+} {
+  const [menu, setMenu] = useState<{ x: number; y: number; rule: RuleSummary } | null>(null);
+  function openMenu(event: ReactMouseEvent, rule: RuleSummary) {
+    event.preventDefault();
+    event.stopPropagation();
+    setMenu({ x: event.clientX, y: event.clientY, rule });
   }
-
-  const menuEl = menu ? (
+  const menuElement = menu ? (
     <ContextMenu
       x={menu.x}
       y={menu.y}
@@ -474,8 +479,7 @@ function useRuleMenu(canReorder: boolean, actions: RuleMenuActions): RuleMenu {
       onClose={() => setMenu(null)}
     />
   ) : null;
-
-  return { openMenu, menuEl };
+  return { openMenu, menuElement };
 }
 
 interface RuleListBehavior {
@@ -547,8 +551,8 @@ function RuleList({
   onAdd,
   behavior,
 }: {
-  rules: Rule[];
-  shownRules: Rule[];
+  rules: RuleSummary[];
+  shownRules: RuleSummary[];
   query: string;
   setQuery: (q: string) => void;
   onAdd: () => void;
@@ -563,7 +567,13 @@ function RuleList({
   );
 }
 
-function VirtualRuleList({ rules, behavior }: { rules: Rule[]; behavior: RuleListBehavior }) {
+function VirtualRuleList({
+  rules,
+  behavior,
+}: {
+  rules: RuleSummary[];
+  behavior: RuleListBehavior;
+}) {
   const {
     selectedRuleId,
     setSelectedRuleId,
@@ -580,7 +590,7 @@ function VirtualRuleList({ rules, behavior }: { rules: Rule[]; behavior: RuleLis
     onMoveToBottom,
     onReorder,
   } = behavior;
-  const { openMenu, menuEl } = useRuleMenu(canReorder, {
+  const { openMenu, menuElement } = useRuleMenu(canReorder, {
     onMoveToTop,
     onMoveToBottom,
     onDuplicate,
@@ -639,40 +649,44 @@ function VirtualRuleList({ rules, behavior }: { rules: Rule[]; behavior: RuleLis
           );
         })}
       </div>
-      {menuEl}
+      {menuElement}
     </div>
   );
 }
 
 function RuleEditorPane({
-  rules,
+  scenarioId,
   selectedRule,
+  loading,
   ruleHits,
   onPatchRule,
   onDeleteRule,
 }: {
-  rules: Rule[];
+  scenarioId: string;
   selectedRule: Rule | null;
+  loading: boolean;
   ruleHits: Record<string, number>;
-  onPatchRule: (id: string, p: Partial<Rule>) => void;
+  onPatchRule: (p: Partial<Rule>) => void;
   onDeleteRule: (id: string) => void;
 }) {
   return (
     <section className="rule-editor">
       {!selectedRule ? (
-        <div className="muted pad">Select a rule to edit it, or add one.</div>
+        <div className="muted pad">
+          {loading ? "Loading rule…" : "Select a rule to edit it, or add one."}
+        </div>
       ) : (
         <RuleEditor
           key={selectedRule.id}
           rule={selectedRule}
           hits={ruleHits[selectedRule.id] ?? 0}
-          onPatch={(p) => onPatchRule(selectedRule.id, p)}
+          onPatch={onPatchRule}
           onDelete={() => onDeleteRule(selectedRule.id)}
         />
       )}
 
       <RuleTester
-        rules={{ rules }}
+        scenarioId={scenarioId}
         seedMethod={selectedRule?.matcher.method ?? undefined}
         seedUrl={selectedRule?.matcher.url || undefined}
       />
@@ -680,39 +694,67 @@ function RuleEditorPane({
   );
 }
 
-function ScenarioView({
-  active,
-  onPatch,
-  onRequestDelete,
-  selectRuleId,
-  onResetState,
-  ruleHits,
-  onExport,
-  dropActive,
-  dropProps,
-}: {
-  active: Scenario;
-  onPatch: (patch: Partial<Scenario>) => void;
-  onRequestDelete: () => void;
-  selectRuleId?: string | null;
-  onResetState: () => void;
-  ruleHits: Record<string, number>;
-  onExport: () => void;
-  dropActive: boolean;
-  dropProps: FlowDropZone;
-}) {
-  const sel = useRuleSelection(selectRuleId);
-  const {
-    selectedRuleId,
-    setSelectedRuleId,
-    query,
-    setQuery,
-    dragId,
-    setDragId,
-    overId,
-    setOverId,
-  } = sel;
-  const rules = useScenarioRules(active, onPatch, selectedRuleId, setSelectedRuleId);
+function useScenarioName(
+  scenario: ScenarioSummary,
+  onRenameScenario: (scenarioId: string, name: string) => void,
+) {
+  const [name, setName] = useState(scenario.name);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const timer = useRef<number | null>(null);
+  const pendingName = useRef<string | null>(null);
+  const renameRef = useRef(onRenameScenario);
+  renameRef.current = onRenameScenario;
+
+  useEffect(() => {
+    setName(scenario.name);
+    setSaveState("idle");
+  }, [scenario.id, scenario.name]);
+
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+      const pending = pendingName.current;
+      if (pending !== null) renameRef.current(scenario.id, pending);
+    },
+    [scenario.id],
+  );
+
+  function change(next: string) {
+    setName(next);
+    pendingName.current = next;
+    setSaveState("saving");
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => {
+      timer.current = null;
+      pendingName.current = null;
+      renameRef.current(scenario.id, next);
+      setSaveState("saved");
+    }, 300);
+  }
+
+  function flush() {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    const pending = pendingName.current;
+    pendingName.current = null;
+    if (pending !== null) renameRef.current(scenario.id, pending);
+  }
+
+  return { name, change, saveState, flush };
+}
+
+function useScenarioWorkspace(
+  active: ScenarioSummary,
+  selectRuleId: string | null | undefined,
+  ruleActions: RuleActions,
+) {
+  const selection = useRuleSelection(selectRuleId);
+  const editor = useSelectedRule(
+    active.id,
+    selection.selectedRuleId,
+    ruleActions.load,
+    ruleActions.update,
+  );
   const rulesRef = useRef<HTMLDivElement>(null);
   const listResize = useResizable({
     initial: 240,
@@ -721,7 +763,7 @@ function ScenarioView({
     storageKey: "germi.ruleListWidth",
   });
 
-  const q = query.trim().toLowerCase();
+  const q = selection.query.trim().toLowerCase();
   const shownRules = useMemo(
     () =>
       q
@@ -731,83 +773,213 @@ function ScenarioView({
         : active.rules,
     [active.rules, q],
   );
-  const selectedRule = active.rules.find((r) => r.id === selectedRuleId) ?? null;
+
+  async function addRule() {
+    const created = await ruleActions.create(active.id);
+    if (created) selection.setSelectedRuleId(created.id);
+  }
+
+  async function toggleRule(id: string, enabled: boolean) {
+    if (editor.rule?.id === id) {
+      editor.patch({ enabled });
+      return;
+    }
+    const rule = await ruleActions.load(id);
+    if (rule) await ruleActions.update(active.id, { ...rule, enabled });
+  }
+
+  async function duplicateRule(id: string) {
+    if (editor.rule?.id === id) await editor.flush();
+    const created = await ruleActions.duplicate(active.id, id);
+    if (created) selection.setSelectedRuleId(created.id);
+  }
+
+  function deleteRule(id: string) {
+    if (selection.selectedRuleId === id) {
+      editor.clearPending();
+      selection.setSelectedRuleId(null);
+    }
+    ruleActions.delete(active.id, id);
+  }
+
+  return {
+    selection,
+    editor,
+    rulesRef,
+    listResize,
+    shownRules,
+    addRule,
+    toggleRule,
+    duplicateRule,
+    deleteRule,
+  };
+}
+
+type ScenarioWorkspace = ReturnType<typeof useScenarioWorkspace>;
+type ScenarioNameEditor = ReturnType<typeof useScenarioName>;
+
+function ScenarioHeader({
+  active,
+  nameEditor,
+  ruleSaveState,
+  actions,
+}: {
+  active: ScenarioSummary;
+  nameEditor: ScenarioNameEditor;
+  ruleSaveState: SaveState;
+  actions: { reset: () => void; export: () => void; requestDelete: () => void };
+}) {
+  return (
+    <div className="scenario-head">
+      <input
+        className="scenario-name"
+        value={nameEditor.name}
+        onChange={(e) => nameEditor.change(e.target.value)}
+      />
+      <span className="muted small scenario-status">
+        {active.rules.filter((rule) => rule.enabled).length}/{active.rules.length} active
+        {(nameEditor.saveState === "saving" || ruleSaveState === "saving") && (
+          <span className="save-state"> · saving…</span>
+        )}
+        {(nameEditor.saveState === "saved" || ruleSaveState === "saved") && (
+          <span className="save-state ok"> · saved ✓</span>
+        )}
+      </span>
+      <div className="scenario-actions">
+        <button
+          className="btn"
+          title="Clear per-rule hit counters so match-once / sequenced rules fire from the start again."
+          onClick={actions.reset}
+        >
+          Reset state
+        </button>
+        <button
+          className="btn"
+          title="Export this scenario to a shareable .germi-rules file"
+          onClick={actions.export}
+        >
+          Export scenario
+        </button>
+        <button className="btn danger" onClick={actions.requestDelete}>
+          Delete scenario
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ScenarioRuleWorkspace({
+  active,
+  workspace,
+  ruleHits,
+  ruleActions,
+}: {
+  active: ScenarioSummary;
+  workspace: ScenarioWorkspace;
+  ruleHits: Record<string, number>;
+  ruleActions: RuleActions;
+}) {
+  const { selection, editor, listResize } = workspace;
+  const behavior: RuleListBehavior = {
+    selectedRuleId: selection.selectedRuleId,
+    setSelectedRuleId: selection.setSelectedRuleId,
+    canReorder: !selection.query.trim(),
+    dragId: selection.dragId,
+    setDragId: selection.setDragId,
+    overId: selection.overId,
+    setOverId: selection.setOverId,
+    ruleHits,
+    onToggle: (id, enabled) => void workspace.toggleRule(id, enabled),
+    onDuplicate: (id) => void workspace.duplicateRule(id),
+    onDelete: workspace.deleteRule,
+    onMoveToTop: (id) => {
+      const first = active.rules[0];
+      if (first && first.id !== id) ruleActions.reorder(active.id, id, first.id);
+    },
+    onMoveToBottom: (id) => {
+      const last = active.rules[active.rules.length - 1];
+      if (last && last.id !== id) ruleActions.reorder(active.id, id, last.id);
+    },
+    onReorder: (toId) => {
+      if (selection.dragId) ruleActions.reorder(active.id, selection.dragId, toId);
+    },
+  };
 
   return (
-    <div className={`scenario-body ${dropActive ? "drop-target" : ""}`} {...dropProps}>
-      <div className="scenario-head">
-        <input
-          className="scenario-name"
-          value={active.name}
-          onChange={(e) => rules.patch({ name: e.target.value })}
-        />
-        <span className="muted small scenario-status">
-          {active.rules.filter((r) => r.enabled).length}/{active.rules.length} active
-          {rules.saveState === "saving" && <span className="save-state"> · saving…</span>}
-          {rules.saveState === "saved" && <span className="save-state ok"> · saved ✓</span>}
-        </span>
-        <div className="scenario-actions">
-          <button
-            className="btn"
-            title="Clear per-rule hit counters so match-once / sequenced rules fire from the start again."
-            onClick={onResetState}
-          >
-            Reset state
-          </button>
-          <button
-            className="btn"
-            title="Export this scenario to a shareable .germi-rules file"
-            onClick={onExport}
-          >
-            Export scenario
-          </button>
-          <button className="btn danger" onClick={onRequestDelete}>
-            Delete scenario
-          </button>
-        </div>
-      </div>
+    <div
+      className="rules"
+      ref={workspace.rulesRef}
+      style={{
+        gridTemplateColumns: `minmax(0, ${listResize.size}px) 6px minmax(280px, 1fr)`,
+      }}
+    >
+      <RuleList
+        rules={active.rules}
+        shownRules={workspace.shownRules}
+        query={selection.query}
+        setQuery={selection.setQuery}
+        onAdd={() => void workspace.addRule()}
+        behavior={behavior}
+      />
 
-      <div
-        className="rules"
-        ref={rulesRef}
-        style={{
-          gridTemplateColumns: `minmax(0, ${listResize.size}px) 6px minmax(280px, 1fr)`,
+      <div className="resizer" onPointerDown={listResize.onPointerDown} title="Drag to resize" />
+
+      <RuleEditorPane
+        scenarioId={active.id}
+        selectedRule={editor.rule}
+        loading={editor.loading}
+        ruleHits={ruleHits}
+        onPatchRule={editor.patch}
+        onDeleteRule={workspace.deleteRule}
+      />
+    </div>
+  );
+}
+
+function ScenarioView({
+  active,
+  onRequestDelete,
+  selectRuleId,
+  ruleHits,
+  drop,
+  scenarioActions,
+  ruleActions,
+  onExport,
+}: {
+  active: ScenarioSummary;
+  onRequestDelete: () => void;
+  selectRuleId?: string | null;
+  ruleHits: Record<string, number>;
+  drop: { active: boolean; props: FlowDropZone };
+  scenarioActions: ScenarioActions;
+  ruleActions: RuleActions;
+  onExport: () => void;
+}) {
+  const workspace = useScenarioWorkspace(active, selectRuleId, ruleActions);
+  const nameEditor = useScenarioName(active, scenarioActions.rename);
+  const exportScenario = () => {
+    nameEditor.flush();
+    void workspace.editor.flush().then(onExport);
+  };
+
+  return (
+    <div className={`scenario-body ${drop.active ? "drop-target" : ""}`} {...drop.props}>
+      <ScenarioHeader
+        active={active}
+        nameEditor={nameEditor}
+        ruleSaveState={workspace.editor.saveState}
+        actions={{
+          reset: () => scenarioActions.resetState(active.id),
+          export: exportScenario,
+          requestDelete: onRequestDelete,
         }}
-      >
-        <RuleList
-          rules={active.rules}
-          shownRules={shownRules}
-          query={query}
-          setQuery={setQuery}
-          onAdd={rules.addRule}
-          behavior={{
-            selectedRuleId,
-            setSelectedRuleId,
-            canReorder: !q,
-            dragId,
-            setDragId,
-            overId,
-            setOverId,
-            ruleHits,
-            onToggle: (id, enabled) => rules.patchRule(id, { enabled }),
-            onDuplicate: rules.duplicateRule,
-            onDelete: rules.deleteRule,
-            onMoveToTop: rules.moveToTop,
-            onMoveToBottom: rules.moveToBottom,
-            onReorder: (toId) => rules.reorder(dragId, toId),
-          }}
-        />
-
-        <div className="resizer" onPointerDown={listResize.onPointerDown} title="Drag to resize" />
-
-        <RuleEditorPane
-          rules={active.rules}
-          selectedRule={selectedRule}
-          ruleHits={ruleHits}
-          onPatchRule={rules.patchRule}
-          onDeleteRule={rules.deleteRule}
-        />
-      </div>
+      />
+      <ScenarioRuleWorkspace
+        active={active}
+        workspace={workspace}
+        ruleHits={ruleHits}
+        ruleActions={ruleActions}
+      />
     </div>
   );
 }
@@ -822,7 +994,7 @@ function ScenarioTabs({
   onReplace,
   onExportAll,
 }: {
-  ar: AutoResponder;
+  ar: AutoResponderSummary;
   zone: string | null;
   zoneProps: FlowDrop["zoneProps"];
   onActivate: (id: string | null) => void;
@@ -890,43 +1062,18 @@ function ScenarioTabs({
 
 export function AutoresponderPanel({
   ar,
-  onChange,
+  scenarioActions,
+  ruleActions,
+  transferActions,
   selectRuleId,
-  onResetState,
   ruleHits,
-  onExportRules,
-  onImportRules,
-  onDropMock,
+  bulkMockProgress,
 }: AutoresponderPanelProps) {
-  const [pendingDelete, setPendingDelete] = useState<Scenario | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<ScenarioSummary | null>(null);
   const [pendingReplace, setPendingReplace] = useState(false);
-  const { zone, zoneProps } = useFlowDrop(onDropMock);
+  const { zone, zoneProps } = useFlowDrop(transferActions.dropMock);
 
   const active = ar.scenarios.find((s) => s.id === ar.activeScenarioId) ?? null;
-
-  function activate(id: string | null) {
-    onChange({ ...ar, activeScenarioId: id });
-  }
-  function addScenario() {
-    const s: Scenario = {
-      id: crypto.randomUUID(),
-      name: `Scenario ${ar.scenarios.length + 1}`,
-      rules: [],
-    };
-    onChange({ scenarios: [...ar.scenarios, s], activeScenarioId: s.id });
-  }
-  function patchScenario(id: string, patch: Partial<Scenario>) {
-    onChange({
-      ...ar,
-      scenarios: ar.scenarios.map((s) => (s.id === id ? { ...s, ...patch } : s)),
-    });
-  }
-  function deleteScenario(id: string) {
-    onChange({
-      scenarios: ar.scenarios.filter((s) => s.id !== id),
-      activeScenarioId: ar.activeScenarioId === id ? null : ar.activeScenarioId,
-    });
-  }
 
   return (
     <div className="autoresponder">
@@ -934,58 +1081,125 @@ export function AutoresponderPanel({
         ar={ar}
         zone={zone}
         zoneProps={zoneProps}
-        onActivate={activate}
-        onAdd={addScenario}
-        onImport={() => onImportRules(false)}
+        onActivate={scenarioActions.activate}
+        onAdd={() => void scenarioActions.create()}
+        onImport={() => transferActions.importRules(false)}
         onReplace={() => setPendingReplace(true)}
-        onExportAll={() => onExportRules(null)}
+        onExportAll={() => transferActions.exportRules(null)}
       />
 
-      {!active ? (
-        <div
-          className={`off-state ${zone === "__off__" ? "drop-target" : ""}`}
-          {...zoneProps("__off__", null)}
-        >
-          <h3>Autoresponder is off</h3>
-          <p className="muted">
-            Capturing traffic only — nothing is mocked. Pick a scenario tab above to make its rules
-            live, create a new one, or drag requests here to mock them.
-          </p>
-          {ar.scenarios.length === 0 && (
-            <button className="btn primary" onClick={addScenario}>
-              + Create a scenario
-            </button>
-          )}
-        </div>
-      ) : (
+      <BulkMockProgress event={bulkMockProgress} />
+
+      {active ? (
         <ScenarioView
           key={active.id}
           active={active}
-          onPatch={(patch) => patchScenario(active.id, patch)}
           onRequestDelete={() => setPendingDelete(active)}
           selectRuleId={selectRuleId}
-          onResetState={() => onResetState(active.id)}
           ruleHits={ruleHits}
-          onExport={() => onExportRules(active.id)}
-          dropActive={zone === "__body__"}
-          dropProps={zoneProps("__body__", active.id)}
+          drop={{ active: zone === "__body__", props: zoneProps("__body__", active.id) }}
+          scenarioActions={scenarioActions}
+          ruleActions={ruleActions}
+          onExport={() => transferActions.exportRules(active.id)}
+        />
+      ) : (
+        <AutoresponderOffState
+          empty={ar.scenarios.length === 0}
+          dropActive={zone === "__off__"}
+          dropProps={zoneProps("__off__", null)}
+          onCreate={() => void scenarioActions.create()}
         />
       )}
 
+      <AutoresponderDialogs
+        ar={ar}
+        pendingDelete={pendingDelete}
+        pendingReplace={pendingReplace}
+        onCancelDelete={() => setPendingDelete(null)}
+        onConfirmDelete={() => {
+          if (pendingDelete) scenarioActions.delete(pendingDelete.id);
+          setPendingDelete(null);
+        }}
+        onCancelReplace={() => setPendingReplace(false)}
+        onConfirmReplace={() => {
+          setPendingReplace(false);
+          transferActions.importRules(true);
+        }}
+      />
+    </div>
+  );
+}
+
+function BulkMockProgress({ event }: { event: BulkMockEvent | null }) {
+  if (event?.type !== "progress" || event.total === 0) return null;
+  const label =
+    event.phase === "saving"
+      ? "Saving mock rules…"
+      : `Creating mock rules… ${event.completed}/${event.total}`;
+  return (
+    <div className="bulk-mock-progress" role="status" aria-live="polite">
+      <span>{label}</span>
+      <progress value={event.completed} max={event.total} />
+    </div>
+  );
+}
+
+function AutoresponderOffState({
+  empty,
+  dropActive,
+  dropProps,
+  onCreate,
+}: {
+  empty: boolean;
+  dropActive: boolean;
+  dropProps: FlowDropZone;
+  onCreate: () => void;
+}) {
+  return (
+    <div className={`off-state ${dropActive ? "drop-target" : ""}`} {...dropProps}>
+      <h3>Autoresponder is off</h3>
+      <p className="muted">
+        Capturing traffic only — nothing is mocked. Pick a scenario tab above to make its rules
+        live, create a new one, or drag requests here to mock them.
+      </p>
+      {empty && (
+        <button className="btn primary" onClick={onCreate}>
+          + Create a scenario
+        </button>
+      )}
+    </div>
+  );
+}
+
+function AutoresponderDialogs({
+  ar,
+  pendingDelete,
+  pendingReplace,
+  onCancelDelete,
+  onConfirmDelete,
+  onCancelReplace,
+  onConfirmReplace,
+}: {
+  ar: AutoResponderSummary;
+  pendingDelete: ScenarioSummary | null;
+  pendingReplace: boolean;
+  onCancelDelete: () => void;
+  onConfirmDelete: () => void;
+  onCancelReplace: () => void;
+  onConfirmReplace: () => void;
+}) {
+  return (
+    <>
       {pendingDelete && (
         <ConfirmDialog
           title="Delete scenario?"
           message={`Delete “${pendingDelete.name}” and its ${pendingDelete.rules.length} rule(s)? This can't be undone.`}
           confirmLabel="Delete scenario"
           danger
-          onConfirm={() => {
-            deleteScenario(pendingDelete.id);
-            setPendingDelete(null);
-          }}
-          onCancel={() => setPendingDelete(null)}
+          onConfirm={onConfirmDelete}
+          onCancel={onCancelDelete}
         />
       )}
-
       {pendingReplace && (
         <ConfirmDialog
           title="Replace all scenarios?"
@@ -996,14 +1210,11 @@ export function AutoresponderPanel({
           }
           confirmLabel="Choose file & replace"
           danger
-          onConfirm={() => {
-            setPendingReplace(false);
-            onImportRules(true);
-          }}
-          onCancel={() => setPendingReplace(false)}
+          onConfirm={onConfirmReplace}
+          onCancel={onCancelReplace}
         />
       )}
-    </div>
+    </>
   );
 }
 

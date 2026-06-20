@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::flow::{now_ms, CapturedRequest, CapturedResponse};
 use crate::rules::{
-    evaluate_request_rules_stateful, RequestOutcome, RuleCursors, RuleSet,
+    apply_response_rules, evaluate_request_rules, evaluate_request_rules_stateful, RequestOutcome,
+    Rule, RuleCursors, RuleSet,
 };
 
 #[derive(Deserialize, Clone, Debug)]
@@ -117,17 +118,16 @@ fn client_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
 
 const PREVIEW_CAP: usize = 10;
 
-fn preview_sequence(rules: &RuleSet, req: &CapturedRequest) -> (Vec<SequenceStep>, bool) {
+fn preview_sequence(rules: &[Rule], req: &CapturedRequest) -> (Vec<SequenceStep>, bool) {
     let mut cursors = RuleCursors::default();
     let mut steps = Vec::new();
     let mut ran_to_cap = true;
     for _ in 0..PREVIEW_CAP {
-        let outcome = evaluate_request_rules_stateful(&rules.rules, req, &mut cursors);
+        let outcome = evaluate_request_rules_stateful(rules, req, &mut cursors);
         // Resolve the fired rule by id (names are not unique), so terminal
         // detection (unlimited rule = steady state) matches the rule that fired.
         let is_terminal_rule = |id: &str| {
             rules
-                .rules
                 .iter()
                 .find(|r| r.id == id)
                 .is_none_or(|r| r.fire_limit.is_none())
@@ -169,13 +169,16 @@ fn preview_sequence(rules: &RuleSet, req: &CapturedRequest) -> (Vec<SequenceStep
     }
     let loops = ran_to_cap
         && rules
-            .rules
             .iter()
             .any(|r| r.enabled && r.repeat && r.matcher.matches(req));
     (steps, loops)
 }
 
 pub fn test_rules(rules: &RuleSet, input: &TestInput) -> TestResult {
+    test_rule_slice(&rules.rules, input)
+}
+
+pub(crate) fn test_rule_slice(rules: &[Rule], input: &TestInput) -> TestResult {
     let (scheme, host, path) = parse_url(&input.url);
     let req = CapturedRequest {
         method: input.method.clone(),
@@ -190,7 +193,6 @@ pub fn test_rules(rules: &RuleSet, input: &TestInput) -> TestResult {
     };
 
     let matched_rules: Vec<String> = rules
-        .rules
         .iter()
         .filter(|r| r.enabled && r.matcher.matches(&req))
         .map(|r| r.name.clone())
@@ -206,7 +208,7 @@ pub fn test_rules(rules: &RuleSet, input: &TestInput) -> TestResult {
     let (seq, sequence_loops) = preview_sequence(rules, &req);
     let sequence = if seq.len() > 1 { seq } else { Vec::new() };
 
-    match rules.evaluate_request(&req) {
+    match evaluate_request_rules(rules, &req) {
         RequestOutcome::Respond { rule, response, .. } => TestResult {
             matched_rules,
             outcome: "respond".to_string(),
@@ -254,7 +256,7 @@ pub fn test_rules(rules: &RuleSet, input: &TestInput) -> TestResult {
 
 #[allow(clippy::too_many_arguments)]
 fn continue_result(
-    rules: &RuleSet,
+    rules: &[Rule],
     input: &TestInput,
     req: &CapturedRequest,
     set_headers: &[(String, String)],
@@ -296,7 +298,7 @@ fn continue_result(
         body: input.resp_body.clone().into_bytes(),
         timestamp_ms: now_ms(),
     };
-    let fired = rules.apply_response(req, &mut resp);
+    let fired = apply_response_rules(rules, req, &mut resp);
     let source = match &fired {
         Some(name) => {
             format!("Sample upstream response, modified by rule \u{201c}{name}\u{201d}")

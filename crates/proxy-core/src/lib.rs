@@ -36,6 +36,7 @@ mod tester;
 
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, bail, Result};
@@ -47,7 +48,10 @@ use tokio::task::JoinHandle;
 
 pub use ca::CertAuthority;
 pub use flow::{FlowDetail, FlowEvent, FlowSummary, MessageDetail, ResourceKind};
-pub use rules::{Action, AutoResponder, MatchKind, Matcher, Rule, RuleSet, Scenario};
+pub use rules::{
+    Action, ActionSummary, AutoResponder, AutoResponderSummary, MatchKind, Matcher, Rule,
+    RuleSet, RuleSummary, Scenario, ScenarioSummary,
+};
 pub use rules_export::RulesExport;
 pub use settings::ProxySettings;
 pub use tester::{test_rules, SequenceStep, TestInput, TestResponse, TestResult};
@@ -57,13 +61,30 @@ use shared::Shared;
 
 /// Maximum number of flows retained in memory before oldest are evicted.
 const MAX_FLOWS: usize = 5_000;
+static ENTITY_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Result of bulk-mocking flows into a scenario.
+fn new_entity_id(prefix: &str) -> String {
+    let timestamp = crate::flow::now_ms();
+    let counter = ENTITY_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{timestamp}-{counter}")
+}
+
+/// Lightweight result of bulk-mocking flows into a scenario.
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct MockResult {
-    pub autoresponder: AutoResponder,
+    pub scenario_id: String,
     pub new_rule_ids: Vec<String>,
+}
+
+/// A prepared bulk mutation. Building can be slow for hundreds of large
+/// responses; committing it is an atomic in-memory append.
+#[derive(Clone, Debug)]
+pub struct MockBatch {
+    pub scenario_id: String,
+    pub scenario_name: String,
+    pub create_scenario: bool,
+    pub rules: Vec<Rule>,
 }
 
 /// Which side(s) of a flow `search_bodies` scans.
@@ -394,6 +415,38 @@ impl ProxyController {
             .unwrap_or_default()
     }
 
+    pub fn autoresponder_summary(&self) -> AutoResponderSummary {
+        self.shared
+            .autoresponder
+            .read()
+            .map(|ar| AutoResponderSummary::from(&*ar))
+            .unwrap_or_default()
+    }
+
+    pub fn get_rule(&self, rule_id: &str) -> Option<Rule> {
+        self.shared.autoresponder.read().ok().and_then(|ar| {
+            ar.scenarios
+                .iter()
+                .flat_map(|scenario| &scenario.rules)
+                .find(|rule| rule.id == rule_id)
+                .cloned()
+        })
+    }
+
+    pub fn test_scenario(&self, scenario_id: &str, input: &TestInput) -> Result<TestResult> {
+        let autoresponder = self
+            .shared
+            .autoresponder
+            .read()
+            .map_err(|_| anyhow!("autoresponder lock poisoned"))?;
+        let scenario = autoresponder
+            .scenarios
+            .iter()
+            .find(|scenario| scenario.id == scenario_id)
+            .ok_or_else(|| anyhow!("scenario not found"))?;
+        Ok(tester::test_rule_slice(&scenario.rules, input))
+    }
+
     pub fn set_autoresponder(&self, autoresponder: AutoResponder) {
         let new_active = autoresponder.active_scenario_id.clone();
         // Only the active scenario is ever evaluated, so only its rule ids have
@@ -420,6 +473,220 @@ impl ProxyController {
                 cursors.reset();
             }
         }
+    }
+
+    fn reconcile_rule_cursors(&self, previous_active: Option<&str>, autoresponder: &AutoResponder) {
+        let live: std::collections::HashSet<&str> = autoresponder
+            .active()
+            .map(|scenario| scenario.rules.iter().map(|rule| rule.id.as_str()).collect())
+            .unwrap_or_default();
+        if let Ok(mut cursors) = self.shared.cursors.lock() {
+            if previous_active == autoresponder.active_scenario_id.as_deref() {
+                cursors.reset_missing(&live);
+            } else {
+                cursors.reset();
+            }
+        }
+    }
+
+    pub fn set_active_scenario(&self, scenario_id: Option<&str>) -> Result<()> {
+        let mut ar = self
+            .shared
+            .autoresponder
+            .write()
+            .map_err(|_| anyhow!("autoresponder lock poisoned"))?;
+        if scenario_id.is_some_and(|id| !ar.scenarios.iter().any(|scenario| scenario.id == id)) {
+            return Err(anyhow!("scenario not found"));
+        }
+        let previous_active = ar.active_scenario_id.clone();
+        ar.active_scenario_id = scenario_id.map(str::to_string);
+        self.reconcile_rule_cursors(previous_active.as_deref(), &ar);
+        Ok(())
+    }
+
+    pub fn create_scenario(&self, name: Option<&str>) -> Result<ScenarioSummary> {
+        let mut ar = self
+            .shared
+            .autoresponder
+            .write()
+            .map_err(|_| anyhow!("autoresponder lock poisoned"))?;
+        let id = new_entity_id("scenario");
+        let scenario = Scenario {
+            id,
+            name: name.map_or_else(
+                || format!("Scenario {}", ar.scenarios.len() + 1),
+                str::to_string,
+            ),
+            rules: Vec::new(),
+        };
+        let summary = ScenarioSummary::from(&scenario);
+        ar.active_scenario_id = Some(scenario.id.clone());
+        ar.scenarios.push(scenario);
+        if let Ok(mut cursors) = self.shared.cursors.lock() {
+            cursors.reset();
+        }
+        Ok(summary)
+    }
+
+    pub fn rename_scenario(&self, scenario_id: &str, name: String) -> Result<()> {
+        let mut ar = self
+            .shared
+            .autoresponder
+            .write()
+            .map_err(|_| anyhow!("autoresponder lock poisoned"))?;
+        let scenario = ar
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.id == scenario_id)
+            .ok_or_else(|| anyhow!("scenario not found"))?;
+        scenario.name = name;
+        Ok(())
+    }
+
+    pub fn delete_scenario(&self, scenario_id: &str) -> Result<()> {
+        let mut ar = self
+            .shared
+            .autoresponder
+            .write()
+            .map_err(|_| anyhow!("autoresponder lock poisoned"))?;
+        let previous_active = ar.active_scenario_id.clone();
+        let before = ar.scenarios.len();
+        ar.scenarios.retain(|scenario| scenario.id != scenario_id);
+        if ar.scenarios.len() == before {
+            return Err(anyhow!("scenario not found"));
+        }
+        if ar.active_scenario_id.as_deref() == Some(scenario_id) {
+            ar.active_scenario_id = None;
+        }
+        self.reconcile_rule_cursors(previous_active.as_deref(), &ar);
+        Ok(())
+    }
+
+    pub fn create_rule(&self, scenario_id: &str) -> Result<(Rule, RuleSummary)> {
+        let mut ar = self
+            .shared
+            .autoresponder
+            .write()
+            .map_err(|_| anyhow!("autoresponder lock poisoned"))?;
+        let scenario = ar
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.id == scenario_id)
+            .ok_or_else(|| anyhow!("scenario not found"))?;
+        let rule = rules::blank_rule(new_entity_id("rule"));
+        let summary = RuleSummary::from(&rule);
+        scenario.rules.push(rule.clone());
+        Ok((rule, summary))
+    }
+
+    pub fn update_rule(&self, scenario_id: &str, rule: Rule) -> Result<RuleSummary> {
+        let mut ar = self
+            .shared
+            .autoresponder
+            .write()
+            .map_err(|_| anyhow!("autoresponder lock poisoned"))?;
+        let scenario = ar
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.id == scenario_id)
+            .ok_or_else(|| anyhow!("scenario not found"))?;
+        let slot = scenario
+            .rules
+            .iter_mut()
+            .find(|candidate| candidate.id == rule.id)
+            .ok_or_else(|| anyhow!("rule not found"))?;
+        *slot = rule;
+        let summary = RuleSummary::from(&*slot);
+        Ok(summary)
+    }
+
+    pub fn delete_rule(&self, scenario_id: &str, rule_id: &str) -> Result<()> {
+        let mut ar = self
+            .shared
+            .autoresponder
+            .write()
+            .map_err(|_| anyhow!("autoresponder lock poisoned"))?;
+        let previous_active = ar.active_scenario_id.clone();
+        let scenario = ar
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.id == scenario_id)
+            .ok_or_else(|| anyhow!("scenario not found"))?;
+        let before = scenario.rules.len();
+        scenario.rules.retain(|rule| rule.id != rule_id);
+        if scenario.rules.len() == before {
+            return Err(anyhow!("rule not found"));
+        }
+        self.reconcile_rule_cursors(previous_active.as_deref(), &ar);
+        Ok(())
+    }
+
+    pub fn duplicate_rule(&self, scenario_id: &str, rule_id: &str) -> Result<(Rule, RuleSummary)> {
+        let mut ar = self
+            .shared
+            .autoresponder
+            .write()
+            .map_err(|_| anyhow!("autoresponder lock poisoned"))?;
+        let scenario = ar
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.id == scenario_id)
+            .ok_or_else(|| anyhow!("scenario not found"))?;
+        let index = scenario
+            .rules
+            .iter()
+            .position(|rule| rule.id == rule_id)
+            .ok_or_else(|| anyhow!("rule not found"))?;
+        let mut copy = scenario.rules[index].clone();
+        copy.id = new_entity_id("rule");
+        copy.name = format!("{} copy", copy.name);
+        let summary = RuleSummary::from(&copy);
+        scenario.rules.insert(index + 1, copy.clone());
+        Ok((copy, summary))
+    }
+
+    pub fn reorder_rule(
+        &self,
+        scenario_id: &str,
+        rule_id: &str,
+        to_id: &str,
+    ) -> Result<(Option<String>, Option<String>)> {
+        if rule_id == to_id {
+            return Ok((None, None));
+        }
+        let mut ar = self
+            .shared
+            .autoresponder
+            .write()
+            .map_err(|_| anyhow!("autoresponder lock poisoned"))?;
+        let scenario = ar
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.id == scenario_id)
+            .ok_or_else(|| anyhow!("scenario not found"))?;
+        let from = scenario
+            .rules
+            .iter()
+            .position(|rule| rule.id == rule_id)
+            .ok_or_else(|| anyhow!("rule not found"))?;
+        let to = scenario
+            .rules
+            .iter()
+            .position(|rule| rule.id == to_id)
+            .ok_or_else(|| anyhow!("target rule not found"))?;
+        let rule = scenario.rules.remove(from);
+        scenario.rules.insert(to, rule);
+        let index = scenario
+            .rules
+            .iter()
+            .position(|rule| rule.id == rule_id)
+            .ok_or_else(|| anyhow!("rule not found after reorder"))?;
+        let previous = index
+            .checked_sub(1)
+            .and_then(|previous| scenario.rules.get(previous))
+            .map(|rule| rule.id.clone());
+        let next = scenario.rules.get(index + 1).map(|rule| rule.id.clone());
+        Ok((previous, next))
     }
 
     pub fn reset_rule_state(&self, scenario_id: Option<&str>) {
@@ -481,55 +748,83 @@ impl ProxyController {
         }
     }
 
-    /// Seed Respond rules from the given captured flows and add them to a
-    /// scenario (the given id, else the active one, else a new "My mocks"),
-    /// which becomes active. Returns the updated autoresponder + new rule ids.
-    pub fn mock_flows(&self, ids: &[String], scenario_id: Option<&str>) -> MockResult {
-        let base = crate::flow::now_ms();
-        let new_rules: Vec<(String, Rule)> = match self.shared.store.lock() {
-            Ok(store) => ids
-                .iter()
-                .filter_map(|id| store.get(id))
-                .enumerate()
-                .map(|(i, flow)| {
-                    let rule_id = format!("rule-{base}-{i}");
-                    let rule = rules::respond_rule_from_flow(flow, rule_id.clone());
-                    (rule_id, rule)
-                })
-                .collect(),
+    /// Build mock rules without changing live state. Callers can report progress,
+    /// persist the batch transactionally, then commit it atomically.
+    pub fn prepare_mock_flows(
+        &self,
+        ids: &[String],
+        scenario_id: Option<&str>,
+        mut on_progress: impl FnMut(usize, usize),
+    ) -> MockBatch {
+        let rules = match self.shared.store.lock() {
+            Ok(store) => {
+                let mut rules = Vec::with_capacity(ids.len());
+                for (index, id) in ids.iter().enumerate() {
+                    let Some(flow) = store.get(id) else {
+                        on_progress(index + 1, ids.len());
+                        continue;
+                    };
+                    let rule_id = new_entity_id("rule");
+                    rules.push(rules::respond_rule_from_flow(flow, rule_id));
+                    on_progress(index + 1, ids.len());
+                }
+                rules
+            }
             Err(_) => Vec::new(),
         };
 
-        let mut ar = self.get_autoresponder();
+        let ar = self.get_autoresponder();
+        let scenario_id = scenario_id
+            .map(str::to_string)
+            .or(ar.active_scenario_id)
+            .unwrap_or_else(|| new_entity_id("scenario"));
+        let create_scenario = !ar.scenarios.iter().any(|scenario| scenario.id == scenario_id);
+        MockBatch {
+            scenario_id,
+            scenario_name: "My mocks".to_string(),
+            create_scenario,
+            rules,
+        }
+    }
 
-        let target_id = scenario_id
-            .map(|s| s.to_string())
-            .or_else(|| ar.active_scenario_id.clone())
-            .unwrap_or_else(|| format!("scenario-{}", crate::flow::now_ms()));
-        if !ar.scenarios.iter().any(|s| s.id == target_id) {
+    pub fn commit_mock_batch(&self, batch: MockBatch) -> Result<MockResult> {
+        let mut ar = self
+            .shared
+            .autoresponder
+            .write()
+            .map_err(|_| anyhow!("autoresponder lock poisoned"))?;
+        let previous_active = ar.active_scenario_id.clone();
+        if batch.create_scenario {
             ar.scenarios.push(Scenario {
-                id: target_id.clone(),
-                name: "My mocks".to_string(),
+                id: batch.scenario_id.clone(),
+                name: batch.scenario_name,
                 rules: Vec::new(),
             });
         }
-        ar.active_scenario_id = Some(target_id.clone());
-
-        // One rule per request — no collapsing (Fiddler-style).
-        let mut new_rule_ids = Vec::with_capacity(new_rules.len());
-        if let Some(scenario) = ar.scenarios.iter_mut().find(|s| s.id == target_id) {
-            scenario.rules.reserve(new_rules.len());
-            for (rule_id, rule) in new_rules {
-                new_rule_ids.push(rule_id);
-                scenario.rules.push(rule);
-            }
-        }
-
-        self.set_autoresponder(ar.clone());
-        MockResult {
-            autoresponder: ar,
+        let scenario = ar
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.id == batch.scenario_id)
+            .ok_or_else(|| anyhow!("scenario not found"))?;
+        let new_rule_ids = batch.rules.iter().map(|rule| rule.id.clone()).collect();
+        scenario.rules.reserve(batch.rules.len());
+        scenario.rules.extend(batch.rules);
+        ar.active_scenario_id = Some(batch.scenario_id.clone());
+        self.reconcile_rule_cursors(previous_active.as_deref(), &ar);
+        Ok(MockResult {
+            scenario_id: batch.scenario_id,
             new_rule_ids,
-        }
+        })
+    }
+
+    /// Compatibility helper for engine callers that do not need persistence or
+    /// progress events.
+    pub fn mock_flows(&self, ids: &[String], scenario_id: Option<&str>) -> MockResult {
+        let batch = self.prepare_mock_flows(ids, scenario_id, |_, _| {});
+        self.commit_mock_batch(batch).unwrap_or_else(|_| MockResult {
+            scenario_id: scenario_id.unwrap_or_default().to_string(),
+            new_rule_ids: Vec::new(),
+        })
     }
 }
 
@@ -671,8 +966,8 @@ mod tests {
         let result = c.mock_flows(&ids, Some("bulk"));
 
         assert_eq!(result.new_rule_ids.len(), ids.len());
-        let scenario = result
-            .autoresponder
+        let autoresponder = c.get_autoresponder();
+        let scenario = autoresponder
             .scenarios
             .iter()
             .find(|scenario| scenario.id == "bulk")
@@ -687,6 +982,81 @@ mod tests {
             &scenario.rules[0].action,
             Action::Respond { body, .. } if body == "response-flow-0"
         ));
+    }
+
+    #[test]
+    fn autoresponder_summary_omits_rule_bodies_and_headers() {
+        let c = controller();
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![Scenario {
+                id: "summary".to_string(),
+                name: "Summary".to_string(),
+                rules: vec![Rule {
+                    id: "large".to_string(),
+                    name: "Large".to_string(),
+                    enabled: true,
+                    fire_limit: None,
+                    repeat: false,
+                    matcher: Matcher {
+                        method: Some("GET".to_string()),
+                        url: "https://example.com/large".to_string(),
+                        url_match: MatchKind::Exact,
+                    },
+                    action: Action::Respond {
+                        status: 200,
+                        headers: vec![("x-secret".to_string(), "header-secret".to_string())],
+                        body: "body-secret".to_string(),
+                        content_type: Some("text/plain".to_string()),
+                    },
+                }],
+            }],
+            active_scenario_id: Some("summary".to_string()),
+        });
+
+        let json = serde_json::to_string(&c.autoresponder_summary()).expect("serialize summary");
+
+        assert!(!json.contains("body-secret"));
+        assert!(!json.contains("header-secret"));
+        assert!(json.contains("\"status\":200"));
+        assert_eq!(
+            c.get_rule("large")
+                .and_then(|rule| match rule.action {
+                    Action::Respond { body, .. } => Some(body),
+                    _ => None,
+                })
+                .as_deref(),
+            Some("body-secret")
+        );
+    }
+
+    #[test]
+    fn granular_rule_reorder_changes_only_order() {
+        let c = controller();
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario(
+                "scenario",
+                vec![respond_rule("one"), respond_rule("two"), respond_rule("three")],
+            )],
+            active_scenario_id: Some("scenario".to_string()),
+        });
+
+        let (previous, next) = c
+            .reorder_rule("scenario", "three", "one")
+            .expect("reorder rule");
+
+        assert_eq!(previous, None);
+        assert_eq!(next.as_deref(), Some("one"));
+        let order = c
+            .autoresponder_summary()
+            .scenarios
+            .into_iter()
+            .next()
+            .expect("scenario")
+            .rules
+            .into_iter()
+            .map(|rule| rule.id)
+            .collect::<Vec<_>>();
+        assert_eq!(order, vec!["three", "one", "two"]);
     }
 
     #[test]

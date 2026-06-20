@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use proxy_core::{
-    AutoResponder, FlowDetail, FlowEvent, FlowSummary, MockResult, ProxySettings, RuleSet,
-    SearchSide, TestInput, TestResult,
+    AutoResponderSummary, FlowDetail, FlowEvent, FlowSummary, MockResult, ProxySettings, Rule,
+    RuleSummary, Scenario, ScenarioSummary, SearchSide, TestInput, TestResult,
 };
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -26,6 +26,20 @@ pub struct CaInfo {
     pub cert_pem: String,
     pub cert_path: String,
     pub dir: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum BulkMockEvent {
+    Progress {
+        completed: usize,
+        total: usize,
+        phase: &'static str,
+    },
+    Created {
+        scenario_id: String,
+        rules: Vec<RuleSummary>,
+    },
 }
 
 #[tauri::command]
@@ -136,14 +150,177 @@ pub fn set_flow_comment(state: State<'_, AppState>, id: String, comment: Option<
 }
 
 #[tauri::command]
-pub fn get_autoresponder(state: State<'_, AppState>) -> AutoResponder {
-    state.controller.get_autoresponder()
+pub fn get_autoresponder_summary(state: State<'_, AppState>) -> AutoResponderSummary {
+    state.controller.autoresponder_summary()
 }
 
 #[tauri::command]
-pub fn set_autoresponder(state: State<'_, AppState>, autoresponder: AutoResponder) {
-    state.controller.set_autoresponder(autoresponder.clone());
-    crate::persist::save_autoresponder(&state.ca_dir, &autoresponder);
+pub async fn get_rule(
+    state: State<'_, AppState>,
+    rule_id: String,
+) -> Result<Option<Rule>, String> {
+    let controller = state.controller.clone();
+    tauri::async_runtime::spawn_blocking(move || controller.get_rule(&rule_id))
+        .await
+        .map_err(|e| format!("rule lookup task failed: {e}"))
+}
+
+#[tauri::command]
+pub fn set_active_scenario(
+    state: State<'_, AppState>,
+    scenario_id: Option<String>,
+) -> Result<(), String> {
+    state
+        .rule_store
+        .set_active_scenario(scenario_id.as_deref())?;
+    state
+        .controller
+        .set_active_scenario(scenario_id.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_scenario(
+    state: State<'_, AppState>,
+    name: Option<String>,
+) -> Result<ScenarioSummary, String> {
+    let summary = state
+        .controller
+        .create_scenario(name.as_deref())
+        .map_err(|e| e.to_string())?;
+    let scenario = Scenario {
+        id: summary.id.clone(),
+        name: summary.name.clone(),
+        rules: Vec::new(),
+    };
+    if let Err(error) = state.rule_store.insert_scenario(&scenario) {
+        let _ = state.controller.delete_scenario(&summary.id);
+        return Err(error);
+    }
+    state.rule_store.set_active_scenario(Some(&summary.id))?;
+    Ok(summary)
+}
+
+#[tauri::command]
+pub fn rename_scenario(
+    state: State<'_, AppState>,
+    scenario_id: String,
+    name: String,
+) -> Result<(), String> {
+    state.rule_store.rename_scenario(&scenario_id, &name)?;
+    state
+        .controller
+        .rename_scenario(&scenario_id, name)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_scenario(
+    state: State<'_, AppState>,
+    scenario_id: String,
+) -> Result<(), String> {
+    state.rule_store.delete_scenario(&scenario_id)?;
+    state
+        .controller
+        .delete_scenario(&scenario_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_rule(
+    state: State<'_, AppState>,
+    scenario_id: String,
+) -> Result<RuleSummary, String> {
+    let (rule, summary) = state
+        .controller
+        .create_rule(&scenario_id)
+        .map_err(|e| e.to_string())?;
+    if let Err(error) = state.rule_store.insert_rule(&scenario_id, &rule, None) {
+        let _ = state.controller.delete_rule(&scenario_id, &rule.id);
+        return Err(error);
+    }
+    Ok(summary)
+}
+
+#[tauri::command]
+pub async fn update_rule(
+    state: State<'_, AppState>,
+    scenario_id: String,
+    rule: Rule,
+) -> Result<RuleSummary, String> {
+    let controller = state.controller.clone();
+    let rule_store = state.rule_store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if controller.get_rule(&rule.id).is_none() {
+            return Err("rule not found".to_string());
+        }
+        rule_store.update_rule(&scenario_id, &rule)?;
+        controller
+            .update_rule(&scenario_id, rule)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("rule update task failed: {e}"))?
+}
+
+#[tauri::command]
+pub fn delete_rule(
+    state: State<'_, AppState>,
+    scenario_id: String,
+    rule_id: String,
+) -> Result<(), String> {
+    state.rule_store.delete_rule(&scenario_id, &rule_id)?;
+    state
+        .controller
+        .delete_rule(&scenario_id, &rule_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn duplicate_rule(
+    state: State<'_, AppState>,
+    scenario_id: String,
+    rule_id: String,
+) -> Result<RuleSummary, String> {
+    let controller = state.controller.clone();
+    let rule_store = state.rule_store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (rule, summary) = controller
+            .duplicate_rule(&scenario_id, &rule_id)
+            .map_err(|e| e.to_string())?;
+        if let Err(error) = rule_store.insert_rule(&scenario_id, &rule, Some(&rule_id)) {
+            let _ = controller.delete_rule(&scenario_id, &rule.id);
+            return Err(error);
+        }
+        Ok(summary)
+    })
+    .await
+    .map_err(|e| format!("rule duplication task failed: {e}"))?
+}
+
+#[tauri::command]
+pub fn reorder_rule(
+    state: State<'_, AppState>,
+    scenario_id: String,
+    rule_id: String,
+    to_id: String,
+) -> Result<(), String> {
+    let (previous, next) = state
+        .controller
+        .reorder_rule(&scenario_id, &rule_id, &to_id)
+        .map_err(|e| e.to_string())?;
+    if let Err(error) = state.rule_store.reorder_rule(
+        &scenario_id,
+        &rule_id,
+        previous.as_deref(),
+        next.as_deref(),
+    ) {
+        if let Ok(autoresponder) = state.rule_store.load() {
+            state.controller.set_autoresponder(autoresponder);
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -167,29 +344,77 @@ pub fn set_settings(state: State<'_, AppState>, settings: ProxySettings) {
     crate::persist::save_settings(&state.ca_dir, &settings);
 }
 
-/// Simulate a rule set against a sample request without touching the network.
 #[tauri::command]
-pub fn test_rules(rules: RuleSet, input: TestInput) -> TestResult {
-    proxy_core::test_rules(&rules, &input)
+pub async fn test_scenario(
+    state: State<'_, AppState>,
+    scenario_id: String,
+    input: TestInput,
+) -> Result<TestResult, String> {
+    let controller = state.controller.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        controller
+            .test_scenario(&scenario_id, &input)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("rule test task failed: {e}"))?
 }
 
-/// Seed Respond rules from the given captured flows into a scenario, persist,
-/// and return the updated autoresponder + the new rule ids.
+/// Seed Respond rules from the given captured flows into a scenario, persist
+/// them transactionally and return lightweight identifiers.
 #[tauri::command]
 pub async fn mock_flows(
     state: State<'_, AppState>,
     ids: Vec<String>,
     scenario_id: Option<String>,
+    progress: Channel<BulkMockEvent>,
 ) -> Result<MockResult, String> {
     let controller = state.controller.clone();
-    let ca_dir = state.ca_dir.clone();
+    let rule_store = state.rule_store.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let result = controller.mock_flows(&ids, scenario_id.as_deref());
-        crate::persist::save_autoresponder(&ca_dir, &result.autoresponder);
-        result
+        let total = ids.len();
+        let batch = controller.prepare_mock_flows(&ids, scenario_id.as_deref(), |completed, total| {
+            if completed == total || completed % 25 == 0 {
+                let _ = progress.send(BulkMockEvent::Progress {
+                    completed,
+                    total,
+                    phase: "generating",
+                });
+            }
+        });
+        let _ = progress.send(BulkMockEvent::Progress {
+            completed: total,
+            total,
+            phase: "saving",
+        });
+        rule_store.apply_mock_batch(
+            &batch.scenario_id,
+            &batch.scenario_name,
+            batch.create_scenario,
+            &batch.rules,
+        )?;
+        let scenario_id = batch.scenario_id.clone();
+        let created: Vec<RuleSummary> = batch.rules.iter().map(RuleSummary::from).collect();
+        let result = controller
+            .commit_mock_batch(batch)
+            .map_err(|e| e.to_string())?;
+        for rules in created.chunks(100) {
+            let _ = progress.send(BulkMockEvent::Created {
+                scenario_id: scenario_id.clone(),
+                rules: rules.to_vec(),
+            });
+        }
+        if total == 0 {
+            let _ = progress.send(BulkMockEvent::Progress {
+                completed: 0,
+                total: 0,
+                phase: "generating",
+            });
+        }
+        Ok(result)
     })
     .await
-    .map_err(|e| format!("bulk mock task failed: {e}"))
+    .map_err(|e| format!("bulk mock task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -431,7 +656,7 @@ pub async fn import_rules(
     let path = picked.into_path().map_err(|e| e.to_string())?;
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
     let count = controller.import_rules(&bytes, replace).map_err(|e| e.to_string())?;
-    crate::persist::save_autoresponder(&state.ca_dir, &controller.get_autoresponder());
+    state.rule_store.replace(&controller.get_autoresponder())?;
     Ok(count)
 }
 

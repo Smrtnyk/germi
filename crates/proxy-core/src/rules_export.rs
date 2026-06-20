@@ -1,6 +1,6 @@
 //! Portable export/import of autoresponder scenarios as a `.germi-rules` JSON
-//! file. This is a *config-sharing* format — distinct from the internal
-//! `autoresponder.json` persistence and from `.germi` traffic sessions.
+//! file. This is a *config-sharing* format — distinct from the internal `SQLite`
+//! persistence and from `.germi` traffic sessions.
 //!
 //! Imported scenarios are always re-keyed: every scenario and every rule gets a
 //! fresh id. Cursor accounting ([`crate::rules::RuleCursors`]) is rule-id keyed,

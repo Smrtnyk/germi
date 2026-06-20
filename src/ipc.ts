@@ -1,14 +1,17 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 
 import type {
-  AutoResponder,
+  AutoResponderSummary,
+  BulkMockEvent,
   CaInfo,
   FlowDetail,
   FlowEvent,
   FlowSummary,
   MockResult,
   ProxySettings,
-  RuleSet,
+  Rule,
+  RuleSummary,
+  ScenarioSummary,
   TestInput,
   TestResult,
 } from "./types";
@@ -28,19 +31,41 @@ export const api = {
   setFlowComment: (id: string, comment: string | null) =>
     invoke<void>("set_flow_comment", { id, comment }),
 
-  getAutoresponder: () => invoke<AutoResponder>("get_autoresponder"),
-  setAutoresponder: (autoresponder: AutoResponder) =>
-    invoke<void>("set_autoresponder", { autoresponder }),
+  getAutoresponderSummary: () => invoke<AutoResponderSummary>("get_autoresponder_summary"),
+  getRule: (ruleId: string) => invoke<Rule | null>("get_rule", { ruleId }),
+  setActiveScenario: (scenarioId: string | null) =>
+    invoke<void>("set_active_scenario", { scenarioId }),
+  createScenario: (name: string | null = null) =>
+    invoke<ScenarioSummary>("create_scenario", { name }),
+  renameScenario: (scenarioId: string, name: string) =>
+    invoke<void>("rename_scenario", { scenarioId, name }),
+  deleteScenario: (scenarioId: string) => invoke<void>("delete_scenario", { scenarioId }),
+  createRule: (scenarioId: string) => invoke<RuleSummary>("create_rule", { scenarioId }),
+  updateRule: (scenarioId: string, rule: Rule) =>
+    invoke<RuleSummary>("update_rule", { scenarioId, rule }),
+  deleteRule: (scenarioId: string, ruleId: string) =>
+    invoke<void>("delete_rule", { scenarioId, ruleId }),
+  duplicateRule: (scenarioId: string, ruleId: string) =>
+    invoke<RuleSummary>("duplicate_rule", { scenarioId, ruleId }),
+  reorderRule: (scenarioId: string, ruleId: string, toId: string) =>
+    invoke<void>("reorder_rule", { scenarioId, ruleId, toId }),
   resetRuleState: (scenarioId: string | null) => invoke<void>("reset_rule_state", { scenarioId }),
   ruleHits: () => invoke<Record<string, number>>("rule_hits"),
   getSettings: () => invoke<ProxySettings>("get_settings"),
   setSettings: (settings: ProxySettings) => invoke<void>("set_settings", { settings }),
   exportSettings: () => invoke<boolean>("export_settings"),
   importSettings: () => invoke<ProxySettings>("import_settings"),
-  testRules: (rules: RuleSet, input: TestInput) =>
-    invoke<TestResult>("test_rules", { rules, input }),
-  mockFlows: (ids: string[], scenarioId: string | null) =>
-    invoke<MockResult>("mock_flows", { ids, scenarioId }),
+  testScenario: (scenarioId: string, input: TestInput) =>
+    invoke<TestResult>("test_scenario", { scenarioId, input }),
+  mockFlows: (
+    ids: string[],
+    scenarioId: string | null,
+    onProgress: (event: BulkMockEvent) => void,
+  ) => {
+    const progress = new Channel<BulkMockEvent>();
+    progress.onmessage = onProgress;
+    return invoke<MockResult>("mock_flows", { ids, scenarioId, progress });
+  },
 
   importArchive: () => invoke<number>("import_archive"),
   pickFile: () => invoke<string | null>("pick_file"),
