@@ -5,14 +5,17 @@ import {
   useRef,
   useState,
   type DragEvent as ReactDragEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactElement,
   type ReactNode,
 } from "react";
 
 import { api } from "../ipc";
-import { decodeFlowIds, FLOW_DRAG_MIME, hasFlowDrag } from "../dnd";
+import { decodeFlowIds, FLOW_DRAG_MIME, hasFlowDrag, RULE_DRAG_MIME } from "../dnd";
 import type { Action, ActionKind, AutoResponder, Rule, Scenario } from "../types";
 import { useResizable } from "../useResizable";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { RuleTester } from "./RuleTester";
 
 // Lazy-loaded so CodeMirror (and its language packs) is a separate chunk fetched
@@ -174,6 +177,7 @@ function RuleListItem({
   onSelect,
   onToggle,
   onDuplicate,
+  onContextMenu,
   onDragStart,
   onDragOver,
   onDrop,
@@ -187,6 +191,7 @@ function RuleListItem({
   onSelect: () => void;
   onToggle: (enabled: boolean) => void;
   onDuplicate: () => void;
+  onContextMenu: (e: ReactMouseEvent) => void;
   onDragStart: () => void;
   onDragOver: () => void;
   onDrop: () => void;
@@ -197,9 +202,11 @@ function RuleListItem({
     <div
       className={`rule-item ${selected ? "selected" : ""} ${dragOver ? "dragover" : ""}`}
       onClick={onSelect}
+      onContextMenu={onContextMenu}
       title={rule.name}
       draggable={draggable}
       onDragStart={(e) => {
+        e.dataTransfer.setData(RULE_DRAG_MIME, rule.id);
         e.dataTransfer.effectAllowed = "move";
         onDragStart();
       }}
@@ -266,6 +273,8 @@ interface ScenarioRules {
   deleteRule: (id: string) => void;
   duplicateRule: (id: string) => void;
   reorder: (dragId: string | null, toId: string) => void;
+  moveToTop: (id: string) => void;
+  moveToBottom: (id: string) => void;
 }
 
 function useScenarioRules(
@@ -328,8 +337,34 @@ function useScenarioRules(
     arr.splice(to, 0, moved);
     setRules(arr);
   }
+  function moveToTop(id: string) {
+    const arr = [...active.rules];
+    const idx = arr.findIndex((r) => r.id === id);
+    if (idx <= 0) return;
+    const [moved] = arr.splice(idx, 1);
+    arr.unshift(moved);
+    setRules(arr);
+  }
+  function moveToBottom(id: string) {
+    const arr = [...active.rules];
+    const idx = arr.findIndex((r) => r.id === id);
+    if (idx === -1 || idx === arr.length - 1) return;
+    const [moved] = arr.splice(idx, 1);
+    arr.push(moved);
+    setRules(arr);
+  }
 
-  return { saveState, patch, addRule, patchRule, deleteRule, duplicateRule, reorder };
+  return {
+    saveState,
+    patch,
+    addRule,
+    patchRule,
+    deleteRule,
+    duplicateRule,
+    reorder,
+    moveToTop,
+    moveToBottom,
+  };
 }
 
 function useRuleSelection(selectRuleId?: string | null) {
@@ -398,6 +433,61 @@ function useFlowDrop(onDropMock: (ids: string[], scenarioId: string | null) => v
   return { zone, zoneProps };
 }
 
+interface RuleMenuActions {
+  onMoveToTop: (id: string) => void;
+  onMoveToBottom: (id: string) => void;
+  onDuplicate: (id: string) => void;
+  onToggle: (id: string, enabled: boolean) => void;
+  onDelete: (id: string) => void;
+}
+
+function ruleMenuItems(rule: Rule, canReorder: boolean, a: RuleMenuActions): MenuItem[] {
+  const items: MenuItem[] = [];
+  if (canReorder) {
+    items.push(
+      { label: "Move to top", onClick: () => a.onMoveToTop(rule.id), disabled: false },
+      { label: "Move to bottom", onClick: () => a.onMoveToBottom(rule.id), disabled: false },
+      { label: "", sep: true, onClick: () => {} },
+    );
+  }
+  items.push(
+    { label: "Duplicate rule", onClick: () => a.onDuplicate(rule.id) },
+    {
+      label: rule.enabled ? "Disable rule" : "Enable rule",
+      onClick: () => a.onToggle(rule.id, !rule.enabled),
+    },
+    { label: "", sep: true, onClick: () => {} },
+    { label: "Delete rule", onClick: () => a.onDelete(rule.id), danger: true },
+  );
+  return items;
+}
+
+interface RuleMenu {
+  openMenu: (e: ReactMouseEvent, rule: Rule) => void;
+  menuEl: ReactElement | null;
+}
+
+function useRuleMenu(canReorder: boolean, actions: RuleMenuActions): RuleMenu {
+  const [menu, setMenu] = useState<{ x: number; y: number; rule: Rule } | null>(null);
+
+  function openMenu(e: ReactMouseEvent, rule: Rule) {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenu({ x: e.clientX, y: e.clientY, rule });
+  }
+
+  const menuEl = menu ? (
+    <ContextMenu
+      x={menu.x}
+      y={menu.y}
+      items={ruleMenuItems(menu.rule, canReorder, actions)}
+      onClose={() => setMenu(null)}
+    />
+  ) : null;
+
+  return { openMenu, menuEl };
+}
+
 function RuleList({
   rules,
   shownRules,
@@ -414,6 +504,9 @@ function RuleList({
   onAdd,
   onToggle,
   onDuplicate,
+  onDelete,
+  onMoveToTop,
+  onMoveToBottom,
   onReorder,
 }: {
   rules: Rule[];
@@ -431,8 +524,18 @@ function RuleList({
   onAdd: () => void;
   onToggle: (id: string, enabled: boolean) => void;
   onDuplicate: (id: string) => void;
+  onDelete: (id: string) => void;
+  onMoveToTop: (id: string) => void;
+  onMoveToBottom: (id: string) => void;
   onReorder: (toId: string) => void;
 }) {
+  const { openMenu, menuEl } = useRuleMenu(canReorder, {
+    onMoveToTop,
+    onMoveToBottom,
+    onDuplicate,
+    onToggle,
+    onDelete,
+  });
   return (
     <aside className="rule-list">
       <button className="btn primary block" onClick={onAdd}>
@@ -461,6 +564,7 @@ function RuleList({
           onSelect={() => setSelectedRuleId(r.id)}
           onToggle={(enabled) => onToggle(r.id, enabled)}
           onDuplicate={() => onDuplicate(r.id)}
+          onContextMenu={(e) => openMenu(e, r)}
           onDragStart={() => setDragId(r.id)}
           onDragOver={() => setOverId(r.id)}
           onDrop={() => {
@@ -474,6 +578,7 @@ function RuleList({
           }}
         />
       ))}
+      {menuEl}
     </aside>
   );
 }
@@ -620,6 +725,9 @@ function ScenarioView({
           onAdd={rules.addRule}
           onToggle={(id, enabled) => rules.patchRule(id, { enabled })}
           onDuplicate={rules.duplicateRule}
+          onDelete={rules.deleteRule}
+          onMoveToTop={rules.moveToTop}
+          onMoveToBottom={rules.moveToBottom}
           onReorder={(toId) => rules.reorder(dragId, toId)}
         />
 
