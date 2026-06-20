@@ -854,6 +854,7 @@ mod tests {
                 headers: vec![],
                 body: id.to_string(),
                 content_type: Some("text/plain".to_string()),
+                content_encoding: None,
             },
         }
     }
@@ -1007,6 +1008,7 @@ mod tests {
                         headers: vec![("x-secret".to_string(), "header-secret".to_string())],
                         body: "body-secret".to_string(),
                         content_type: Some("text/plain".to_string()),
+                        content_encoding: None,
                     },
                 }],
             }],

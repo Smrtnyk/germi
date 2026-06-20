@@ -18,7 +18,12 @@ function rule(id: string, name = id): RuleSummary {
     fireLimit: null,
     repeat: false,
     matcher: { method: "GET", url: `/${id}`, urlMatch: "exact" },
-    action: { kind: "respond", status: 200, contentType: "application/json" },
+    action: {
+      kind: "respond",
+      status: 200,
+      contentType: "application/json",
+      contentEncoding: null,
+    },
   };
 }
 

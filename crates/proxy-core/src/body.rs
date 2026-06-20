@@ -147,6 +147,43 @@ fn try_decompress_capped(encoding: &str, body: &[u8], cap: usize) -> Option<(Vec
     }
 }
 
+/// Encode (compress) `body` with the single given `Content-Encoding` token. The
+/// inverse of [`try_decompress`]: used by the autoresponder to re-compress a
+/// mock body on the wire when a rule opts into a compressed response. Returns
+/// `None` for an unknown encoding (callers send the identity body instead).
+///
+/// Only single-token encodings are supported (`gzip` / `deflate` / `br`), not
+/// arbitrary chains — that matches real-world `Content-Encoding` usage and the
+/// autoresponder's single-toggle model. Accepts the same lenient token matching
+/// as `try_decompress` (e.g. `x-gzip` works).
+pub fn compress_body(encoding: &str, body: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write;
+    if encoding.contains("gzip") {
+        // GzEncoder produces a single-member stream; MultiGzDecoder reads it
+        // back, so the round-trip matches the public decompress path.
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(body).ok()?;
+        enc.finish().ok()
+    } else if encoding.contains("deflate") {
+        // Zlib (RFC 1950) — the deflate-with-zlib-wrapper variant servers send.
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(body).ok()?;
+        enc.finish().ok()
+    } else if encoding.contains("br") {
+        let mut out = Vec::new();
+        // Quality 5 / window 22 mirror the decompressor's read window and keep
+        // encoding fast for interactive mock editing.
+        {
+            let mut w = brotli::CompressorWriter::new(&mut out, 4096, 5, 22);
+            w.write_all(body).ok()?;
+            w.flush().ok()?;
+        }
+        Some(out)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +275,41 @@ mod tests {
         let none = vec![("Content-Encoding".to_string(), "identity".to_string())];
         assert_eq!(content_encoding_of(&none), None);
         assert!(content_encodings_of(&none).is_empty());
+    }
+
+    #[test]
+    fn compress_body_round_trips_each_encoding() {
+        // Repetitive enough that every encoder's overhead is dwarfed; tiny
+        // payloads can round-trip but not always shrink (gzip header alone is
+        // ~18 bytes), so we don't assert size on those.
+        let payload = b"{\"hello\":\"world\",\"items\":[1,2,3]}\n".repeat(40);
+        for enc in ["gzip", "deflate", "br"] {
+            let compressed = compress_body(enc, &payload)
+                .unwrap_or_else(|| panic!("compress_body({enc}) should produce output"));
+            assert!(
+                compressed.len() < payload.len(),
+                "{enc} output should be smaller for a repetitive payload"
+            );
+            let back = try_decompress(enc, &compressed)
+                .unwrap_or_else(|| panic!("round-trip decompress {enc} must succeed"));
+            assert_eq!(back, payload, "{enc} round-trip must be lossless");
+        }
+    }
+
+    #[test]
+    fn compress_body_unknown_encoding_returns_none() {
+        assert!(compress_body("identity", b"abc").is_none());
+        assert!(compress_body("snappy", b"abc").is_none());
+    }
+
+    #[test]
+    fn compress_body_empty_is_supported() {
+        // An empty mock body must round-trip, not error — important since the
+        // default respond-rule body could legitimately be empty.
+        for enc in ["gzip", "deflate", "br"] {
+            let compressed = compress_body(enc, b"").expect("empty compresses");
+            let back = try_decompress(enc, &compressed).expect("empty decompresses");
+            assert!(back.is_empty(), "{enc} empty round-trip yields empty");
+        }
     }
 }
