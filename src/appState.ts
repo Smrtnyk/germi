@@ -15,6 +15,7 @@ import { resolveColumns, DEFAULT_COLUMNS } from "./columns";
 import { useSplitRatio } from "./useResizable";
 import { useToasts, type Notify } from "./toast";
 import { toCurl } from "./curl";
+import { nextIdAfterDelete } from "./selection";
 import type {
   AutoResponder,
   CaInfo,
@@ -893,6 +894,27 @@ export function useAppState() {
     [flowStore.flows, selection.selectedIds],
   );
   const inspector = useFlowDetail(selection.selectedId, decode, fullBody, selectedSummary);
+
+  // Deferred selection after delete: we don't move the selection until the
+  // deleted rows have actually been pruned by the backend's `removed` event,
+  // so the row-swap and the highlight move land in the same frame instead of
+  // "next lights up, then old pops out and lit row jumps up" (issue #4).
+  const pendingSelectRef = useRef<{ nextId: string | null; deleted: Set<string> } | null>(null);
+  useEffect(() => {
+    const pending = pendingSelectRef.current;
+    if (!pending) return;
+    const order = flowStore.orderRef.current;
+    if (pending.deleted.size > 0 && order.some((id) => pending.deleted.has(id))) return;
+    pendingSelectRef.current = null;
+    if (pending.nextId === null || !order.includes(pending.nextId)) {
+      selection.clearSelection();
+      inspector.setDetail(null);
+    } else {
+      selection.selectByKeyboard(pending.nextId, false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flowStore.flows]);
+
   const proxy = useProxyControl(
     settings.settings,
     setError,
@@ -1010,14 +1032,23 @@ export function useAppState() {
     clearTraffic();
   }
 
-  // Prune the selected flows (no confirm — the backend `removed` event drops the
-  // rows); clear the now-stale selection + detail, like clearTraffic does.
+  // Prune the selected flows (no confirm — the backend `removed` event drops
+  // the rows). The actual selection move is deferred until those rows are gone
+  // (see pendingSelectRef effect above), so the highlight transfer and the row
+  // removal happen in one frame instead of two (issue #4).
   function deleteSelected() {
     const ids = [...selection.selectedIds];
     if (ids.length === 0) return;
-    void api.removeFlows(ids).catch((e) => setError(String(e)));
-    selection.clearSelection();
-    inspector.setDetail(null);
+    const nextId = nextIdAfterDelete(
+      flowStore.orderRef.current,
+      new Set(ids),
+      selection.selectedId,
+    );
+    pendingSelectRef.current = { nextId, deleted: new Set(ids) };
+    void api.removeFlows(ids).catch((e) => {
+      pendingSelectRef.current = null;
+      setError(String(e));
+    });
   }
 
   function refreshCa() {
