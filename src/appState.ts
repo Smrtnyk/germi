@@ -618,7 +618,6 @@ function useAutoresponder(
     activeScenarioId: null,
   });
   const [selectRuleId, setSelectRuleId] = useState<string | null>(null);
-  const [pickScenarioId, setPickScenarioId] = useState("");
   const saveTimer = useRef<number | null>(null);
   const pendingSave = useRef<AutoResponder | null>(null);
   const { ruleHits, resetRuleState } = useRuleHits(
@@ -706,8 +705,6 @@ function useAutoresponder(
     autoresponder,
     setAutoresponder,
     selectRuleId,
-    pickScenarioId,
-    setPickScenarioId,
     saveAutoresponder,
     mockFlows,
     exportRules,
