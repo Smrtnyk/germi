@@ -176,7 +176,6 @@ function RuleListItem({
   dragOver,
   onSelect,
   onToggle,
-  onDuplicate,
   onContextMenu,
   onDragStart,
   onDragOver,
@@ -190,7 +189,6 @@ function RuleListItem({
   dragOver: boolean;
   onSelect: () => void;
   onToggle: (enabled: boolean) => void;
-  onDuplicate: () => void;
   onContextMenu: (e: ReactMouseEvent) => void;
   onDragStart: () => void;
   onDragOver: () => void;
@@ -249,16 +247,6 @@ function RuleListItem({
           )}
         </div>
       </div>
-      <button
-        className="btn ghost dup"
-        title="Duplicate rule"
-        onClick={(e) => {
-          e.stopPropagation();
-          onDuplicate();
-        }}
-      >
-        ⧉
-      </button>
     </div>
   );
 }
@@ -563,7 +551,6 @@ function RuleList({
           dragOver={overId === r.id && dragId !== r.id}
           onSelect={() => setSelectedRuleId(r.id)}
           onToggle={(enabled) => onToggle(r.id, enabled)}
-          onDuplicate={() => onDuplicate(r.id)}
           onContextMenu={(e) => openMenu(e, r)}
           onDragStart={() => setDragId(r.id)}
           onDragOver={() => setOverId(r.id)}
