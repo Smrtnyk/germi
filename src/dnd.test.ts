@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { decodeFlowIds, dragFlowIds, encodeFlowIds, FLOW_DRAG_MIME, hasFlowDrag } from "./dnd";
+import {
+  decodeFlowIds,
+  dragFlowIds,
+  encodeFlowIds,
+  FLOW_DRAG_MIME,
+  hasFlowDrag,
+  RULE_DRAG_MIME,
+} from "./dnd";
 
 const order = ["a", "b", "c", "d"];
 
@@ -54,8 +61,9 @@ describe("hasFlowDrag", () => {
     expect(hasFlowDrag(["text/plain", FLOW_DRAG_MIME])).toBe(true);
   });
 
-  it("ignores other drags (e.g. rule reorder, which carries no data)", () => {
+  it("ignores other drags (e.g. rule reorder, which uses its own MIME type)", () => {
     expect(hasFlowDrag([])).toBe(false);
     expect(hasFlowDrag(["text/plain"])).toBe(false);
+    expect(hasFlowDrag([RULE_DRAG_MIME])).toBe(false);
   });
 });

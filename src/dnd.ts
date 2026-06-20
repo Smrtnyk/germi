@@ -1,4 +1,5 @@
 export const FLOW_DRAG_MIME = "application/x-germi-flows";
+export const RULE_DRAG_MIME = "application/x-germi-rule";
 
 export function dragFlowIds(
   rowId: string,
