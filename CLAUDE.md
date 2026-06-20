@@ -95,8 +95,8 @@ Engine (proxy-core — these work without the GUI system libs):
 - **serde ↔ TS mirroring:** every DTO crossing the IPC boundary uses
   `#[serde(rename_all = "camelCase")]` (and `rename_all_fields = "camelCase"` on
   enums — enum-level `rename_all` does NOT rename variant fields). `src/types.ts`
-  must mirror these exactly. Use `#[serde(default)]` on new fields so legacy and
-  exported rule JSON from older versions still deserializes.
+  must mirror these exactly. Use `#[serde(default)]` only where the field is
+  semantically optional or an external import format requires leniency.
 - **Tauri commands:** async commands must return `Result<_, String>` and must
   **clone the `Arc` out of `State` before any `.await`** (never hold the `State`
   borrow across an await). JS passes camelCase arg names; Rust receives
@@ -105,8 +105,9 @@ Engine (proxy-core — these work without the GUI system libs):
   `autoresponder.sqlite3`, and `settings.json` (proxy-wide settings, e.g. host
   exclusions) live in the OS app-data dir (`AppState.ca_dir`).
   `src-tauri/src/rule_store.rs` owns normalized scenario/rule persistence and
-  migrates the old `autoresponder.json` once; `src-tauri/src/persist.rs` handles
-  settings.
+  `src-tauri/src/persist.rs` handles settings. There is deliberately no
+  pre-release autoresponder migration path; schema changes may discard old
+  development data.
   **Traffic is deliberately NOT auto-persisted** (privacy: captured tokens/bodies
   shouldn't silently hit disk) — it's explicit Save/Open of a lossless `.germi`
   session file (`proxy-core/src/session.rs`, base64 bodies). Don't add background
