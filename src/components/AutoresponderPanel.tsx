@@ -2,6 +2,7 @@ import {
   lazy,
   Suspense,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type DragEvent as ReactDragEvent,
@@ -9,6 +10,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { api } from "../ipc";
 import { decodeFlowIds, FLOW_DRAG_MIME, hasFlowDrag, RULE_DRAG_MIME } from "../dnd";
@@ -476,31 +478,7 @@ function useRuleMenu(canReorder: boolean, actions: RuleMenuActions): RuleMenu {
   return { openMenu, menuEl };
 }
 
-function RuleList({
-  rules,
-  shownRules,
-  query,
-  setQuery,
-  selectedRuleId,
-  setSelectedRuleId,
-  canReorder,
-  dragId,
-  setDragId,
-  overId,
-  setOverId,
-  ruleHits,
-  onAdd,
-  onToggle,
-  onDuplicate,
-  onDelete,
-  onMoveToTop,
-  onMoveToBottom,
-  onReorder,
-}: {
-  rules: Rule[];
-  shownRules: Rule[];
-  query: string;
-  setQuery: (q: string) => void;
+interface RuleListBehavior {
   selectedRuleId: string | null;
   setSelectedRuleId: (id: string | null) => void;
   canReorder: boolean;
@@ -509,27 +487,31 @@ function RuleList({
   overId: string | null;
   setOverId: (id: string | null) => void;
   ruleHits: Record<string, number>;
-  onAdd: () => void;
   onToggle: (id: string, enabled: boolean) => void;
   onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
   onMoveToTop: (id: string) => void;
   onMoveToBottom: (id: string) => void;
   onReorder: (toId: string) => void;
+}
+
+function RuleListToolbar({
+  ruleCount,
+  query,
+  setQuery,
+  onAdd,
+}: {
+  ruleCount: number;
+  query: string;
+  setQuery: (q: string) => void;
+  onAdd: () => void;
 }) {
-  const { openMenu, menuEl } = useRuleMenu(canReorder, {
-    onMoveToTop,
-    onMoveToBottom,
-    onDuplicate,
-    onToggle,
-    onDelete,
-  });
   return (
-    <aside className="rule-list">
+    <>
       <button className="btn primary block" onClick={onAdd}>
         + Add rule
       </button>
-      {rules.length > 4 && (
+      {ruleCount > 4 && (
         <input
           className="rule-search"
           placeholder="Search rules…"
@@ -537,36 +519,128 @@ function RuleList({
           onChange={(e) => setQuery(e.target.value)}
         />
       )}
-      {rules.length === 0 && <div className="muted pad">No rules in this scenario yet.</div>}
-      {rules.length > 0 && shownRules.length === 0 && (
-        <div className="muted pad small">No rules match “{query}”.</div>
-      )}
-      {shownRules.map((r) => (
-        <RuleListItem
-          key={r.id}
-          rule={r}
-          selected={r.id === selectedRuleId}
-          hits={ruleHits[r.id] ?? 0}
-          draggable={canReorder}
-          dragOver={overId === r.id && dragId !== r.id}
-          onSelect={() => setSelectedRuleId(r.id)}
-          onToggle={(enabled) => onToggle(r.id, enabled)}
-          onContextMenu={(e) => openMenu(e, r)}
-          onDragStart={() => setDragId(r.id)}
-          onDragOver={() => setOverId(r.id)}
-          onDrop={() => {
-            onReorder(r.id);
-            setDragId(null);
-            setOverId(null);
-          }}
-          onDragEnd={() => {
-            setDragId(null);
-            setOverId(null);
-          }}
-        />
-      ))}
-      {menuEl}
+    </>
+  );
+}
+
+function RuleListMessage({
+  ruleCount,
+  shownCount,
+  query,
+}: {
+  ruleCount: number;
+  shownCount: number;
+  query: string;
+}) {
+  if (ruleCount === 0) return <div className="muted pad">No rules in this scenario yet.</div>;
+  if (shownCount === 0) {
+    return <div className="muted pad small">No rules match “{query}”.</div>;
+  }
+  return null;
+}
+
+function RuleList({
+  rules,
+  shownRules,
+  query,
+  setQuery,
+  onAdd,
+  behavior,
+}: {
+  rules: Rule[];
+  shownRules: Rule[];
+  query: string;
+  setQuery: (q: string) => void;
+  onAdd: () => void;
+  behavior: RuleListBehavior;
+}) {
+  return (
+    <aside className="rule-list">
+      <RuleListToolbar ruleCount={rules.length} query={query} setQuery={setQuery} onAdd={onAdd} />
+      <RuleListMessage ruleCount={rules.length} shownCount={shownRules.length} query={query} />
+      <VirtualRuleList rules={shownRules} behavior={behavior} />
     </aside>
+  );
+}
+
+function VirtualRuleList({ rules, behavior }: { rules: Rule[]; behavior: RuleListBehavior }) {
+  const {
+    selectedRuleId,
+    setSelectedRuleId,
+    canReorder,
+    dragId,
+    setDragId,
+    overId,
+    setOverId,
+    ruleHits,
+    onToggle,
+    onDuplicate,
+    onDelete,
+    onMoveToTop,
+    onMoveToBottom,
+    onReorder,
+  } = behavior;
+  const { openMenu, menuEl } = useRuleMenu(canReorder, {
+    onMoveToTop,
+    onMoveToBottom,
+    onDuplicate,
+    onToggle,
+    onDelete,
+  });
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const selectedIndex = rules.findIndex((rule) => rule.id === selectedRuleId);
+  const virtualizer = useVirtualizer({
+    count: rules.length,
+    getScrollElement: () => scrollRef.current,
+    getItemKey: (index) => rules[index].id,
+    estimateSize: () => 52,
+    overscan: 8,
+  });
+
+  useEffect(() => {
+    if (selectedIndex >= 0) {
+      virtualizer.scrollToIndex(selectedIndex, { align: "auto" });
+    }
+  }, [selectedIndex, virtualizer]);
+
+  return (
+    <div ref={scrollRef} className="rule-list-viewport">
+      <div className="rule-list-canvas" style={{ height: virtualizer.getTotalSize() }}>
+        {virtualizer.getVirtualItems().map((item) => {
+          const rule = rules[item.index];
+          return (
+            <div
+              key={rule.id}
+              className="rule-item-slot"
+              style={{ height: item.size, transform: `translateY(${item.start}px)` }}
+            >
+              <RuleListItem
+                rule={rule}
+                selected={rule.id === selectedRuleId}
+                hits={ruleHits[rule.id] ?? 0}
+                draggable={canReorder}
+                dragOver={overId === rule.id && dragId !== rule.id}
+                onSelect={() => setSelectedRuleId(rule.id)}
+                onToggle={(enabled) => onToggle(rule.id, enabled)}
+                onContextMenu={(event) => openMenu(event, rule)}
+                onDragStart={() => setDragId(rule.id)}
+                onDragOver={() => setOverId(rule.id)}
+                onDrop={() => {
+                  onReorder(rule.id);
+                  setDragId(null);
+                  setOverId(null);
+                }}
+                onDragEnd={() => {
+                  setDragId(null);
+                  setOverId(null);
+                }}
+              />
+            </div>
+          );
+        })}
+      </div>
+      {menuEl}
+    </div>
   );
 }
 
@@ -648,11 +722,15 @@ function ScenarioView({
   });
 
   const q = query.trim().toLowerCase();
-  const shownRules = q
-    ? active.rules.filter(
-        (r) => r.name.toLowerCase().includes(q) || r.matcher.url.toLowerCase().includes(q),
-      )
-    : active.rules;
+  const shownRules = useMemo(
+    () =>
+      q
+        ? active.rules.filter(
+            (r) => r.name.toLowerCase().includes(q) || r.matcher.url.toLowerCase().includes(q),
+          )
+        : active.rules,
+    [active.rules, q],
+  );
   const selectedRule = active.rules.find((r) => r.id === selectedRuleId) ?? null;
 
   return (
@@ -701,21 +779,23 @@ function ScenarioView({
           shownRules={shownRules}
           query={query}
           setQuery={setQuery}
-          selectedRuleId={selectedRuleId}
-          setSelectedRuleId={setSelectedRuleId}
-          canReorder={!q}
-          dragId={dragId}
-          setDragId={setDragId}
-          overId={overId}
-          setOverId={setOverId}
-          ruleHits={ruleHits}
           onAdd={rules.addRule}
-          onToggle={(id, enabled) => rules.patchRule(id, { enabled })}
-          onDuplicate={rules.duplicateRule}
-          onDelete={rules.deleteRule}
-          onMoveToTop={rules.moveToTop}
-          onMoveToBottom={rules.moveToBottom}
-          onReorder={(toId) => rules.reorder(dragId, toId)}
+          behavior={{
+            selectedRuleId,
+            setSelectedRuleId,
+            canReorder: !q,
+            dragId,
+            setDragId,
+            overId,
+            setOverId,
+            ruleHits,
+            onToggle: (id, enabled) => rules.patchRule(id, { enabled }),
+            onDuplicate: rules.duplicateRule,
+            onDelete: rules.deleteRule,
+            onMoveToTop: rules.moveToTop,
+            onMoveToBottom: rules.moveToBottom,
+            onReorder: (toId) => rules.reorder(dragId, toId),
+          }}
         />
 
         <div className="resizer" onPointerDown={listResize.onPointerDown} title="Drag to resize" />

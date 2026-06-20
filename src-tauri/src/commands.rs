@@ -176,14 +176,20 @@ pub fn test_rules(rules: RuleSet, input: TestInput) -> TestResult {
 /// Seed Respond rules from the given captured flows into a scenario, persist,
 /// and return the updated autoresponder + the new rule ids.
 #[tauri::command]
-pub fn mock_flows(
+pub async fn mock_flows(
     state: State<'_, AppState>,
     ids: Vec<String>,
     scenario_id: Option<String>,
-) -> MockResult {
-    let result = state.controller.mock_flows(&ids, scenario_id.as_deref());
-    crate::persist::save_autoresponder(&state.ca_dir, &result.autoresponder);
-    result
+) -> Result<MockResult, String> {
+    let controller = state.controller.clone();
+    let ca_dir = state.ca_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = controller.mock_flows(&ids, scenario_id.as_deref());
+        crate::persist::save_autoresponder(&ca_dir, &result.autoresponder);
+        result
+    })
+    .await
+    .map_err(|e| format!("bulk mock task failed: {e}"))
 }
 
 #[tauri::command]
