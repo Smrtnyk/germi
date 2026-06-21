@@ -1290,6 +1290,7 @@ textarea {
 }
 .editor-form {
   max-width: 760px;
+  min-width: 460px;
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
@@ -2490,4 +2491,26 @@ kbd {
   flex: none;
   min-width: 120px;
   text-align: center;
+}
+
+/* ---- Tooltip ---- */
+.tooltip-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: help;
+}
+.tooltip-popup {
+  position: fixed;
+  transform: translateX(-50%) translateY(-100%);
+  z-index: 9999;
+  pointer-events: none;
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  padding: 4px 8px;
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }

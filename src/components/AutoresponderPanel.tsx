@@ -28,6 +28,7 @@ import { useResizable } from "../useResizable";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { RuleTester } from "./RuleTester";
+import { Tooltip } from "./Tooltip";
 
 // Lazy-loaded so CodeMirror (and its language packs) is a separate chunk fetched
 // only when a mock body is actually edited — keeps app startup light.
@@ -1530,7 +1531,9 @@ function ContentEncodingField({
         ))}
       </select>
       {value && (
-        <span className="muted small">⚡ response will be {value}-encoded on the wire</span>
+        <Tooltip label={`Response will be ${value}-encoded on the wire`}>
+          <span className="muted small">⚡</span>
+        </Tooltip>
       )}
     </div>
   );
