@@ -20,6 +20,7 @@ import type {
   ActionSummary,
   AutoResponderSummary,
   BulkMockEvent,
+  HistoryTag,
   Rule,
   RuleSummary,
   ScenarioSummary,
@@ -45,7 +46,7 @@ interface ScenarioActions {
 interface RuleActions {
   create: (scenarioId: string) => Promise<RuleSummary | null>;
   load: (ruleId: string) => Promise<Rule | null>;
-  update: (scenarioId: string, rule: Rule) => Promise<RuleSummary | null>;
+  update: (scenarioId: string, rule: Rule, tag?: HistoryTag) => Promise<RuleSummary | null>;
   delete: (scenarioId: string, ruleId: string) => void;
   duplicate: (scenarioId: string, ruleId: string) => Promise<RuleSummary | null>;
   reorder: (scenarioId: string, ruleId: string, toId: string) => void;
@@ -66,6 +67,8 @@ export interface AutoresponderPanelProps {
   selectRuleId?: string | null;
   ruleHits: Record<string, number>;
   bulkMockProgress: BulkMockEvent | null;
+  /** Bumped on every undo/redo so the open rule re-fetches its reverted value. */
+  reloadToken?: number;
 }
 
 const ACTION_KINDS: { value: ActionKind; label: string }[] = [
@@ -285,7 +288,8 @@ function useSelectedRule(
   scenarioId: string,
   selectedRuleId: string | null,
   onLoadRule: (ruleId: string) => Promise<Rule | null>,
-  onUpdateRule: (scenarioId: string, rule: Rule) => Promise<RuleSummary | null>,
+  onUpdateRule: (scenarioId: string, rule: Rule, tag?: HistoryTag) => Promise<RuleSummary | null>,
+  reloadToken?: number,
 ) {
   const [rule, setRule] = useState<Rule | null>(null);
   const [loading, setLoading] = useState(false);
@@ -321,7 +325,7 @@ function useSelectedRule(
         setSaveState("idle");
       }
     });
-  }, [scenarioId, selectedRuleId]);
+  }, [scenarioId, selectedRuleId, reloadToken]);
 
   useEffect(() => {
     return () => {
@@ -331,12 +335,16 @@ function useSelectedRule(
     };
   }, [scenarioId]);
 
-  function patch(changes: Partial<Rule>) {
+  function patch(changes: Partial<Rule>, tag?: HistoryTag) {
     if (!rule) return;
     const next = { ...rule, ...changes };
     setRule(next);
-    pendingRule.current = next;
     setSaveState("saving");
+    if (tag) {
+      void commitDiscrete(next, tag);
+      return;
+    }
+    pendingRule.current = next;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
       const pending = pendingRule.current;
@@ -347,6 +355,19 @@ function useSelectedRule(
         if (summary) setSaveState("saved");
       });
     }, 300);
+  }
+
+  // Seal any pending typing as its own (rule-keyed) step, then record `next`
+  // under its own history key — so e.g. Format is a separate, single undo entry
+  // instead of folding into the surrounding edits.
+  async function commitDiscrete(next: Rule, tag: HistoryTag) {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = null;
+    const pending = pendingRule.current;
+    pendingRule.current = null;
+    if (pending) await updateRuleRef.current(scenarioId, pending);
+    const summary = await updateRuleRef.current(scenarioId, next, tag);
+    if (summary) setSaveState("saved");
   }
 
   function clearPending() {
@@ -673,7 +694,7 @@ function RuleEditorPane({
   selectedRule: Rule | null;
   loading: boolean;
   ruleHits: Record<string, number>;
-  onPatchRule: (p: Partial<Rule>) => void;
+  onPatchRule: (p: Partial<Rule>, tag?: HistoryTag) => void;
   onDeleteRule: (id: string) => void;
 }) {
   return (
@@ -754,6 +775,7 @@ function useScenarioWorkspace(
   active: ScenarioSummary,
   selectRuleId: string | null | undefined,
   ruleActions: RuleActions,
+  reloadToken?: number,
 ) {
   const selection = useRuleSelection(selectRuleId);
   const editor = useSelectedRule(
@@ -761,6 +783,7 @@ function useScenarioWorkspace(
     selection.selectedRuleId,
     ruleActions.load,
     ruleActions.update,
+    reloadToken,
   );
   const rulesRef = useRef<HTMLDivElement>(null);
   const listResize = useResizable({
@@ -947,6 +970,7 @@ function ScenarioView({
   active,
   onRequestDelete,
   selectRuleId,
+  reloadToken,
   ruleHits,
   drop,
   scenarioActions,
@@ -956,13 +980,14 @@ function ScenarioView({
   active: ScenarioSummary;
   onRequestDelete: () => void;
   selectRuleId?: string | null;
+  reloadToken?: number;
   ruleHits: Record<string, number>;
   drop: { active: boolean; props: FlowDropZone };
   scenarioActions: ScenarioActions;
   ruleActions: RuleActions;
   onExport: () => void;
 }) {
-  const workspace = useScenarioWorkspace(active, selectRuleId, ruleActions);
+  const workspace = useScenarioWorkspace(active, selectRuleId, ruleActions, reloadToken);
   const nameEditor = useScenarioName(active, scenarioActions.rename);
   const exportScenario = () => {
     nameEditor.flush();
@@ -1075,6 +1100,7 @@ export function AutoresponderPanel({
   selectRuleId,
   ruleHits,
   bulkMockProgress,
+  reloadToken,
 }: AutoresponderPanelProps) {
   const [pendingDelete, setPendingDelete] = useState<ScenarioSummary | null>(null);
   const [pendingReplace, setPendingReplace] = useState(false);
@@ -1103,6 +1129,7 @@ export function AutoresponderPanel({
           active={active}
           onRequestDelete={() => setPendingDelete(active)}
           selectRuleId={selectRuleId}
+          reloadToken={reloadToken}
           ruleHits={ruleHits}
           drop={{ active: zone === "__body__", props: zoneProps("__body__", active.id) }}
           scenarioActions={scenarioActions}
@@ -1323,11 +1350,11 @@ function RuleEditor({
 }: {
   rule: Rule;
   hits: number;
-  onPatch: (patch: Partial<Rule>) => void;
+  onPatch: (patch: Partial<Rule>, tag?: HistoryTag) => void;
   onDelete: () => void;
 }) {
-  function setAction(patch: Partial<Action>) {
-    onPatch({ action: { ...rule.action, ...patch } as Action });
+  function setAction(patch: Partial<Action>, tag?: HistoryTag) {
+    onPatch({ action: { ...rule.action, ...patch } as Action }, tag);
   }
 
   const warnings = ruleWarnings(rule);
@@ -1663,7 +1690,7 @@ function ActionFields({
   setAction,
 }: {
   action: Action;
-  setAction: (patch: Partial<Action>) => void;
+  setAction: (patch: Partial<Action>, tag?: HistoryTag) => void;
 }) {
   switch (action.kind) {
     case "respond": {
@@ -1694,7 +1721,8 @@ function ActionFields({
                   title="Pretty-print JSON"
                   onClick={() => {
                     const f = formatJson(action.body);
-                    if (f !== null) setAction({ body: f });
+                    if (f !== null)
+                      setAction({ body: f }, { label: "Format body", coalesceKey: null });
                   }}
                 >
                   Format

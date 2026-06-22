@@ -145,6 +145,7 @@ function isTyping(target: EventTarget | null): boolean {
 }
 
 function runModShortcut(
+  e: KeyboardEvent,
   k: string,
   s: AppStateValue,
   setPaletteOpen: Dispatch<SetStateAction<boolean>>,
@@ -168,6 +169,14 @@ function runModShortcut(
     case "2":
       s.setRightTab("autoresponder");
       return true;
+    case "z":
+    case "y":
+      // Global undo/redo — pass through to CodeMirror / inputs when one is
+      // focused so they keep their own native undo. The History panel always works.
+      if (isTyping(e.target)) return false;
+      if (k === "y" || e.shiftKey) s.history.redo();
+      else s.history.undo();
+      return true;
     default:
       return false;
   }
@@ -187,7 +196,7 @@ function handleShortcut(
       s.selectAllVisible();
       return;
     }
-    if (runModShortcut(k, s, setPaletteOpen)) e.preventDefault();
+    if (runModShortcut(e, k, s, setPaletteOpen)) e.preventDefault();
     return;
   }
   if (isTyping(e.target)) return;
@@ -413,6 +422,7 @@ export function App() {
             onOpenSession={s.session.openSession}
             onSaveSession={s.session.saveSession}
             onClear={s.requestClearTraffic}
+            history={s.history}
             filter={s.filtering.filter}
             onFilterChange={s.filtering.setFilter}
             filterInputRef={s.filterInputRef}
@@ -520,6 +530,7 @@ export function App() {
                   selectRuleId: s.ar.selectRuleId,
                   ruleHits: s.ar.ruleHits,
                   bulkMockProgress: s.ar.bulkMockProgress,
+                  reloadToken: s.history.version,
                 }}
               />
             )}

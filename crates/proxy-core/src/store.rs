@@ -141,6 +141,42 @@ impl FlowStore {
         before - self.order.len()
     }
 
+    /// Like `remove`, but returns each removed flow paired with its original
+    /// position in capture order (ascending), so the removal can be reversed
+    /// with `restore`. Unknown ids are ignored.
+    pub fn remove_capturing(&mut self, ids: &[String]) -> Vec<(usize, Flow)> {
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let drop: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let captured: Vec<(usize, Flow)> = self
+            .order
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| drop.contains(id.as_str()))
+            .filter_map(|(index, id)| self.flows.get(id).map(|flow| (index, flow.clone())))
+            .collect();
+        self.order.retain(|id| !drop.contains(id.as_str()));
+        self.flows.retain(|id, _| !drop.contains(id.as_str()));
+        captured
+    }
+
+    /// Re-insert flows removed by `remove_capturing` (or a cleared snapshot),
+    /// restoring capture order. `items` must be in ascending-index order; an
+    /// index past the current end clamps to the end, and an id that is somehow
+    /// already present is skipped (so undo can never duplicate a row). Restoring
+    /// may push the store above its retention cap; the next insert trims it.
+    pub fn restore(&mut self, items: Vec<(usize, Flow)>) {
+        for (index, flow) in items {
+            if self.flows.contains_key(&flow.id) {
+                continue;
+            }
+            let at = index.min(self.order.len());
+            self.order.insert(at, flow.id.clone());
+            self.flows.insert(flow.id.clone(), flow);
+        }
+    }
+
     #[allow(dead_code)] // used by the Tauri layer's status bar
     pub fn len(&self) -> usize {
         self.order.len()
@@ -241,5 +277,37 @@ mod tests {
         assert!(store.get("b").is_some());
         assert!(store.get("c").is_some());
         assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn remove_capturing_then_restore_round_trips_capture_order() {
+        let mut store = FlowStore::new(10);
+        for id in ["a", "b", "c", "d"] {
+            store.insert(flow(id));
+        }
+        let captured = store.remove_capturing(&["b".to_string(), "d".to_string()]);
+        assert_eq!(
+            captured.iter().map(|(i, f)| (*i, f.id.clone())).collect::<Vec<_>>(),
+            vec![(1, "b".to_string()), (3, "d".to_string())],
+            "removed flows carry their original capture positions, ascending"
+        );
+        assert_eq!(store.ids(), vec!["a".to_string(), "c".to_string()]);
+
+        store.restore(captured);
+        assert_eq!(
+            store.ids(),
+            ["a", "b", "c", "d"].map(str::to_string).to_vec(),
+            "restore rebuilds the original capture order exactly"
+        );
+    }
+
+    #[test]
+    fn restore_skips_ids_already_present() {
+        let mut store = FlowStore::new(10);
+        store.insert(flow("a"));
+        store.insert(flow("b"));
+        // "a" is still present — restoring a stale capture of it must not dup the row.
+        store.restore(vec![(0, flow("a"))]);
+        assert_eq!(store.ids(), vec!["a".to_string(), "b".to_string()]);
     }
 }

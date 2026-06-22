@@ -12,6 +12,7 @@ use tokio::sync::broadcast;
 use crate::flow::{
     extract_header_columns, CapturedRequest, CapturedResponse, Flow, FlowEvent,
 };
+use crate::history::History;
 use crate::rules::{AutoResponder, RuleCursors};
 use crate::settings::ProxySettings;
 use crate::store::FlowStore;
@@ -21,6 +22,7 @@ pub struct Shared {
     pub autoresponder: RwLock<AutoResponder>,
     pub settings: RwLock<ProxySettings>,
     pub cursors: Mutex<RuleCursors>,
+    pub history: Mutex<History>,
     pub events: broadcast::Sender<FlowEvent>,
     counter: AtomicU64,
 }
@@ -39,6 +41,7 @@ impl Shared {
             autoresponder: RwLock::new(autoresponder),
             settings: RwLock::new(settings),
             cursors: Mutex::new(RuleCursors::default()),
+            history: Mutex::new(History::default()),
             events,
             counter: AtomicU64::new(1),
         })

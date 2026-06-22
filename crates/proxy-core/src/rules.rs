@@ -53,7 +53,7 @@ pub enum MatchKind {
 }
 
 /// Scopes which flows a rule touches.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Matcher {
     /// HTTP method to require. `None`/empty matches any method.
@@ -83,7 +83,7 @@ impl Matcher {
 }
 
 /// What a rule does when it matches.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Action {
     // --- request-phase, short-circuiting ---
@@ -136,7 +136,7 @@ fn default_ok() -> u16 {
 }
 
 /// A single named rule.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Rule {
     pub id: String,
@@ -163,7 +163,7 @@ pub struct RuleSet {
 }
 
 /// A named, switchable group of rules. Exactly one scenario is active at a time.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Scenario {
     pub id: String,
@@ -173,7 +173,7 @@ pub struct Scenario {
 }
 
 /// The autoresponder: many scenarios, at most one active (`None` = Off).
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoResponder {
     #[serde(default)]

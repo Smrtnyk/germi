@@ -92,6 +92,11 @@ pub fn run() {
             commands::open_session,
             commands::export_rules,
             commands::import_rules,
+            commands::history_list,
+            commands::history_undo,
+            commands::history_redo,
+            commands::history_jump,
+            commands::history_clear,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Germi")

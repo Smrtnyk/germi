@@ -7,6 +7,8 @@ import type {
   FlowDetail,
   FlowEvent,
   FlowSummary,
+  HistoryTag,
+  HistoryView,
   MockResult,
   ProxySettings,
   Rule,
@@ -33,22 +35,24 @@ export const api = {
 
   getAutoresponderSummary: () => invoke<AutoResponderSummary>("get_autoresponder_summary"),
   getRule: (ruleId: string) => invoke<Rule | null>("get_rule", { ruleId }),
-  setActiveScenario: (scenarioId: string | null) =>
-    invoke<void>("set_active_scenario", { scenarioId }),
-  createScenario: (name: string | null = null) =>
-    invoke<ScenarioSummary>("create_scenario", { name }),
-  renameScenario: (scenarioId: string, name: string) =>
-    invoke<void>("rename_scenario", { scenarioId, name }),
-  deleteScenario: (scenarioId: string) => invoke<void>("delete_scenario", { scenarioId }),
-  createRule: (scenarioId: string) => invoke<RuleSummary>("create_rule", { scenarioId }),
-  updateRule: (scenarioId: string, rule: Rule) =>
-    invoke<RuleSummary>("update_rule", { scenarioId, rule }),
-  deleteRule: (scenarioId: string, ruleId: string) =>
-    invoke<void>("delete_rule", { scenarioId, ruleId }),
-  duplicateRule: (scenarioId: string, ruleId: string) =>
-    invoke<RuleSummary>("duplicate_rule", { scenarioId, ruleId }),
-  reorderRule: (scenarioId: string, ruleId: string, toId: string) =>
-    invoke<void>("reorder_rule", { scenarioId, ruleId, toId }),
+  setActiveScenario: (scenarioId: string | null, historyTag: HistoryTag) =>
+    invoke<void>("set_active_scenario", { scenarioId, historyTag }),
+  createScenario: (name: string | null, historyTag: HistoryTag) =>
+    invoke<ScenarioSummary>("create_scenario", { name, historyTag }),
+  renameScenario: (scenarioId: string, name: string, historyTag: HistoryTag) =>
+    invoke<void>("rename_scenario", { scenarioId, name, historyTag }),
+  deleteScenario: (scenarioId: string, historyTag: HistoryTag) =>
+    invoke<void>("delete_scenario", { scenarioId, historyTag }),
+  createRule: (scenarioId: string, historyTag: HistoryTag) =>
+    invoke<RuleSummary>("create_rule", { scenarioId, historyTag }),
+  updateRule: (scenarioId: string, rule: Rule, historyTag: HistoryTag) =>
+    invoke<RuleSummary>("update_rule", { scenarioId, rule, historyTag }),
+  deleteRule: (scenarioId: string, ruleId: string, historyTag: HistoryTag) =>
+    invoke<void>("delete_rule", { scenarioId, ruleId, historyTag }),
+  duplicateRule: (scenarioId: string, ruleId: string, historyTag: HistoryTag) =>
+    invoke<RuleSummary>("duplicate_rule", { scenarioId, ruleId, historyTag }),
+  reorderRule: (scenarioId: string, ruleId: string, toId: string, historyTag: HistoryTag) =>
+    invoke<void>("reorder_rule", { scenarioId, ruleId, toId, historyTag }),
   resetRuleState: (scenarioId: string | null) => invoke<void>("reset_rule_state", { scenarioId }),
   ruleHits: () => invoke<Record<string, number>>("rule_hits"),
   getSettings: () => invoke<ProxySettings>("get_settings"),
@@ -60,11 +64,12 @@ export const api = {
   mockFlows: (
     ids: string[],
     scenarioId: string | null,
+    historyTag: HistoryTag,
     onProgress: (event: BulkMockEvent) => void,
   ) => {
     const progress = new Channel<BulkMockEvent>();
     progress.onmessage = onProgress;
-    return invoke<MockResult>("mock_flows", { ids, scenarioId, progress });
+    return invoke<MockResult>("mock_flows", { ids, scenarioId, historyTag, progress });
   },
 
   importArchive: () => invoke<number>("import_archive"),
@@ -73,7 +78,14 @@ export const api = {
   saveSession: () => invoke<boolean>("save_session"),
   openSession: () => invoke<number>("open_session"),
   exportRules: (scenarioId: string | null) => invoke<boolean>("export_rules", { scenarioId }),
-  importRules: (replace: boolean) => invoke<number>("import_rules", { replace }),
+  importRules: (replace: boolean, historyTag: HistoryTag) =>
+    invoke<number>("import_rules", { replace, historyTag }),
+
+  historyList: () => invoke<HistoryView>("history_list"),
+  historyUndo: () => invoke<HistoryView>("history_undo"),
+  historyRedo: () => invoke<HistoryView>("history_redo"),
+  historyJump: (entryId: number) => invoke<HistoryView>("history_jump", { entryId }),
+  historyClear: () => invoke<void>("history_clear"),
   searchBodies: (
     pattern: string,
     side: "request" | "response" | "either",

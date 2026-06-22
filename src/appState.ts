@@ -31,6 +31,9 @@ import type {
   FlowDetail,
   FlowEvent,
   FlowSummary,
+  HistoryEntry,
+  HistoryTag,
+  HistoryView,
   ProxySettings,
   ResourceKind,
   Rule,
@@ -626,11 +629,28 @@ function useRuleHits(activeScenarioId: string | null, active: boolean, setError:
   return { ruleHits, resetRuleState };
 }
 
+function scenarioNameIn(ar: AutoResponderSummary, id: string | null): string {
+  return ar.scenarios.find((scenario) => scenario.id === id)?.name || "scenario";
+}
+
+function ruleNameIn(ar: AutoResponderSummary, ruleId: string): string {
+  for (const scenario of ar.scenarios) {
+    const found = scenario.rules.find((rule) => rule.id === ruleId);
+    if (found) return found.name || "rule";
+  }
+  return "rule";
+}
+
+function activateLabel(ar: AutoResponderSummary, scenarioId: string | null): string {
+  return scenarioId ? `Activate "${scenarioNameIn(ar, scenarioId)}"` : "Turn mocking off";
+}
+
 function useAutoresponder(
   setError: SetError,
   setRightTab: (tab: RightTab) => void,
   notify: Notify,
   autoresponderActive: boolean,
+  note: () => void,
 ) {
   const [autoresponder, setAutoresponder] = useState<AutoResponderSummary>({
     scenarios: [],
@@ -644,6 +664,11 @@ function useAutoresponder(
     setError,
   );
 
+  // Latest summary in a ref so actions can build human history labels (scenario
+  // / rule names) without taking the summary as a dependency.
+  const arRef = useRef(autoresponder);
+  arRef.current = autoresponder;
+
   const refresh = useCallback(async () => {
     try {
       setAutoresponder(await api.getAutoresponderSummary());
@@ -655,27 +680,30 @@ function useAutoresponder(
   const activateScenario = useCallback(
     (scenarioId: string | null) => {
       setAutoresponder((current) => ({ ...current, activeScenarioId: scenarioId }));
-      void api.setActiveScenario(scenarioId).catch((e) => {
+      note();
+      const label = activateLabel(arRef.current, scenarioId);
+      void api.setActiveScenario(scenarioId, { label }).catch((e) => {
         setError(String(e));
         void refresh();
       });
     },
-    [refresh, setError],
+    [refresh, setError, note],
   );
 
   const createScenario = useCallback(async (): Promise<ScenarioSummary | null> => {
     try {
-      const scenario = await api.createScenario();
+      const scenario = await api.createScenario(null, { label: "New scenario" });
       setAutoresponder((current) => ({
         scenarios: [...current.scenarios, scenario],
         activeScenarioId: scenario.id,
       }));
+      note();
       return scenario;
     } catch (e) {
       setError(String(e));
       return null;
     }
-  }, [setError]);
+  }, [setError, note]);
 
   const renameScenario = useCallback(
     (scenarioId: string, name: string) => {
@@ -685,40 +713,49 @@ function useAutoresponder(
           scenario.id === scenarioId ? { ...scenario, name } : scenario,
         ),
       }));
-      void api.renameScenario(scenarioId, name).catch((e) => {
-        setError(String(e));
-        void refresh();
-      });
+      note();
+      void api
+        .renameScenario(scenarioId, name, {
+          label: "Rename scenario",
+          coalesceKey: `scenario:${scenarioId}:name`,
+        })
+        .catch((e) => {
+          setError(String(e));
+          void refresh();
+        });
     },
-    [refresh, setError],
+    [refresh, setError, note],
   );
 
   const deleteScenario = useCallback(
     (scenarioId: string) => {
+      const label = `Delete scenario "${scenarioNameIn(arRef.current, scenarioId)}"`;
       setAutoresponder((current) => ({
         scenarios: current.scenarios.filter((scenario) => scenario.id !== scenarioId),
         activeScenarioId: current.activeScenarioId === scenarioId ? null : current.activeScenarioId,
       }));
-      void api.deleteScenario(scenarioId).catch((e) => {
+      note();
+      void api.deleteScenario(scenarioId, { label }).catch((e) => {
         setError(String(e));
         void refresh();
       });
     },
-    [refresh, setError],
+    [refresh, setError, note],
   );
 
   const createRule = useCallback(
     async (scenarioId: string): Promise<RuleSummary | null> => {
       try {
-        const rule = await api.createRule(scenarioId);
+        const rule = await api.createRule(scenarioId, { label: "New rule" });
         setAutoresponder((current) => appendRuleSummary(current, scenarioId, rule));
+        note();
         return rule;
       } catch (e) {
         setError(String(e));
         return null;
       }
     },
-    [setError],
+    [setError, note],
   );
 
   const loadRule = useCallback(
@@ -734,54 +771,66 @@ function useAutoresponder(
   );
 
   const updateRule = useCallback(
-    async (scenarioId: string, rule: Rule): Promise<RuleSummary | null> => {
+    async (scenarioId: string, rule: Rule, tag?: HistoryTag): Promise<RuleSummary | null> => {
       try {
-        const summary = await api.updateRule(scenarioId, rule);
+        const summary = await api.updateRule(
+          scenarioId,
+          rule,
+          tag ?? {
+            label: `Edit rule "${rule.name || "untitled"}"`,
+            coalesceKey: `rule:${rule.id}`,
+          },
+        );
         setAutoresponder((current) => replaceRuleSummary(current, scenarioId, summary));
+        note();
         return summary;
       } catch (e) {
         setError(String(e));
         return null;
       }
     },
-    [setError],
+    [setError, note],
   );
 
   const deleteRule = useCallback(
     (scenarioId: string, ruleId: string) => {
+      const label = `Delete rule "${ruleNameIn(arRef.current, ruleId)}"`;
       setAutoresponder((current) => removeRuleSummary(current, scenarioId, ruleId));
-      void api.deleteRule(scenarioId, ruleId).catch((e) => {
+      note();
+      void api.deleteRule(scenarioId, ruleId, { label }).catch((e) => {
         setError(String(e));
         void refresh();
       });
     },
-    [refresh, setError],
+    [refresh, setError, note],
   );
 
   const duplicateRule = useCallback(
     async (scenarioId: string, ruleId: string): Promise<RuleSummary | null> => {
       try {
-        const copy = await api.duplicateRule(scenarioId, ruleId);
+        const copy = await api.duplicateRule(scenarioId, ruleId, { label: "Duplicate rule" });
         setAutoresponder((current) => insertRuleSummaryAfter(current, scenarioId, ruleId, copy));
+        note();
         return copy;
       } catch (e) {
         setError(String(e));
         return null;
       }
     },
-    [setError],
+    [setError, note],
   );
 
   const reorderRule = useCallback(
     (scenarioId: string, ruleId: string, toId: string) => {
       if (ruleId === toId) return;
       setAutoresponder((current) => reorderRuleSummary(current, scenarioId, ruleId, toId));
-      void api.reorderRule(scenarioId, ruleId, toId).catch((e) => {
+      note();
+      void api.reorderRule(scenarioId, ruleId, toId, { label: "Reorder rules" }).catch((e) => {
         setError(String(e));
         void refresh();
       });
     },
-    [refresh, setError],
+    [refresh, setError, note],
   );
 
   async function mockFlows(ids: string[], scenarioId: string | null): Promise<boolean> {
@@ -793,7 +842,8 @@ function useAutoresponder(
       phase: "generating",
     });
     try {
-      const result = await api.mockFlows(ids, scenarioId, (event) => {
+      const label = `Mock ${plural(ids.length, "flow")}`;
+      const result = await api.mockFlows(ids, scenarioId, { label }, (event) => {
         if (event.type === "progress") {
           setBulkMockProgress(event);
           return;
@@ -802,6 +852,7 @@ function useAutoresponder(
           appendBulkRuleSummaries(current, event.scenarioId, event.rules),
         );
       });
+      note();
       setSelectRuleId(result.newRuleIds[0] ?? null);
       setRightTab("autoresponder");
       const n = result.newRuleIds.length;
@@ -826,9 +877,12 @@ function useAutoresponder(
 
   async function importRules(replace: boolean) {
     try {
-      const n = await api.importRules(replace);
+      const n = await api.importRules(replace, {
+        label: replace ? "Replace rules (import)" : "Import rules",
+      });
       if (n > 0) {
         await refresh();
+        note();
         notify("success", `Imported ${plural(n, "scenario")}`);
       }
     } catch (e) {
@@ -839,6 +893,7 @@ function useAutoresponder(
   return {
     autoresponder,
     setAutoresponder,
+    refresh,
     selectRuleId,
     bulkMockProgress,
     activateScenario,
@@ -857,6 +912,68 @@ function useAutoresponder(
     ruleHits,
     resetRuleState,
   };
+}
+
+/**
+ * Undo/redo timeline state. `canUndo`/`canRedo` are mirrored optimistically
+ * (any tracked mutation calls `note()`), so the hot edit path needs no extra
+ * IPC; the authoritative `HistoryView` arrives with each undo/redo/list. `version`
+ * bumps on every undo/redo so the open rule editor re-fetches the reverted rule.
+ */
+function useHistory(refreshAutoresponder: () => Promise<void>, setError: SetError) {
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+  const [entries, setEntries] = useState<HistoryEntry[]>([]);
+  const [version, setVersion] = useState(0);
+
+  const apply = useCallback((view: HistoryView) => {
+    setCanUndo(view.canUndo);
+    setCanRedo(view.canRedo);
+    setEntries(view.entries);
+  }, []);
+
+  const note = useCallback(() => {
+    setCanUndo(true);
+    setCanRedo(false);
+  }, []);
+
+  const run = useCallback(
+    async (action: () => Promise<HistoryView>) => {
+      try {
+        apply(await action());
+        setVersion((v) => v + 1);
+        await refreshAutoresponder();
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [apply, refreshAutoresponder, setError],
+  );
+
+  const undo = useCallback(() => void run(api.historyUndo), [run]);
+  const redo = useCallback(() => void run(api.historyRedo), [run]);
+  const jump = useCallback((id: number) => void run(() => api.historyJump(id)), [run]);
+
+  const refreshList = useCallback(async () => {
+    try {
+      apply(await api.historyList());
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [apply, setError]);
+
+  const clear = useCallback(() => {
+    void api
+      .historyClear()
+      .then(() => {
+        setCanUndo(false);
+        setCanRedo(false);
+        setEntries([]);
+      })
+      .catch((e) => setError(String(e)));
+  }, [setError]);
+
+  return { canUndo, canRedo, entries, version, note, undo, redo, jump, refreshList, clear };
 }
 
 function usePersistentColumns(headerColumns: string[]) {
@@ -1063,7 +1180,13 @@ export function useAppState() {
     notify,
   );
   const autoresponderActive = rightTab === "autoresponder" || rightMode === "split";
-  const ar = useAutoresponder(setError, setRightTab, notify, autoresponderActive);
+  // `note` is stable and reads the live history hook through a ref, breaking the
+  // cycle (autoresponder actions need `note`; history needs `ar.refresh`).
+  const historyNoteRef = useRef<() => void>(() => {});
+  const note = useCallback(() => historyNoteRef.current(), []);
+  const ar = useAutoresponder(setError, setRightTab, notify, autoresponderActive, note);
+  const history = useHistory(ar.refresh, setError);
+  historyNoteRef.current = history.note;
   const columns = usePersistentColumns(settings.settings.headerColumns);
   const session = useSession(
     setError,
@@ -1159,6 +1282,7 @@ export function useAppState() {
 
   function clearTraffic() {
     void api.clearFlows();
+    history.note();
     selection.clearSelection();
     inspector.setDetail(null);
   }
@@ -1186,6 +1310,7 @@ export function useAppState() {
       selection.selectedId,
     );
     pendingSelectRef.current = { nextId, deleted: new Set(ids) };
+    history.note();
     void api.removeFlows(ids).catch((e) => {
       pendingSelectRef.current = null;
       setError(String(e));
@@ -1236,6 +1361,7 @@ export function useAppState() {
     inspector,
     proxy,
     ar,
+    history,
     columns,
     session,
     trafficSplit,

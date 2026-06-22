@@ -9,8 +9,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use proxy_core::{
-    AutoResponderSummary, FlowDetail, FlowEvent, FlowSummary, MockResult, ProxySettings, Rule,
-    RuleSummary, Scenario, ScenarioSummary, SearchSide, TestInput, TestResult,
+    AutoResponderSummary, FlowDetail, FlowEvent, FlowSummary, HistoryStep, HistoryTag, HistoryView,
+    MockResult, ProxySettings, Rule, RuleSummary, Scenario, ScenarioSummary, SearchSide, TestInput,
+    TestResult,
 };
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -134,13 +135,14 @@ pub fn get_flow(
 
 #[tauri::command]
 pub fn clear_flows(state: State<'_, AppState>) {
-    state.controller.clear_flows();
+    state.controller.clear_flows_tracked();
 }
 
 /// Remove specific captured flows by id (prune noise before saving a session).
+/// Recorded on the undo timeline so an accidental prune can be reverted.
 #[tauri::command]
 pub fn remove_flows(state: State<'_, AppState>, ids: Vec<String>) {
-    state.controller.remove_flows(&ids);
+    state.controller.remove_flows_tracked(&ids);
 }
 
 /// Set or clear a flow's user comment (re-emits the row to the live stream).
@@ -169,36 +171,37 @@ pub async fn get_rule(
 pub fn set_active_scenario(
     state: State<'_, AppState>,
     scenario_id: Option<String>,
+    history_tag: HistoryTag,
 ) -> Result<(), String> {
     state
         .rule_store
         .set_active_scenario(scenario_id.as_deref())?;
-    state
-        .controller
-        .set_active_scenario(scenario_id.as_deref())
-        .map_err(|e| e.to_string())
+    state.controller.with_history(history_tag, |c| {
+        c.set_active_scenario(scenario_id.as_deref())
+            .map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
 pub fn create_scenario(
     state: State<'_, AppState>,
     name: Option<String>,
+    history_tag: HistoryTag,
 ) -> Result<ScenarioSummary, String> {
-    let summary = state
-        .controller
-        .create_scenario(name.as_deref())
-        .map_err(|e| e.to_string())?;
-    let scenario = Scenario {
-        id: summary.id.clone(),
-        name: summary.name.clone(),
-        rules: Vec::new(),
-    };
-    if let Err(error) = state.rule_store.insert_scenario(&scenario) {
-        let _ = state.controller.delete_scenario(&summary.id);
-        return Err(error);
-    }
-    state.rule_store.set_active_scenario(Some(&summary.id))?;
-    Ok(summary)
+    state.controller.with_history(history_tag, |c| {
+        let summary = c.create_scenario(name.as_deref()).map_err(|e| e.to_string())?;
+        let scenario = Scenario {
+            id: summary.id.clone(),
+            name: summary.name.clone(),
+            rules: Vec::new(),
+        };
+        if let Err(error) = state.rule_store.insert_scenario(&scenario) {
+            let _ = c.delete_scenario(&summary.id);
+            return Err(error);
+        }
+        state.rule_store.set_active_scenario(Some(&summary.id))?;
+        Ok(summary)
+    })
 }
 
 #[tauri::command]
@@ -206,40 +209,40 @@ pub fn rename_scenario(
     state: State<'_, AppState>,
     scenario_id: String,
     name: String,
+    history_tag: HistoryTag,
 ) -> Result<(), String> {
     state.rule_store.rename_scenario(&scenario_id, &name)?;
-    state
-        .controller
-        .rename_scenario(&scenario_id, name)
-        .map_err(|e| e.to_string())
+    state.controller.with_history(history_tag, |c| {
+        c.rename_scenario(&scenario_id, name).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
 pub fn delete_scenario(
     state: State<'_, AppState>,
     scenario_id: String,
+    history_tag: HistoryTag,
 ) -> Result<(), String> {
     state.rule_store.delete_scenario(&scenario_id)?;
-    state
-        .controller
-        .delete_scenario(&scenario_id)
-        .map_err(|e| e.to_string())
+    state.controller.with_history(history_tag, |c| {
+        c.delete_scenario(&scenario_id).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
 pub fn create_rule(
     state: State<'_, AppState>,
     scenario_id: String,
+    history_tag: HistoryTag,
 ) -> Result<RuleSummary, String> {
-    let (rule, summary) = state
-        .controller
-        .create_rule(&scenario_id)
-        .map_err(|e| e.to_string())?;
-    if let Err(error) = state.rule_store.insert_rule(&scenario_id, &rule, None) {
-        let _ = state.controller.delete_rule(&scenario_id, &rule.id);
-        return Err(error);
-    }
-    Ok(summary)
+    state.controller.with_history(history_tag, |c| {
+        let (rule, summary) = c.create_rule(&scenario_id).map_err(|e| e.to_string())?;
+        if let Err(error) = state.rule_store.insert_rule(&scenario_id, &rule, None) {
+            let _ = c.delete_rule(&scenario_id, &rule.id);
+            return Err(error);
+        }
+        Ok(summary)
+    })
 }
 
 #[tauri::command]
@@ -247,6 +250,7 @@ pub async fn update_rule(
     state: State<'_, AppState>,
     scenario_id: String,
     rule: Rule,
+    history_tag: HistoryTag,
 ) -> Result<RuleSummary, String> {
     let controller = state.controller.clone();
     let rule_store = state.rule_store.clone();
@@ -254,10 +258,10 @@ pub async fn update_rule(
         if controller.get_rule(&rule.id).is_none() {
             return Err("rule not found".to_string());
         }
-        rule_store.update_rule(&scenario_id, &rule)?;
-        controller
-            .update_rule(&scenario_id, rule)
-            .map_err(|e| e.to_string())
+        controller.with_history(history_tag, |c| {
+            rule_store.update_rule(&scenario_id, &rule)?;
+            c.update_rule(&scenario_id, rule).map_err(|e| e.to_string())
+        })
     })
     .await
     .map_err(|e| format!("rule update task failed: {e}"))?
@@ -268,12 +272,12 @@ pub fn delete_rule(
     state: State<'_, AppState>,
     scenario_id: String,
     rule_id: String,
+    history_tag: HistoryTag,
 ) -> Result<(), String> {
     state.rule_store.delete_rule(&scenario_id, &rule_id)?;
-    state
-        .controller
-        .delete_rule(&scenario_id, &rule_id)
-        .map_err(|e| e.to_string())
+    state.controller.with_history(history_tag, |c| {
+        c.delete_rule(&scenario_id, &rule_id).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -281,18 +285,21 @@ pub async fn duplicate_rule(
     state: State<'_, AppState>,
     scenario_id: String,
     rule_id: String,
+    history_tag: HistoryTag,
 ) -> Result<RuleSummary, String> {
     let controller = state.controller.clone();
     let rule_store = state.rule_store.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let (rule, summary) = controller
-            .duplicate_rule(&scenario_id, &rule_id)
-            .map_err(|e| e.to_string())?;
-        if let Err(error) = rule_store.insert_rule(&scenario_id, &rule, Some(&rule_id)) {
-            let _ = controller.delete_rule(&scenario_id, &rule.id);
-            return Err(error);
-        }
-        Ok(summary)
+        controller.with_history(history_tag, |c| {
+            let (rule, summary) = c
+                .duplicate_rule(&scenario_id, &rule_id)
+                .map_err(|e| e.to_string())?;
+            if let Err(error) = rule_store.insert_rule(&scenario_id, &rule, Some(&rule_id)) {
+                let _ = c.delete_rule(&scenario_id, &rule.id);
+                return Err(error);
+            }
+            Ok(summary)
+        })
     })
     .await
     .map_err(|e| format!("rule duplication task failed: {e}"))?
@@ -304,23 +311,25 @@ pub fn reorder_rule(
     scenario_id: String,
     rule_id: String,
     to_id: String,
+    history_tag: HistoryTag,
 ) -> Result<(), String> {
-    let (previous, next) = state
-        .controller
-        .reorder_rule(&scenario_id, &rule_id, &to_id)
-        .map_err(|e| e.to_string())?;
-    if let Err(error) = state.rule_store.reorder_rule(
-        &scenario_id,
-        &rule_id,
-        previous.as_deref(),
-        next.as_deref(),
-    ) {
-        if let Ok(autoresponder) = state.rule_store.load() {
-            state.controller.set_autoresponder(autoresponder);
+    state.controller.with_history(history_tag, |c| {
+        let (previous, next) = c
+            .reorder_rule(&scenario_id, &rule_id, &to_id)
+            .map_err(|e| e.to_string())?;
+        if let Err(error) = state.rule_store.reorder_rule(
+            &scenario_id,
+            &rule_id,
+            previous.as_deref(),
+            next.as_deref(),
+        ) {
+            if let Ok(autoresponder) = state.rule_store.load() {
+                c.set_autoresponder(autoresponder);
+            }
+            return Err(error);
         }
-        return Err(error);
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -367,6 +376,7 @@ pub async fn mock_flows(
     state: State<'_, AppState>,
     ids: Vec<String>,
     scenario_id: Option<String>,
+    history_tag: HistoryTag,
     progress: Channel<BulkMockEvent>,
 ) -> Result<MockResult, String> {
     let controller = state.controller.clone();
@@ -396,8 +406,9 @@ pub async fn mock_flows(
         let scenario_id = batch.scenario_id.clone();
         let created: Vec<RuleSummary> = batch.rules.iter().map(RuleSummary::from).collect();
         let result = controller
-            .commit_mock_batch(batch)
-            .map_err(|e| e.to_string())?;
+            .with_history(history_tag, |c| {
+                c.commit_mock_batch(batch).map_err(|e| e.to_string())
+            })?;
         for rules in created.chunks(100) {
             let _ = progress.send(BulkMockEvent::Created {
                 scenario_id: scenario_id.clone(),
@@ -643,6 +654,7 @@ pub async fn import_rules(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     replace: bool,
+    history_tag: HistoryTag,
 ) -> Result<usize, String> {
     let controller = state.controller.clone();
     let Some(picked) = app
@@ -655,7 +667,9 @@ pub async fn import_rules(
     };
     let path = picked.into_path().map_err(|e| e.to_string())?;
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    let count = controller.import_rules(&bytes, replace).map_err(|e| e.to_string())?;
+    let count = controller.with_history(history_tag, |c| {
+        c.import_rules(&bytes, replace).map_err(|e| e.to_string())
+    })?;
     state.rule_store.replace(&controller.get_autoresponder())?;
     Ok(count)
 }
@@ -704,4 +718,52 @@ pub async fn import_settings(
     state.controller.set_settings(settings.clone());
     crate::persist::save_settings(&state.ca_dir, &settings);
     Ok(settings)
+}
+
+// ---- undo / redo history ----
+
+/// Apply the outcome of an undo/redo/jump: re-persist the autoresponder to
+/// `SQLite` when a mock change was reverted/re-applied (traffic-only steps touch
+/// memory + the live stream and need no persistence), then hand the new timeline
+/// view back to the UI.
+fn apply_history_step(state: &AppState, step: Option<HistoryStep>) -> Result<HistoryView, String> {
+    match step {
+        Some(step) => {
+            if step.mock_changed {
+                state.rule_store.replace(&state.controller.get_autoresponder())?;
+            }
+            Ok(step.view)
+        }
+        None => Ok(state.controller.history_view()),
+    }
+}
+
+/// The current undo/redo timeline (fetched lazily when the history panel opens).
+#[tauri::command]
+pub fn history_list(state: State<'_, AppState>) -> HistoryView {
+    state.controller.history_view()
+}
+
+#[tauri::command]
+pub fn history_undo(state: State<'_, AppState>) -> Result<HistoryView, String> {
+    let step = state.controller.undo();
+    apply_history_step(state.inner(), step)
+}
+
+#[tauri::command]
+pub fn history_redo(state: State<'_, AppState>) -> Result<HistoryView, String> {
+    let step = state.controller.redo();
+    apply_history_step(state.inner(), step)
+}
+
+/// Undo/redo straight to a chosen entry (click-to-jump in the history panel).
+#[tauri::command]
+pub fn history_jump(state: State<'_, AppState>, entry_id: u64) -> Result<HistoryView, String> {
+    let step = state.controller.jump_to(entry_id);
+    apply_history_step(state.inner(), step)
+}
+
+#[tauri::command]
+pub fn history_clear(state: State<'_, AppState>) {
+    state.controller.clear_history();
 }
