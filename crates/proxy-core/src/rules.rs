@@ -716,7 +716,7 @@ pub fn blank_rule(id: String) -> Rule {
         matcher: Matcher {
             method: None,
             url: String::new(),
-            url_match: MatchKind::Contains,
+            url_match: MatchKind::Exact,
         },
         action: Action::Respond {
             status: 200,
@@ -813,7 +813,7 @@ pub fn respond_rule_from_flow(flow: &Flow, id: String) -> Rule {
         matcher: Matcher {
             method: Some(flow.request.method.clone()),
             url: full_url,
-            url_match: MatchKind::Contains,
+            url_match: MatchKind::Exact,
         },
         action: Action::Respond {
             status,
@@ -1161,7 +1161,7 @@ mod tests {
         // Host-specific full URL preserved (no collapsing) — one rule per request.
         let rule = respond_rule_from_flow(&flow, "r".into());
         assert_eq!(rule.matcher.url, "https://x/api/v2/rum?dd=1&k=abc");
-        assert_eq!(rule.matcher.url_match, MatchKind::Contains);
+        assert_eq!(rule.matcher.url_match, MatchKind::Exact);
         assert_eq!(rule.name, "POST x/api/v2/rum?dd=1&k=abc");
     }
 
@@ -1481,6 +1481,25 @@ mod tests {
         // Mocking github.com/feed must NOT also catch a different host's /feed.
         assert!(rule.matcher.matches(&req("github.com", "/feed")));
         assert!(!rule.matcher.matches(&req("dynatrace.com", "/feed")));
+    }
+
+    #[test]
+    fn mock_rule_is_exact_not_substring() {
+        let flow = Flow {
+            id: "f".into(),
+            request: req("GET", "https", "google.com", "/"),
+            response: None,
+            matched_rule: None,
+            duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
+        };
+        let rule = respond_rule_from_flow(&flow, "r".into());
+
+        assert_eq!(rule.matcher.url_match, MatchKind::Exact);
+        assert!(rule.matcher.matches(&req("GET", "https", "google.com", "/")));
+        assert!(!rule.matcher.matches(&req("GET", "https", "google.com", "/api/data")));
+        assert!(!rule.matcher.matches(&req("GET", "https", "google.com", "/index.html")));
     }
 
     #[test]
