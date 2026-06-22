@@ -25,6 +25,7 @@ mod body;
 mod ca;
 mod flow;
 mod handler;
+mod history;
 mod import;
 mod rules;
 mod rules_export;
@@ -48,6 +49,7 @@ use tokio::task::JoinHandle;
 
 pub use ca::CertAuthority;
 pub use flow::{FlowDetail, FlowEvent, FlowSummary, MessageDetail, ResourceKind};
+pub use history::{HistoryEntryView, HistoryKind, HistoryTag, HistoryView};
 pub use rules::{
     Action, ActionSummary, AutoResponder, AutoResponderSummary, MatchKind, Matcher, Rule,
     RuleSet, RuleSummary, Scenario, ScenarioSummary,
@@ -57,6 +59,7 @@ pub use settings::ProxySettings;
 pub use tester::{test_rules, SequenceStep, TestInput, TestResponse, TestResult};
 
 use handler::CaptureHandler;
+use history::{HistoryEntry, HistoryOp};
 use shared::Shared;
 
 /// Maximum number of flows retained in memory before oldest are evicted.
@@ -75,6 +78,13 @@ fn new_entity_id(prefix: &str) -> String {
 pub struct MockResult {
     pub scenario_id: String,
     pub new_rule_ids: Vec<String>,
+}
+
+/// Outcome of an undo/redo/jump: the new timeline view to hand the UI, plus
+/// whether the autoresponder changed (so the Tauri layer re-persists it).
+pub struct HistoryStep {
+    pub view: HistoryView,
+    pub mock_changed: bool,
 }
 
 /// A prepared bulk mutation. Building can be slow for hundreds of large
@@ -826,6 +836,187 @@ impl ProxyController {
             new_rule_ids: Vec::new(),
         })
     }
+
+    // ---- undo / redo history ----
+
+    /// Run a mock-document mutation and record it as a single undo entry,
+    /// capturing before/after snapshots of the whole autoresponder. A mutation
+    /// that changes nothing — or fails — records no entry. `tag` carries the UI
+    /// label and the coalescing key (consecutive same-key edits merge).
+    pub fn with_history<T, E>(
+        &self,
+        tag: HistoryTag,
+        mutation: impl FnOnce(&Self) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
+        let before = self.get_autoresponder();
+        let result = mutation(self)?;
+        let after = self.get_autoresponder();
+        if before != after {
+            if let Ok(mut history) = self.shared.history.lock() {
+                history.record(HistoryOp::Mock { before, after }, tag);
+            }
+        }
+        Ok(result)
+    }
+
+    /// Like [`remove_flows`](Self::remove_flows), but records the removal so it
+    /// can be undone — the removed flows (bodies and capture positions) are held
+    /// in the history entry.
+    pub fn remove_flows_tracked(&self, ids: &[String]) {
+        let items = match self.shared.store.lock() {
+            Ok(mut store) => store.remove_capturing(ids),
+            Err(_) => Vec::new(),
+        };
+        if items.is_empty() {
+            return;
+        }
+        let removed_ids: Vec<String> = items.iter().map(|(_, flow)| flow.id.clone()).collect();
+        let _ = self.shared.events.send(FlowEvent::Removed { ids: removed_ids });
+        let label = format!(
+            "Delete {} flow{}",
+            items.len(),
+            if items.len() == 1 { "" } else { "s" }
+        );
+        if let Ok(mut history) = self.shared.history.lock() {
+            history.record(HistoryOp::FlowsRemoved { items }, HistoryTag::new(label, None));
+        }
+    }
+
+    /// Like [`clear_flows`](Self::clear_flows), but records the cleared snapshot
+    /// so it can be undone.
+    pub fn clear_flows_tracked(&self) {
+        let flows = match self.shared.store.lock() {
+            Ok(mut store) => {
+                let all = store.all_flows();
+                store.clear();
+                all
+            }
+            Err(_) => Vec::new(),
+        };
+        let _ = self.shared.events.send(FlowEvent::Cleared);
+        if flows.is_empty() {
+            return;
+        }
+        let label = format!(
+            "Clear traffic ({} flow{})",
+            flows.len(),
+            if flows.len() == 1 { "" } else { "s" }
+        );
+        if let Ok(mut history) = self.shared.history.lock() {
+            history.record(HistoryOp::FlowsCleared { flows }, HistoryTag::new(label, None));
+        }
+    }
+
+    pub fn history_view(&self) -> HistoryView {
+        self.shared
+            .history
+            .lock()
+            .map(|history| history.view())
+            .unwrap_or_default()
+    }
+
+    pub fn clear_history(&self) {
+        if let Ok(mut history) = self.shared.history.lock() {
+            history.clear();
+        }
+    }
+
+    /// Undo the newest action. Returns the new timeline view and whether the
+    /// autoresponder changed (so the caller re-persists it); `None` when there is
+    /// nothing to undo.
+    pub fn undo(&self) -> Option<HistoryStep> {
+        let entry = self.shared.history.lock().ok()?.take_undo()?;
+        let mock_changed = self.apply_undo(&entry);
+        let mut history = self.shared.history.lock().ok()?;
+        history.stash_redo(entry);
+        Some(HistoryStep {
+            view: history.view(),
+            mock_changed,
+        })
+    }
+
+    /// Redo the most recently undone action.
+    pub fn redo(&self) -> Option<HistoryStep> {
+        let entry = self.shared.history.lock().ok()?.take_redo()?;
+        let mock_changed = self.apply_redo(&entry);
+        let mut history = self.shared.history.lock().ok()?;
+        history.stash_undo(entry);
+        Some(HistoryStep {
+            view: history.view(),
+            mock_changed,
+        })
+    }
+
+    /// Undo or redo until the entry with `entry_id` is the current state (the top
+    /// of the applied stack). A no-op when the id isn't in the timeline.
+    pub fn jump_to(&self, entry_id: u64) -> Option<HistoryStep> {
+        let mut mock_changed = false;
+        loop {
+            let (is_top, in_undo, in_redo) = {
+                let history = self.shared.history.lock().ok()?;
+                (
+                    history.undo_top_id() == Some(entry_id),
+                    history.undo_contains(entry_id),
+                    history.redo_contains(entry_id),
+                )
+            };
+            if is_top || (!in_undo && !in_redo) {
+                break;
+            }
+            let step = if in_undo { self.undo() } else { self.redo() };
+            match step {
+                Some(step) => mock_changed |= step.mock_changed,
+                None => break,
+            }
+        }
+        Some(HistoryStep {
+            view: self.history_view(),
+            mock_changed,
+        })
+    }
+
+    fn apply_undo(&self, entry: &HistoryEntry) -> bool {
+        match &entry.op {
+            HistoryOp::Mock { before, .. } => {
+                self.set_autoresponder(before.clone());
+                true
+            }
+            HistoryOp::FlowsRemoved { items } => {
+                self.restore_flows(items.clone());
+                false
+            }
+            HistoryOp::FlowsCleared { flows } => {
+                self.restore_flows(flows.iter().cloned().enumerate().collect());
+                false
+            }
+        }
+    }
+
+    fn apply_redo(&self, entry: &HistoryEntry) -> bool {
+        match &entry.op {
+            HistoryOp::Mock { after, .. } => {
+                self.set_autoresponder(after.clone());
+                true
+            }
+            HistoryOp::FlowsRemoved { items } => {
+                let ids: Vec<String> = items.iter().map(|(_, flow)| flow.id.clone()).collect();
+                self.remove_flows(&ids);
+                false
+            }
+            HistoryOp::FlowsCleared { .. } => {
+                self.clear_flows();
+                false
+            }
+        }
+    }
+
+    /// Re-insert flows (with their capture positions) and tell the UI to re-list.
+    fn restore_flows(&self, items: Vec<(usize, crate::flow::Flow)>) {
+        if let Ok(mut store) = self.shared.store.lock() {
+            store.restore(items);
+        }
+        let _ = self.shared.events.send(FlowEvent::Resync);
+    }
 }
 
 #[cfg(test)]
@@ -1393,5 +1584,201 @@ mod tests {
             None,
             "a non-empty replace must never auto-activate a scenario"
         );
+    }
+
+    // ---- undo / redo history ----
+
+    fn seed_one_rule(c: &ProxyController) {
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("A", vec![respond_rule("r1")])],
+            active_scenario_id: Some("A".to_string()),
+        });
+    }
+
+    fn renamed_rule(name: &str) -> Rule {
+        let mut rule = respond_rule("r1");
+        rule.name = name.to_string();
+        rule
+    }
+
+    #[test]
+    fn mock_edit_undo_redo_round_trips() {
+        let c = controller();
+        seed_one_rule(&c);
+
+        c.with_history(HistoryTag::new("Edit rule", None), |ctrl| {
+            ctrl.update_rule("A", renamed_rule("Renamed"))
+        })
+        .expect("update");
+        assert_eq!(c.get_rule("r1").expect("rule").name, "Renamed");
+
+        let step = c.undo().expect("undo");
+        assert!(step.mock_changed, "a mock undo must signal the caller to re-persist");
+        assert!(!step.view.can_undo && step.view.can_redo);
+        assert_eq!(c.get_rule("r1").expect("rule").name, "r1", "undo restores the prior name");
+
+        let step = c.redo().expect("redo");
+        assert!(step.mock_changed);
+        assert_eq!(c.get_rule("r1").expect("rule").name, "Renamed", "redo re-applies the edit");
+    }
+
+    #[test]
+    fn coalesced_edits_undo_as_a_single_step() {
+        let c = controller();
+        seed_one_rule(&c);
+        let key = Some("edit:r1:name".to_string());
+        for name in ["a", "ab", "abc"] {
+            c.with_history(HistoryTag::new("Edit rule name", key.clone()), |ctrl| {
+                ctrl.update_rule("A", renamed_rule(name))
+            })
+            .expect("update");
+        }
+        assert_eq!(c.get_rule("r1").expect("rule").name, "abc");
+        assert_eq!(
+            c.history_view().entries.len(),
+            1,
+            "three same-key edits collapse to one undo entry"
+        );
+
+        c.undo().expect("undo");
+        assert_eq!(
+            c.get_rule("r1").expect("rule").name,
+            "r1",
+            "one undo reverts the whole coalesced run"
+        );
+    }
+
+    #[test]
+    fn failed_or_noop_mutation_records_no_history() {
+        let c = controller();
+        seed_one_rule(&c);
+
+        // Identical update → before == after → nothing recorded.
+        c.with_history(HistoryTag::new("noop", None), |ctrl| {
+            ctrl.update_rule("A", respond_rule("r1"))
+        })
+        .expect("update");
+        assert!(c.history_view().entries.is_empty(), "an identical update records nothing");
+
+        // Failed update (missing scenario) → nothing recorded.
+        let failed = c.with_history(HistoryTag::new("fail", None), |ctrl| {
+            ctrl.update_rule("missing", respond_rule("r1"))
+        });
+        assert!(failed.is_err());
+        assert!(c.history_view().entries.is_empty(), "a failed mutation records nothing");
+        assert!(c.undo().is_none(), "nothing to undo");
+    }
+
+    #[test]
+    fn activate_scenario_undo_restores_prior_active() {
+        let c = controller();
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("A", vec![]), scenario("B", vec![])],
+            active_scenario_id: Some("A".to_string()),
+        });
+
+        c.with_history(HistoryTag::new("Activate B", None), |ctrl| {
+            ctrl.set_active_scenario(Some("B"))
+        })
+        .expect("activate");
+        assert_eq!(c.get_autoresponder().active_scenario_id.as_deref(), Some("B"));
+
+        c.undo().expect("undo");
+        assert_eq!(
+            c.get_autoresponder().active_scenario_id.as_deref(),
+            Some("A"),
+            "undo restores the prior active scenario"
+        );
+    }
+
+    #[test]
+    fn remove_flows_tracked_undo_restores_bodies_and_capture_order() {
+        let c = controller();
+        for id in ["a", "b", "c", "d"] {
+            c.shared.record_imported(completed_flow(id));
+        }
+        c.remove_flows_tracked(&["b".to_string(), "d".to_string()]);
+        assert_eq!(
+            c.shared.store.lock().expect("store").ids(),
+            vec!["a".to_string(), "c".to_string()]
+        );
+
+        let step = c.undo().expect("undo restores flows");
+        assert!(!step.mock_changed, "a traffic undo never touches the autoresponder");
+        {
+            let store = c.shared.store.lock().expect("store");
+            assert_eq!(
+                store.ids(),
+                ["a", "b", "c", "d"].map(str::to_string).to_vec(),
+                "undo restores the exact capture order"
+            );
+            let body = &store.get("b").expect("flow b is back").response.as_ref().expect("resp").body;
+            assert_eq!(
+                String::from_utf8_lossy(body),
+                "response-b",
+                "the full response body is restored, not just the summary"
+            );
+        }
+
+        c.redo().expect("redo");
+        assert_eq!(
+            c.shared.store.lock().expect("store").ids(),
+            vec!["a".to_string(), "c".to_string()],
+            "redo re-removes the same flows"
+        );
+    }
+
+    #[test]
+    fn clear_flows_tracked_undo_restores_everything() {
+        let c = controller();
+        for id in ["a", "b", "c"] {
+            c.shared.record_imported(completed_flow(id));
+        }
+        c.clear_flows_tracked();
+        assert!(c.shared.store.lock().expect("store").is_empty());
+
+        c.undo().expect("undo restores cleared flows");
+        assert_eq!(
+            c.shared.store.lock().expect("store").ids(),
+            ["a", "b", "c"].map(str::to_string).to_vec(),
+            "undo of a clear restores every flow in capture order"
+        );
+    }
+
+    #[test]
+    fn jump_to_walks_multiple_steps_in_both_directions() {
+        let c = controller();
+        seed_one_rule(&c);
+        for (i, name) in ["one", "two", "three"].iter().enumerate() {
+            c.with_history(HistoryTag::new(format!("edit {i}"), Some(format!("k{i}"))), |ctrl| {
+                ctrl.update_rule("A", renamed_rule(name))
+            })
+            .expect("update");
+        }
+        let entries = c.history_view().entries;
+        assert_eq!(entries.len(), 3);
+
+        // Jump back to the oldest entry → rewinds two steps.
+        c.jump_to(entries[0].id).expect("jump back");
+        assert_eq!(c.get_rule("r1").expect("rule").name, "one");
+
+        // Jump forward to the newest entry → fast-forwards.
+        let last_id = c.history_view().entries.last().expect("entry").id;
+        c.jump_to(last_id).expect("jump forward");
+        assert_eq!(c.get_rule("r1").expect("rule").name, "three");
+    }
+
+    #[test]
+    fn clear_history_empties_the_timeline() {
+        let c = controller();
+        seed_one_rule(&c);
+        c.with_history(HistoryTag::new("edit", None), |ctrl| {
+            ctrl.update_rule("A", renamed_rule("x"))
+        })
+        .expect("update");
+        assert!(!c.history_view().entries.is_empty());
+        c.clear_history();
+        assert!(c.history_view().entries.is_empty());
+        assert!(c.undo().is_none());
     }
 }

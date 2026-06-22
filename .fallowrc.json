@@ -15,6 +15,12 @@
         "functions": ["TrafficList"],
         "maxCognitive": 20,
         "reason": "Pure wiring component (cyclomatic 1); cognitive reflects prop/hook fan-out to its extracted subcomponents (HeaderRow/FlowScroll/useFlowMenu), not branching."
+      },
+      {
+        "files": ["src/appState.ts"],
+        "functions": ["useAutoresponder"],
+        "maxCognitive": 18,
+        "reason": "Feature hook that wires the scenario/rule/mock action callbacks (cyclomatic 1); cognitive reflects per-action callback fan-out — each action now also tags its mutation for the undo-history timeline — not branching."
       }
     ]
   }
