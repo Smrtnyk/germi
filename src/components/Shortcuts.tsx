@@ -17,6 +17,7 @@ const GROUPS: { title: string; rows: { keys: string; desc: string }[] }[] = [
       { keys: "↑ ↓   ·   j k", desc: "Move selection" },
       { keys: "Shift + ↑ / ↓", desc: "Extend selection" },
       { keys: "Ctrl / ⌘ A", desc: "Select all (filtered) flows" },
+      { keys: "Ctrl / ⌘ + click", desc: "Add / remove a row from selection" },
       { keys: "Home / End", desc: "Jump to first / last flow" },
       { keys: "Esc", desc: "Clear selection" },
       { keys: "Delete / Backspace", desc: "Delete selected requests" },

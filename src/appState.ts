@@ -15,7 +15,7 @@ import { resolveColumns, DEFAULT_COLUMNS } from "./columns";
 import { useSplitRatio } from "./useResizable";
 import { useToasts, type Notify } from "./toast";
 import { toCurl } from "./curl";
-import { nextIdAfterDelete } from "./selection";
+import { nextIdAfterDelete, toggleSelection } from "./selection";
 import {
   appendBulkRuleSummaries,
   appendRuleSummary,
@@ -437,9 +437,15 @@ function useSelection(flows: FlowSummary[]) {
     if (e.shiftKey && anchorRef.current) {
       extendOrSelect(id, true);
     } else if (e.ctrlKey || e.metaKey) {
-      setSelectedIds((prev) => toggledSet(prev, id));
-      setSelectedId(id);
-      anchorRef.current = id;
+      const patch = toggleSelection(
+        flows.map((f) => f.id),
+        selectedIds,
+        selectedId,
+        id,
+      );
+      setSelectedIds(patch.selectedIds);
+      setSelectedId(patch.selectedId);
+      anchorRef.current = patch.anchor;
     } else {
       extendOrSelect(id, false);
     }

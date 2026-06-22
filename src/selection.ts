@@ -16,3 +16,32 @@ export function nextIdAfterDelete(
   }
   return null;
 }
+
+export interface SelectionPatch {
+  selectedIds: Set<string>;
+  selectedId: string | null;
+  anchor: string | null;
+}
+
+function lastSelectedId(order: string[], selected: Set<string>): string | null {
+  for (let i = order.length - 1; i >= 0; i--) {
+    if (selected.has(order[i])) return order[i];
+  }
+  return null;
+}
+
+export function toggleSelection(
+  order: string[],
+  selectedIds: Set<string>,
+  selectedId: string | null,
+  id: string,
+): SelectionPatch {
+  const selected = new Set(selectedIds);
+  if (selected.has(id)) {
+    selected.delete(id);
+    const focus = selectedId === id ? lastSelectedId(order, selected) : selectedId;
+    return { selectedIds: selected, selectedId: focus, anchor: id };
+  }
+  selected.add(id);
+  return { selectedIds: selected, selectedId: id, anchor: id };
+}
