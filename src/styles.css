@@ -1441,6 +1441,18 @@ textarea {
   word-break: break-all;
   user-select: all;
 }
+.snippet-wrap {
+  position: relative;
+}
+.snippet-wrap .snippet {
+  padding-right: 70px;
+}
+.snippet-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  user-select: none;
+}
 .modal-foot {
   display: flex;
   justify-content: flex-end;
