@@ -422,7 +422,6 @@ export function App() {
             onOpenSession={s.session.openSession}
             onSaveSession={s.session.saveSession}
             onClear={s.requestClearTraffic}
-            history={s.history}
             filter={s.filtering.filter}
             onFilterChange={s.filtering.setFilter}
             filterInputRef={s.filterInputRef}
