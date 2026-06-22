@@ -3,6 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 
 import type { FlowDetail, FlowSummary, MessageDetail } from "../types";
 import { useToast } from "../toast";
+import { useCopy } from "../useCopy";
 import { headersToText, parseCookies, parseQuery, toCurl, type KV } from "../curl";
 
 const ROW_H = 18;
@@ -653,7 +654,7 @@ function MessageView({
   decode: boolean;
   onLoadFull: () => void;
 }) {
-  const notify = useToast();
+  const copy = useCopy();
   const { view, setView, showHex, setShowHex, wrap, setWrap, findOpen, setFindOpen } =
     useBodyState();
 
@@ -667,15 +668,6 @@ function MessageView({
 
   const query = side === "request" ? parseQuery(path) : [];
   const cookies = parseCookies(msg.headers, side);
-
-  const copy = (label: string, value: string) => {
-    if (!value) {
-      notify("info", `No ${label.toLowerCase()} to copy`);
-      return;
-    }
-    void navigator.clipboard.writeText(value);
-    notify("success", `${label} copied`);
-  };
 
   return (
     <div className="message">
@@ -893,7 +885,7 @@ function MultiSelectView({
 }
 
 function SingleFlowView({ detail, summary, loading, onMock, decode, onLoadFull }: SingleProps) {
-  const notify = useToast();
+  const copy = useCopy();
   const [side, setSide] = useState<Side>("response");
 
   if (!detail) {
@@ -907,11 +899,6 @@ function SingleFlowView({ detail, summary, loading, onMock, decode, onLoadFull }
   const showResponse = side === "response" && detail.response;
   const url = `${detail.scheme}://${detail.host}${detail.path}`;
   const ttfb = summary?.ttfbMs ?? null;
-
-  const copy = (label: string, value: string) => {
-    void navigator.clipboard.writeText(value);
-    notify("success", `${label} copied`);
-  };
 
   return (
     <div className="inspector">
