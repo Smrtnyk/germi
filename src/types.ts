@@ -188,8 +188,6 @@ export type BulkMockEvent =
 
 // ---- undo / redo history (mirror crates/proxy-core/src/history.rs) ----
 
-export type HistoryKind = "mock" | "traffic";
-
 /**
  * Metadata the frontend attaches to a mock mutation. `coalesceKey` merges
  * consecutive same-key edits into one undo step (e.g. typing a rule name); omit
@@ -198,21 +196,6 @@ export type HistoryKind = "mock" | "traffic";
 export interface HistoryTag {
   label: string;
   coalesceKey?: string | null;
-}
-
-export interface HistoryEntry {
-  id: number;
-  label: string;
-  kind: HistoryKind;
-  timestampMs: number;
-  /** True when the entry sits in the redo stack (a future, not-yet-applied state). */
-  undone: boolean;
-}
-
-export interface HistoryView {
-  entries: HistoryEntry[];
-  canUndo: boolean;
-  canRedo: boolean;
 }
 
 // ---- rule tester (mirror crates/proxy-core/src/tester.rs) ----

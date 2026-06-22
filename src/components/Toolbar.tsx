@@ -1,7 +1,6 @@
 import type { RefObject } from "react";
 
 import { FilterHelp } from "./FilterHelp";
-import { HistoryControls, type HistoryModel } from "./HistoryControls";
 
 interface ToolbarProps {
   running: boolean;
@@ -19,7 +18,6 @@ interface ToolbarProps {
   onOpenSession: () => void;
   onSaveSession: () => void;
   onClear: () => void;
-  history: HistoryModel;
   filter: string;
   onFilterChange: (value: string) => void;
   filterInputRef: RefObject<HTMLInputElement | null>;
@@ -44,7 +42,6 @@ export function Toolbar(props: ToolbarProps) {
     onOpenSession,
     onSaveSession,
     onClear,
-    history,
     filter,
     onFilterChange,
     filterInputRef,
@@ -119,10 +116,6 @@ export function Toolbar(props: ToolbarProps) {
           Clear
         </button>
       </div>
-
-      <div className="tb-sep" />
-
-      <HistoryControls history={history} />
 
       <div className="tb-sep" />
 

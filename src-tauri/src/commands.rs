@@ -9,9 +9,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use proxy_core::{
-    AutoResponderSummary, FlowDetail, FlowEvent, FlowSummary, HistoryStep, HistoryTag, HistoryView,
-    MockResult, ProxySettings, Rule, RuleSummary, Scenario, ScenarioSummary, SearchSide, TestInput,
-    TestResult,
+    AutoResponderSummary, FlowDetail, FlowEvent, FlowSummary, HistoryStep, HistoryTag, MockResult,
+    ProxySettings, Rule, RuleSummary, Scenario, ScenarioSummary, SearchSide, TestInput, TestResult,
 };
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -722,48 +721,25 @@ pub async fn import_settings(
 
 // ---- undo / redo history ----
 
-/// Apply the outcome of an undo/redo/jump: re-persist the autoresponder to
-/// `SQLite` when a mock change was reverted/re-applied (traffic-only steps touch
-/// memory + the live stream and need no persistence), then hand the new timeline
-/// view back to the UI.
-fn apply_history_step(state: &AppState, step: Option<HistoryStep>) -> Result<HistoryView, String> {
-    match step {
-        Some(step) => {
-            if step.mock_changed {
-                state.rule_store.replace(&state.controller.get_autoresponder())?;
-            }
-            Ok(step.view)
+/// Persist the autoresponder to `SQLite` after a mock undo/redo (traffic-only
+/// steps touch memory + the live stream and need no persistence).
+fn apply_history_step(state: &AppState, step: Option<HistoryStep>) -> Result<(), String> {
+    if let Some(step) = step {
+        if step.mock_changed {
+            state.rule_store.replace(&state.controller.get_autoresponder())?;
         }
-        None => Ok(state.controller.history_view()),
     }
-}
-
-/// The current undo/redo timeline (fetched lazily when the history panel opens).
-#[tauri::command]
-pub fn history_list(state: State<'_, AppState>) -> HistoryView {
-    state.controller.history_view()
+    Ok(())
 }
 
 #[tauri::command]
-pub fn history_undo(state: State<'_, AppState>) -> Result<HistoryView, String> {
+pub fn history_undo(state: State<'_, AppState>) -> Result<(), String> {
     let step = state.controller.undo();
     apply_history_step(state.inner(), step)
 }
 
 #[tauri::command]
-pub fn history_redo(state: State<'_, AppState>) -> Result<HistoryView, String> {
+pub fn history_redo(state: State<'_, AppState>) -> Result<(), String> {
     let step = state.controller.redo();
     apply_history_step(state.inner(), step)
-}
-
-/// Undo/redo straight to a chosen entry (click-to-jump in the history panel).
-#[tauri::command]
-pub fn history_jump(state: State<'_, AppState>, entry_id: u64) -> Result<HistoryView, String> {
-    let step = state.controller.jump_to(entry_id);
-    apply_history_step(state.inner(), step)
-}
-
-#[tauri::command]
-pub fn history_clear(state: State<'_, AppState>) {
-    state.controller.clear_history();
 }

@@ -8,7 +8,6 @@ import type {
   FlowEvent,
   FlowSummary,
   HistoryTag,
-  HistoryView,
   MockResult,
   ProxySettings,
   Rule,
@@ -81,11 +80,8 @@ export const api = {
   importRules: (replace: boolean, historyTag: HistoryTag) =>
     invoke<number>("import_rules", { replace, historyTag }),
 
-  historyList: () => invoke<HistoryView>("history_list"),
-  historyUndo: () => invoke<HistoryView>("history_undo"),
-  historyRedo: () => invoke<HistoryView>("history_redo"),
-  historyJump: (entryId: number) => invoke<HistoryView>("history_jump", { entryId }),
-  historyClear: () => invoke<void>("history_clear"),
+  historyUndo: () => invoke<void>("history_undo"),
+  historyRedo: () => invoke<void>("history_redo"),
   searchBodies: (
     pattern: string,
     side: "request" | "response" | "either",
