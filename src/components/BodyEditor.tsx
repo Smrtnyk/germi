@@ -25,21 +25,24 @@ interface Props {
   value: string;
   onChange: (value: string) => void;
   contentType: string;
+  /** Fill the available height (used inside the maximized overlay). */
+  fill?: boolean;
 }
 
 /** A content-type-aware code editor (CodeMirror 6) for mock response bodies. */
-export function BodyEditor({ value, onChange, contentType }: Props) {
+export function BodyEditor({ value, onChange, contentType, fill }: Props) {
   const extensions = useMemo(() => languageFor(contentType), [contentType]);
   const theme = useTheme();
   return (
     <CodeMirror
-      className="cm-body"
+      className={fill ? "cm-body cm-fill" : "cm-body"}
       value={value}
       onChange={onChange}
       theme={theme === "dark" ? oneDark : "light"}
       extensions={extensions}
-      minHeight="160px"
-      maxHeight="440px"
+      height={fill ? "100%" : undefined}
+      minHeight={fill ? undefined : "160px"}
+      maxHeight={fill ? undefined : "440px"}
     />
   );
 }

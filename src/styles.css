@@ -1386,6 +1386,55 @@ textarea {
   border-radius: var(--radius);
   overflow: hidden;
 }
+.cm-body.cm-fill {
+  flex: 1;
+  min-height: 0;
+}
+.cm-body.cm-fill .cm-editor {
+  height: 100%;
+}
+
+/* ---- maximized body overlay ---- */
+.maximize-dialog {
+  width: 94vw;
+  height: 92vh;
+  max-width: 94vw;
+  max-height: 92vh;
+  padding: 0;
+  color: var(--text);
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+}
+.maximize-dialog::backdrop {
+  /* No backdrop-filter — unreliable on WebKitGTK. */
+  background: rgba(4, 8, 12, 0.62);
+}
+.maximize-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+.maximize-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.maximize-title {
+  font-weight: 600;
+  font-size: var(--fs-sm);
+}
+.maximize-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 8px;
+}
 
 /* ---- native modal dialog ---- */
 .modal {
@@ -2038,6 +2087,27 @@ body.resizing {
 body.resizing * {
   cursor: col-resize !important;
 }
+.resizer-v {
+  position: relative;
+  height: 6px;
+  flex: none;
+  cursor: row-resize;
+  z-index: 2;
+}
+.resizer-v::after {
+  content: "";
+  position: absolute;
+  inset: 2px 0;
+  background: var(--line);
+  transition: background 0.12s;
+}
+.resizer-v:hover::after {
+  background: var(--accent);
+}
+body.resizing.resizing-v,
+body.resizing.resizing-v * {
+  cursor: row-resize !important;
+}
 
 /* ---- toolbar groups ---- */
 .tb-group {
@@ -2171,9 +2241,7 @@ body.resizing * {
   font-variant-numeric: tabular-nums;
 }
 .meta-scroll {
-  max-height: 46%;
   overflow: auto;
-  border-bottom: 1px solid var(--line);
   display: flex;
   flex-direction: column;
 }
