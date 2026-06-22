@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { nextIdAfterDelete } from "./selection";
+import { nextIdAfterDelete, toggleSelection } from "./selection";
 
 const order = ["a", "b", "c", "d", "e"];
 
@@ -45,5 +45,53 @@ describe("nextIdAfterDelete", () => {
 
   it("treats an unknown focused id as no focus (falls back to last remaining)", () => {
     expect(nextIdAfterDelete(order, new Set(["e"]), "zzz")).toBe("d");
+  });
+});
+
+describe("toggleSelection", () => {
+  it("deselects the only selected row, clearing the primary (issue #23)", () => {
+    expect(toggleSelection(order, new Set(["b"]), "b", "b")).toEqual({
+      selectedIds: new Set(),
+      selectedId: null,
+      anchor: "b",
+    });
+  });
+
+  it("adds an unselected row and makes it the primary", () => {
+    expect(toggleSelection(order, new Set(["a"]), "a", "c")).toEqual({
+      selectedIds: new Set(["a", "c"]),
+      selectedId: "c",
+      anchor: "c",
+    });
+  });
+
+  it("removes a selected non-primary row without moving the primary", () => {
+    expect(toggleSelection(order, new Set(["a", "b", "c"]), "c", "a")).toEqual({
+      selectedIds: new Set(["b", "c"]),
+      selectedId: "c",
+      anchor: "a",
+    });
+  });
+
+  it("moves the primary to the bottom-most survivor when deselecting the primary", () => {
+    expect(toggleSelection(order, new Set(["a", "c", "d"]), "d", "d")).toEqual({
+      selectedIds: new Set(["a", "c"]),
+      selectedId: "c",
+      anchor: "d",
+    });
+  });
+
+  it("keeps the primary on a still-selected row when an empty-set focus is impossible", () => {
+    expect(toggleSelection(order, new Set(["b", "e"]), "e", "e")).toEqual({
+      selectedIds: new Set(["b"]),
+      selectedId: "b",
+      anchor: "e",
+    });
+  });
+
+  it("does not mutate the input set", () => {
+    const input = new Set(["a", "b"]);
+    toggleSelection(order, input, "b", "b");
+    expect(input).toEqual(new Set(["a", "b"]));
   });
 });
