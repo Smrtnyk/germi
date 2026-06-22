@@ -1,7 +1,7 @@
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
 import type { CaInfo } from "../types";
-import { useToast } from "../toast";
+import { useCopy } from "../useCopy";
 import { useModalDialog } from "./useModalDialog";
 
 interface Props {
@@ -11,17 +11,9 @@ interface Props {
 
 export function CaDialog({ info, onClose }: Props) {
   const ref = useModalDialog(onClose);
-  const notify = useToast();
+  const copy = useCopy();
 
   const close = () => ref.current?.close();
-  const copy = (label: string, value: string) => {
-    if (!value) {
-      notify("info", `No ${label.toLowerCase()} to copy`);
-      return;
-    }
-    void navigator.clipboard.writeText(value);
-    notify("success", `${label} copied`);
-  };
 
   const winCmd = `certutil -addstore -user -f root "${info.certPath}"`;
   const linuxSystemCmd =
