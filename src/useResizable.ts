@@ -7,22 +7,25 @@ import {
 } from "react";
 
 interface Options {
-  /** Initial column width in px (used when nothing is persisted). */
+  /** Initial size in px (used when nothing is persisted). */
   initial: number;
-  /** Minimum width in px. */
+  /** Minimum size in px. */
   min: number;
-  /** Returns the current maximum width in px (evaluated live during a drag). */
+  /** Returns the current maximum size in px (evaluated live during a drag). */
   getMax: () => number;
-  /** localStorage key to persist the chosen width. */
+  /** localStorage key to persist the chosen size. */
   storageKey: string;
+  /** Drag axis: "x" resizes width (default), "y" resizes height. */
+  axis?: "x" | "y";
 }
 
 /**
- * A pointer-driven horizontal resize handle. Returns the current column width
- * and an `onPointerDown` to spread onto a divider element. Window-level move/up
- * listeners keep the drag alive even when the pointer leaves the handle.
+ * A pointer-driven resize handle (horizontal by default, vertical with
+ * `axis: "y"`). Returns the current size and an `onPointerDown` to spread onto a
+ * divider element. Window-level move/up listeners keep the drag alive even when
+ * the pointer leaves the handle.
  */
-export function useResizable({ initial, min, getMax, storageKey }: Options) {
+export function useResizable({ initial, min, getMax, storageKey, axis = "x" }: Options) {
   const [size, setSize] = useState<number>(() => {
     const saved = Number(localStorage.getItem(storageKey));
     return Number.isFinite(saved) && saved >= min ? saved : initial;
@@ -46,18 +49,21 @@ export function useResizable({ initial, min, getMax, storageKey }: Options) {
   const onPointerDown = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
       e.preventDefault();
-      const startX = e.clientX;
+      const vertical = axis === "y";
+      const startPos = vertical ? e.clientY : e.clientX;
       const startSize = size;
       let finalSize = startSize;
       document.body.classList.add("resizing");
+      if (vertical) document.body.classList.add("resizing-v");
 
       const move = (ev: PointerEvent) => {
         const max = Math.max(min, getMax());
-        finalSize = Math.min(max, Math.max(min, startSize + (ev.clientX - startX)));
+        const pos = vertical ? ev.clientY : ev.clientX;
+        finalSize = Math.min(max, Math.max(min, startSize + (pos - startPos)));
         setSize(finalSize);
       };
       const up = () => {
-        document.body.classList.remove("resizing");
+        document.body.classList.remove("resizing", "resizing-v");
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", up);
         try {
@@ -70,7 +76,7 @@ export function useResizable({ initial, min, getMax, storageKey }: Options) {
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up);
     },
-    [size, min, getMax, storageKey],
+    [size, min, getMax, storageKey, axis],
   );
 
   return { size, onPointerDown };

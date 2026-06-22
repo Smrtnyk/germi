@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import type { FlowDetail, FlowSummary, MessageDetail } from "../types";
 import { useToast } from "../toast";
 import { useCopy } from "../useCopy";
+import { useResizable } from "../useResizable";
 import { headersToText, parseCookies, parseQuery, toCurl, type KV } from "../curl";
+import { MaximizedOverlay } from "./MaximizedOverlay";
 
 const ROW_H = 18;
 const MAX_ROW = 2000;
@@ -495,15 +497,17 @@ function MetaPanel({
   query,
   cookies,
   copy,
+  style,
 }: {
   msg: MessageDetail;
   side: Side;
   query: KV[];
   cookies: KV[];
   copy: (label: string, value: string) => void;
+  style?: CSSProperties;
 }) {
   return (
-    <div className="meta-scroll">
+    <div className="meta-scroll" style={style}>
       <KvTable label="Query string" rows={query} />
       <KvTable label={side === "request" ? "Cookies" : "Set-Cookie"} rows={cookies} />
       <div className="kv-block">
@@ -597,6 +601,7 @@ function BodyBar({
   findOpen,
   setFindOpen,
   copy,
+  onMaximize,
 }: {
   msg: MessageDetail;
   kind: "image" | "text" | "binary";
@@ -611,6 +616,7 @@ function BodyBar({
   findOpen: boolean;
   setFindOpen: React.Dispatch<React.SetStateAction<boolean>>;
   copy: (label: string, value: string) => void;
+  onMaximize?: () => void;
 }) {
   return (
     <div className="body-bar">
@@ -636,6 +642,11 @@ function BodyBar({
         >
           Copy body
         </button>
+        {onMaximize && (
+          <button className="btn ghost small" title="Maximize (full view)" onClick={onMaximize}>
+            ⤢
+          </button>
+        )}
       </div>
     </div>
   );
@@ -657,6 +668,15 @@ function MessageView({
   const copy = useCopy();
   const { view, setView, showHex, setShowHex, wrap, setWrap, findOpen, setFindOpen } =
     useBodyState();
+  const [maximized, setMaximized] = useState(false);
+  const messageRef = useRef<HTMLDivElement>(null);
+  const meta = useResizable({
+    initial: 200,
+    min: 48,
+    getMax: () => (messageRef.current?.clientHeight ?? 400) - 140,
+    storageKey: "germi.metaHeight",
+    axis: "y",
+  });
 
   const ct = contentType(msg.headers);
   const isRawEncoded = !decode && !!msg.encoding;
@@ -669,10 +689,8 @@ function MessageView({
   const query = side === "request" ? parseQuery(path) : [];
   const cookies = parseCookies(msg.headers, side);
 
-  return (
-    <div className="message">
-      <MetaPanel msg={msg} side={side} query={query} cookies={cookies} copy={copy} />
-
+  const bodyRegion = (inMaximize: boolean) => (
+    <>
       <BodyBar
         msg={msg}
         kind={kind}
@@ -687,6 +705,7 @@ function MessageView({
         findOpen={findOpen}
         setFindOpen={setFindOpen}
         copy={copy}
+        onMaximize={inMaximize ? undefined : () => setMaximized(true)}
       />
 
       {msg.truncated && (
@@ -715,6 +734,36 @@ function MessageView({
         isRawEncoded={isRawEncoded}
         showHex={showHex}
       />
+    </>
+  );
+
+  return (
+    <div className="message" ref={messageRef}>
+      <MetaPanel
+        msg={msg}
+        side={side}
+        query={query}
+        cookies={cookies}
+        copy={copy}
+        style={{ height: meta.size, flex: "none", maxHeight: "none" }}
+      />
+
+      <div
+        className="resizer-v"
+        onPointerDown={meta.onPointerDown}
+        title="Drag to resize headers / body"
+      />
+
+      {maximized ? (
+        <MaximizedOverlay
+          title={side === "request" ? "Request body" : "Response body"}
+          onClose={() => setMaximized(false)}
+        >
+          {bodyRegion(true)}
+        </MaximizedOverlay>
+      ) : (
+        bodyRegion(false)
+      )}
     </div>
   );
 }

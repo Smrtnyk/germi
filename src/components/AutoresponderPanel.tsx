@@ -28,6 +28,7 @@ import type {
 import { useResizable } from "../useResizable";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
+import { MaximizedOverlay } from "./MaximizedOverlay";
 import { RuleTester } from "./RuleTester";
 import { Tooltip } from "./Tooltip";
 
@@ -1685,6 +1686,85 @@ function MapLocalFields({
   );
 }
 
+function RespondFields({
+  action,
+  setAction,
+}: {
+  action: Extract<Action, { kind: "respond" }>;
+  setAction: (patch: Partial<Action>, tag?: HistoryTag) => void;
+}) {
+  const [maximized, setMaximized] = useState(false);
+  const contentType = action.contentType ?? "";
+  const textual = isTextualContentType(contentType);
+
+  const editor = (fill: boolean) => (
+    <Suspense fallback={<div className="muted pad small">Loading editor…</div>}>
+      <BodyEditor
+        value={action.body}
+        contentType={contentType}
+        onChange={(b) => setAction({ body: b })}
+        fill={fill}
+      />
+    </Suspense>
+  );
+
+  return (
+    <>
+      <StatusField status={action.status} onChange={(s) => setAction({ status: s })} />
+      <div className="row">
+        <label>Content-Type</label>
+        <input
+          className="grow"
+          value={contentType}
+          onChange={(e) => setAction({ contentType: e.target.value })}
+        />
+      </div>
+      <ContentEncodingField
+        encoding={action.contentEncoding}
+        onChange={(e) => setAction({ contentEncoding: e })}
+      />
+      <HeadersTable headers={action.headers} onChange={(h) => setAction({ headers: h })} />
+      {textual ? (
+        <>
+          <div className="row body-head">
+            <label>Body</label>
+            <button
+              className="btn small"
+              title="Pretty-print JSON"
+              onClick={() => {
+                const f = formatJson(action.body);
+                if (f !== null) setAction({ body: f }, { label: "Format body", coalesceKey: null });
+              }}
+            >
+              Format
+            </button>
+            <button
+              className="btn small"
+              title="Maximize editor (full view)"
+              onClick={() => setMaximized(true)}
+            >
+              ⤢ Maximize
+            </button>
+          </div>
+          {maximized ? (
+            <MaximizedOverlay title="Response body" onClose={() => setMaximized(false)}>
+              {editor(true)}
+            </MaximizedOverlay>
+          ) : (
+            editor(false)
+          )}
+        </>
+      ) : (
+        <div className="muted pad small">
+          Binary content type — inline editing isn’t supported for {contentType.split(";")[0]}. Use{" "}
+          <strong>Map Local</strong> to serve the file directly, or set a text Content-Type (e.g.{" "}
+          <code>application/json</code>) to edit the body inline.
+        </div>
+      )}
+    </>
+  );
+}
+
 function ActionFields({
   action,
   setAction,
@@ -1693,59 +1773,8 @@ function ActionFields({
   setAction: (patch: Partial<Action>, tag?: HistoryTag) => void;
 }) {
   switch (action.kind) {
-    case "respond": {
-      const contentType = action.contentType ?? "";
-      const textual = isTextualContentType(contentType);
-      return (
-        <>
-          <StatusField status={action.status} onChange={(s) => setAction({ status: s })} />
-          <div className="row">
-            <label>Content-Type</label>
-            <input
-              className="grow"
-              value={contentType}
-              onChange={(e) => setAction({ contentType: e.target.value })}
-            />
-          </div>
-          <ContentEncodingField
-            encoding={action.contentEncoding}
-            onChange={(e) => setAction({ contentEncoding: e })}
-          />
-          <HeadersTable headers={action.headers} onChange={(h) => setAction({ headers: h })} />
-          {textual ? (
-            <>
-              <div className="row body-head">
-                <label>Body</label>
-                <button
-                  className="btn small"
-                  title="Pretty-print JSON"
-                  onClick={() => {
-                    const f = formatJson(action.body);
-                    if (f !== null)
-                      setAction({ body: f }, { label: "Format body", coalesceKey: null });
-                  }}
-                >
-                  Format
-                </button>
-              </div>
-              <Suspense fallback={<div className="muted pad small">Loading editor…</div>}>
-                <BodyEditor
-                  value={action.body}
-                  contentType={contentType}
-                  onChange={(b) => setAction({ body: b })}
-                />
-              </Suspense>
-            </>
-          ) : (
-            <div className="muted pad small">
-              Binary content type — inline editing isn’t supported for {contentType.split(";")[0]}.
-              Use <strong>Map Local</strong> to serve the file directly, or set a text Content-Type
-              (e.g. <code>application/json</code>) to edit the body inline.
-            </div>
-          )}
-        </>
-      );
-    }
+    case "respond":
+      return <RespondFields action={action} setAction={setAction} />;
     case "mapLocal":
       return <MapLocalFields path={action.path} status={action.status} setAction={setAction} />;
     case "setRequestHeader":
