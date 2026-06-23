@@ -1,6 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 
 import { api } from "../ipc";
+import { accelFromKeyboardEvent, prettyAccel } from "../hotkey";
+import { useHotkeyMode } from "../useHotkeyMode";
 import type { ProxySettings } from "../types";
 import { useToast } from "../toast";
 import { ColumnsSettings } from "./ColumnsSettings";
@@ -101,6 +103,11 @@ const SECTIONS: Section[] = [
     id: "throttling",
     label: "Throttling",
     render: (c) => <ThrottlingSection settings={c.settings} onChange={c.onChange} />,
+  },
+  {
+    id: "shortcuts",
+    label: "Shortcuts",
+    render: (c) => <HotkeySection settings={c.settings} onChange={c.onChange} />,
   },
   {
     id: "columns",
@@ -274,6 +281,71 @@ function ThrottlingSection({ settings, onChange }: SectionProps) {
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+function HotkeySection({ settings, onChange }: SectionProps) {
+  const [recording, setRecording] = useState(false);
+  const mode = useHotkeyMode();
+  const accel = settings.systemProxyHotkey;
+
+  useEffect(() => {
+    if (!recording) return;
+    function onKey(e: KeyboardEvent) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        setRecording(false);
+        return;
+      }
+      const next = accelFromKeyboardEvent(e);
+      if (next) {
+        onChange({ ...settings, systemProxyHotkey: next });
+        setRecording(false);
+      }
+    }
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [recording, settings, onChange]);
+
+  return (
+    <div className="settings-pane">
+      <h4>Shortcuts</h4>
+      <p className="muted small">
+        A global hotkey toggles the system proxy on or off — even when Germi isn&apos;t focused. A
+        toast confirms the new state, and the proxy auto-starts first if it isn&apos;t running.
+      </p>
+      <div className="row hotkey-row">
+        <label>Toggle system proxy</label>
+        <span
+          className={`btn small hotkey-display ${recording ? "recording" : ""} ${accel ? "" : "unset"}`}
+        >
+          {recording ? "Press keys…" : accel ? prettyAccel(accel) : "Not set"}
+        </span>
+        <button className="btn small" onClick={() => setRecording((r) => !r)}>
+          {recording ? "Cancel" : "Record"}
+        </button>
+        <button
+          className="btn small"
+          onClick={() => onChange({ ...settings, systemProxyHotkey: "" })}
+          disabled={!accel || recording}
+        >
+          Clear
+        </button>
+      </div>
+      <p className="muted small">
+        Use Ctrl, Alt, or Win/Super (optionally with Shift) plus a letter, digit, or function key —
+        e.g. <kbd>Ctrl+Shift+P</kbd> or <kbd>Win+F12</kbd>. Some Win/Super combos are reserved by
+        the OS and may fail to register. Press Esc while recording to cancel.
+      </p>
+      {mode === "portal" && (
+        <p className="muted small">
+          On Wayland, your desktop owns global shortcuts: when you set one, GNOME/KDE confirms it
+          via a system prompt, and you can change the key under the desktop&apos;s keyboard
+          settings. The combo above is the suggested trigger.
+        </p>
+      )}
     </div>
   );
 }

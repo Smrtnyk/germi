@@ -2540,6 +2540,25 @@ kbd {
   padding: 1px 6px;
   white-space: nowrap;
 }
+.hotkey-row .btn.small {
+  margin-bottom: 0;
+}
+.hotkey-display {
+  min-width: 96px;
+  text-align: center;
+  background: var(--bg);
+  cursor: default;
+}
+.hotkey-display:hover {
+  background: var(--bg);
+}
+.hotkey-display.unset {
+  color: var(--muted);
+}
+.hotkey-display.recording {
+  color: var(--accent);
+  border-color: var(--accent);
+}
 
 /* ---- shortcuts cheatsheet ---- */
 .shortcuts-modal {

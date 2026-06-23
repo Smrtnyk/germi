@@ -45,6 +45,13 @@ pub struct ProxySettings {
     /// Artificial delay (ms) added before each response is returned (0 = off).
     #[serde(default)]
     pub response_delay_ms: u64,
+
+    // ---- Shortcuts ----
+    /// Global hotkey (Tauri accelerator, e.g. `CmdOrCtrl+Shift+P`) that toggles
+    /// the OS system proxy on/off. Empty = unset. Registered by the shell, not
+    /// the engine; stored here so it persists with the rest of the settings.
+    #[serde(default)]
+    pub system_proxy_hotkey: String,
 }
 
 fn default_port() -> u16 {
@@ -65,6 +72,7 @@ impl Default for ProxySettings {
             capture_filter: Vec::new(),
             capture_on_start: false,
             response_delay_ms: 0,
+            system_proxy_hotkey: String::new(),
         }
     }
 }
@@ -216,6 +224,23 @@ mod tests {
         let v6 = settings(&["[::1]:8080"]);
         assert!(v6.is_excluded("[::1]:8080"));
         assert!(v6.is_excluded("::1"));
+    }
+
+    #[test]
+    fn system_proxy_hotkey_serializes_camel_case_and_defaults_empty() {
+        let s = ProxySettings {
+            system_proxy_hotkey: "CmdOrCtrl+Shift+P".to_string(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).expect("serialize settings");
+        assert!(json.contains("\"systemProxyHotkey\":\"CmdOrCtrl+Shift+P\""));
+
+        // A settings.json written before this field existed must still load.
+        let legacy: ProxySettings = serde_json::from_str("{}").expect("load legacy settings");
+        assert_eq!(legacy.system_proxy_hotkey, "");
+
+        let back: ProxySettings = serde_json::from_str(&json).expect("round-trip");
+        assert_eq!(back.system_proxy_hotkey, "CmdOrCtrl+Shift+P");
     }
 
     #[test]

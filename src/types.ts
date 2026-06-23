@@ -164,6 +164,8 @@ export interface ProxySettings {
   captureOnStart: boolean;
   // Throttling
   responseDelayMs: number;
+  // Shortcuts
+  systemProxyHotkey: string;
 }
 
 export interface CaInfo {

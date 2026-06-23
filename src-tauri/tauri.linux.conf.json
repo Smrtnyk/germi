@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "dev.germi.app",
+  "mainBinaryName": "germi",
+  "bundle": {
+    "linux": {
+      "deb": { "desktopTemplate": "germi.desktop" },
+      "rpm": { "desktopTemplate": "germi.desktop" }
+    }
+  }
+}
