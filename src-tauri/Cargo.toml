@@ -23,6 +23,8 @@ tauri-build = { version = "=2.6.3", features = [] }
 tauri = { version = "=2.11.3", features = [] }
 tauri-plugin-opener = "=2.5.4"
 tauri-plugin-dialog = "=2.7.1"
+tauri-plugin-global-shortcut = "=2.3.2"
+tauri-plugin-notification = "=2.3.3"
 
 proxy-core = { path = "../crates/proxy-core" }
 
@@ -33,6 +35,12 @@ tokio = { version = "=1.52.3", features = ["rt-multi-thread", "sync", "time", "m
 sysproxy = "=0.3.0"
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+
+# Wayland global shortcuts go through the XDG GlobalShortcuts portal (the X11
+# grabs the global-shortcut plugin uses don't fire on Wayland). Linux-only.
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "=0.13.11", default-features = false, features = ["tokio", "global_shortcuts"] }
+futures-util = "=0.3.31"
 
 [features]
 # this feature is used for production builds or when a dev server is not specified,

@@ -1,7 +1,9 @@
 //! Germi desktop shell. Thin Tauri wrapper around the `proxy-core` engine.
 
 mod commands;
+mod indicator;
 mod persist;
+mod portal_hotkey;
 mod rule_store;
 mod state;
 
@@ -23,7 +25,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            // Global hotkeys are registered/handled from the webview (see
+            // `useGlobalHotkey`); the shell only needs to initialize the plugin.
+            // Desktop-only — the lib keeps a mobile entry point.
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
             // One persistent CA per install, under the OS app-data dir. Treat an
             // unresolvable app-data dir as fatal rather than writing the root CA
             // private key to a predictable, world-traversable temp path.
@@ -47,6 +56,7 @@ pub fn run() {
                 ca_dir,
                 flow_forwarder: std::sync::Mutex::new(None),
                 prior_system_proxy: std::sync::Mutex::new(None),
+                portal_hotkey: portal_hotkey::PortalHotkey::default(),
             });
             Ok(())
         })
@@ -94,6 +104,9 @@ pub fn run() {
             commands::import_rules,
             commands::history_undo,
             commands::history_redo,
+            indicator::set_proxy_indicator,
+            portal_hotkey::global_shortcut_mode,
+            portal_hotkey::apply_portal_hotkey,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Germi")

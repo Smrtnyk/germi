@@ -17,4 +17,6 @@ pub struct AppState {
     /// future remount) aborts the prior task instead of leaking it.
     pub flow_forwarder: Mutex<Option<JoinHandle<()>>>,
     pub prior_system_proxy: Mutex<Option<sysproxy::Sysproxy>>,
+    /// Live XDG `GlobalShortcuts` portal binding (Wayland global hotkey).
+    pub portal_hotkey: crate::portal_hotkey::PortalHotkey,
 }

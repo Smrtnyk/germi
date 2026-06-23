@@ -9,10 +9,13 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 
+import { announce } from "./announce";
 import { api, subscribeFlows } from "./ipc";
 import { parseFilter, statusClass, type BodyTerm, type ParsedFilter } from "./filter";
 import { resolveColumns, DEFAULT_COLUMNS } from "./columns";
 import { useSplitRatio } from "./useResizable";
+import { useProxyIndicator } from "./useProxyIndicator";
+import { useSystemHotkeys } from "./useSystemHotkeys";
 import { useToasts, type Notify } from "./toast";
 import { toCurl } from "./curl";
 import { nextIdAfterDelete, toggleSelection } from "./selection";
@@ -539,6 +542,17 @@ function useProxyControl(
   const [systemProxy, setSystemProxy] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  async function startProxy(): Promise<number> {
+    const boundPort = await api.startProxy(settings.port, settings.allowRemote);
+    if (boundPort !== settings.port) onPortBound(boundPort);
+    setRunning(true);
+    notify(
+      "success",
+      `Proxy listening on ${settings.allowRemote ? "0.0.0.0" : "127.0.0.1"}:${boundPort}`,
+    );
+    return boundPort;
+  }
+
   async function toggleProxy() {
     if (busy) return;
     setBusy(true);
@@ -551,13 +565,7 @@ function useProxyControl(
         await api.stopProxy();
         setRunning(false);
       } else {
-        const boundPort = await api.startProxy(settings.port, settings.allowRemote);
-        if (boundPort !== settings.port) onPortBound(boundPort);
-        setRunning(true);
-        notify(
-          "success",
-          `Proxy listening on ${settings.allowRemote ? "0.0.0.0" : "127.0.0.1"}:${boundPort}`,
-        );
+        await startProxy();
       }
     } catch (e) {
       setError(String(e));
@@ -567,17 +575,23 @@ function useProxyControl(
   }
 
   async function toggleSystemProxy() {
+    if (busy) return;
+    setBusy(true);
     try {
       if (systemProxy) {
         await api.clearSystemProxy();
         setSystemProxy(false);
+        void announce(notify, "System proxy off");
       } else {
-        await api.setSystemProxy(settings.port);
+        const port = running ? settings.port : await startProxy();
+        await api.setSystemProxy(port);
         setSystemProxy(true);
-        notify("info", "System proxy now routed through Germi");
+        void announce(notify, "System proxy on — routed through Germi");
       }
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -594,6 +608,7 @@ function useSettings() {
     captureFilter: [],
     captureOnStart: false,
     responseDelayMs: 0,
+    systemProxyHotkey: "",
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   return { settings, setSettings, settingsOpen, setSettingsOpen };
@@ -1130,6 +1145,8 @@ export function useAppState() {
     (port) => saveSettings({ ...settings.settings, port }),
     notify,
   );
+  useSystemHotkeys(settings.settings.systemProxyHotkey, proxy.toggleSystemProxy, setError);
+  useProxyIndicator(proxy.systemProxy);
   const autoresponderActive = rightTab === "autoresponder" || rightMode === "split";
   const ar = useAutoresponder(setError, setRightTab, notify, autoresponderActive);
   const history = useHistory(ar.refresh, setError);
