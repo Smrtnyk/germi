@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import CodeMirror, { EditorView } from "@uiw/react-codemirror";
 import { json, jsonParseLinter } from "@codemirror/lang-json";
 import { html } from "@codemirror/lang-html";
@@ -36,11 +36,14 @@ export function BodyEditor({ value, onChange, contentType, fill, wrap }: Props) 
       wrap ? [...languageFor(contentType), EditorView.lineWrapping] : languageFor(contentType),
     [contentType, wrap],
   );
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  const handleChange = useCallback((next: string) => onChangeRef.current(next), []);
   return (
     <CodeMirror
       className={fill ? "cm-body cm-fill" : "cm-body"}
       value={value}
-      onChange={onChange}
+      onChange={handleChange}
       theme={oneDark}
       extensions={extensions}
       height={fill ? "100%" : undefined}

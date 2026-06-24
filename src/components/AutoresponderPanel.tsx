@@ -22,9 +22,11 @@ import type {
   BulkMockEvent,
   HistoryTag,
   Rule,
+  RuleSearchScope,
   RuleSummary,
   ScenarioSummary,
 } from "../types";
+import { isShallowScope, ruleMatchesScopeClient } from "../ruleScope";
 import { useResizable } from "../useResizable";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
@@ -391,6 +393,7 @@ function useSelectedRule(
 function useRuleSelection(selectRuleId?: string | null) {
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [scope, setScope] = useState<RuleSearchScope>("all");
   const [dragId, setDragId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
 
@@ -403,11 +406,61 @@ function useRuleSelection(selectRuleId?: string | null) {
     setSelectedRuleId,
     query,
     setQuery,
+    scope,
+    setScope,
     dragId,
     setDragId,
     overId,
     setOverId,
   };
+}
+
+function useDeepRuleSearch(
+  scenarioId: string,
+  query: string,
+  scope: RuleSearchScope,
+): Set<string> | null {
+  const [result, setResult] = useState<{ scenario: string; ids: Set<string> } | null>(null);
+  const q = query.trim();
+
+  useEffect(() => {
+    if (isShallowScope(scope) || q === "") {
+      setResult(null);
+      return;
+    }
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      void api
+        .searchRules(scenarioId, q, scope)
+        .then((ids) => {
+          if (!cancelled) setResult({ scenario: scenarioId, ids: new Set(ids) });
+        })
+        .catch(() => {
+          if (!cancelled) setResult(null);
+        });
+    }, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [scenarioId, q, scope]);
+
+  return result && result.scenario === scenarioId ? result.ids : null;
+}
+
+function filterRulesByScope(
+  rules: RuleSummary[],
+  query: string,
+  scope: RuleSearchScope,
+  deepIds: Set<string> | null,
+): RuleSummary[] {
+  const q = query.trim();
+  if (q === "") return rules;
+  if (isShallowScope(scope)) {
+    return rules.filter((r) => ruleMatchesScopeClient(r, scope, q));
+  }
+  if (deepIds === null) return rules;
+  return rules.filter((r) => deepIds.has(r.id));
 }
 
 interface FlowDropZone {
@@ -528,15 +581,27 @@ interface RuleListBehavior {
   onReorder: (toId: string) => void;
 }
 
+const RULE_SCOPES: { value: RuleSearchScope; label: string }[] = [
+  { value: "name", label: "Name" },
+  { value: "url", label: "URL" },
+  { value: "method", label: "Method" },
+  { value: "status", label: "Status" },
+  { value: "response", label: "Response" },
+  { value: "headers", label: "Headers" },
+  { value: "all", label: "All" },
+];
+
 function RuleListToolbar({
-  ruleCount,
   query,
   setQuery,
+  scope,
+  setScope,
   onAdd,
 }: {
-  ruleCount: number;
   query: string;
   setQuery: (q: string) => void;
+  scope: RuleSearchScope;
+  setScope: (s: RuleSearchScope) => void;
   onAdd: () => void;
 }) {
   return (
@@ -544,14 +609,26 @@ function RuleListToolbar({
       <button className="btn primary block" onClick={onAdd}>
         + Add rule
       </button>
-      {ruleCount > 4 && (
+      <div className="rule-search-row">
         <input
           className="rule-search"
           placeholder="Search rules…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
-      )}
+        <select
+          className="rule-search-scope"
+          value={scope}
+          onChange={(e) => setScope(e.target.value as RuleSearchScope)}
+          title="Which rule fields to search"
+        >
+          {RULE_SCOPES.map((s) => (
+            <option key={s.value} value={s.value}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+      </div>
     </>
   );
 }
@@ -577,6 +654,8 @@ function RuleList({
   shownRules,
   query,
   setQuery,
+  scope,
+  setScope,
   onAdd,
   behavior,
 }: {
@@ -584,12 +663,20 @@ function RuleList({
   shownRules: RuleSummary[];
   query: string;
   setQuery: (q: string) => void;
+  scope: RuleSearchScope;
+  setScope: (s: RuleSearchScope) => void;
   onAdd: () => void;
   behavior: RuleListBehavior;
 }) {
   return (
     <aside className="rule-list">
-      <RuleListToolbar ruleCount={rules.length} query={query} setQuery={setQuery} onAdd={onAdd} />
+      <RuleListToolbar
+        query={query}
+        setQuery={setQuery}
+        scope={scope}
+        setScope={setScope}
+        onAdd={onAdd}
+      />
       <RuleListMessage ruleCount={rules.length} shownCount={shownRules.length} query={query} />
       <VirtualRuleList rules={shownRules} behavior={behavior} />
     </aside>
@@ -794,15 +881,10 @@ function useScenarioWorkspace(
     storageKey: "germi.ruleListWidth",
   });
 
-  const q = selection.query.trim().toLowerCase();
+  const deepIds = useDeepRuleSearch(active.id, selection.query, selection.scope);
   const shownRules = useMemo(
-    () =>
-      q
-        ? active.rules.filter(
-            (r) => r.name.toLowerCase().includes(q) || r.matcher.url.toLowerCase().includes(q),
-          )
-        : active.rules,
-    [active.rules, q],
+    () => filterRulesByScope(active.rules, selection.query, selection.scope, deepIds),
+    [active.rules, selection.query, selection.scope, deepIds],
   );
 
   async function addRule() {
@@ -949,6 +1031,8 @@ function ScenarioRuleWorkspace({
         shownRules={workspace.shownRules}
         query={selection.query}
         setQuery={selection.setQuery}
+        scope={selection.scope}
+        setScope={selection.setScope}
         onAdd={() => void workspace.addRule()}
         behavior={behavior}
       />

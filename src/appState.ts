@@ -12,7 +12,7 @@ import {
 
 import { announce } from "./announce";
 import { api, subscribeFlows } from "./ipc";
-import { parseFilter, statusClass, type BodyTerm, type ParsedFilter } from "./filter";
+import { parseFilter, statusClass, type ContentTerm, type ParsedFilter } from "./filter";
 import { resolveColumns, DEFAULT_COLUMNS, type ColumnDef } from "./columns";
 import { nextSort, resolveSort, sortFlows, type SortState } from "./sort";
 import { useSplitRatio } from "./useResizable";
@@ -204,23 +204,24 @@ function collectMatched(
   return set;
 }
 
-async function runBodySearch(
-  bodyTerms: BodyTerm[],
+async function runContentSearch(
+  contentTerms: ContentTerm[],
   seedIds: string[],
   isCancelled: () => boolean,
 ): Promise<string[] | null> {
   let ids = seedIds;
-  for (const bt of bodyTerms) {
-    const result = await api.searchBodies(bt.value, bt.side, bt.regex, ids);
+  for (const ct of contentTerms) {
+    const search = ct.field === "headers" ? api.searchHeaders : api.searchBodies;
+    const result = await search(ct.value, ct.side, ct.regex, ids);
     if (isCancelled()) return null;
     const hit = new Set(result);
-    ids = ids.filter((id) => (bt.neg ? !hit.has(id) : hit.has(id)));
+    ids = ids.filter((id) => (ct.neg ? !hit.has(id) : hit.has(id)));
   }
   return ids;
 }
 
-async function performBodySearch(
-  bodyTerms: BodyTerm[],
+async function performContentSearch(
+  contentTerms: ContentTerm[],
   seedIds: string[],
   isCancelled: () => boolean,
   apply: (ids: Set<string>) => void,
@@ -228,7 +229,7 @@ async function performBodySearch(
   setError: SetError,
 ): Promise<void> {
   try {
-    const ids = await runBodySearch(bodyTerms, seedIds, isCancelled);
+    const ids = await runContentSearch(contentTerms, seedIds, isCancelled);
     if (ids && !isCancelled()) apply(new Set(ids));
   } catch (e) {
     if (!isCancelled()) setError(String(e));
@@ -241,10 +242,10 @@ function intersectMatches(
   hasFilter: boolean,
   summaryMatched: Set<string>,
   bodyMatchIds: Set<string> | null,
-  hasBodyTerms: boolean,
+  hasContentTerms: boolean,
 ): Set<string> | null {
   if (!hasFilter) return null;
-  if (!hasBodyTerms || bodyMatchIds === null) return summaryMatched;
+  if (!hasContentTerms || bodyMatchIds === null) return summaryMatched;
   return new Set([...summaryMatched].filter((id) => bodyMatchIds.has(id)));
 }
 
@@ -373,7 +374,7 @@ function useTrafficFilter(flows: FlowSummary[], setError: SetError) {
   summaryMatchedRef.current = summaryMatched;
 
   useEffect(() => {
-    if (parsed.bodyTerms.length === 0) {
+    if (parsed.contentTerms.length === 0) {
       setBodyMatchIds(null);
       setSearching(false);
       return;
@@ -381,8 +382,8 @@ function useTrafficFilter(flows: FlowSummary[], setError: SetError) {
     let cancelled = false;
     setSearching(true);
     const handle = window.setTimeout(() => {
-      void performBodySearch(
-        parsed.bodyTerms,
+      void performContentSearch(
+        parsed.contentTerms,
         [...summaryMatchedRef.current],
         () => cancelled,
         setBodyMatchIds,
@@ -398,7 +399,7 @@ function useTrafficFilter(flows: FlowSummary[], setError: SetError) {
   }, [deferredFilter, typeChips, statusChips]);
 
   const matchedIds = useMemo(
-    () => intersectMatches(hasFilter, summaryMatched, bodyMatchIds, parsed.bodyTerms.length > 0),
+    () => intersectMatches(hasFilter, summaryMatched, bodyMatchIds, parsed.contentTerms.length > 0),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [hasFilter, summaryMatched, bodyMatchIds, deferredFilter],
   );
@@ -1170,6 +1171,11 @@ function useViewState() {
     persist("germi.rightCollapsed", v ? "1" : "0");
   }, []);
   const filterInputRef = useRef<HTMLInputElement>(null);
+  const inspectorFindRef = useRef<{
+    openFind: (seed?: string, scope?: "all" | "url" | "headers" | "body") => void;
+    step: (dir: number) => void;
+    open: boolean;
+  } | null>(null);
 
   return {
     rightTab,
@@ -1189,6 +1195,7 @@ function useViewState() {
     rightCollapsed,
     setRightCollapsed,
     filterInputRef,
+    inspectorFindRef,
   };
 }
 
@@ -1270,6 +1277,7 @@ export function useAppState() {
     rightCollapsed,
     setRightCollapsed,
     filterInputRef,
+    inspectorFindRef,
   } = useViewState();
   const [caInfo, setCaInfo] = useState<CaInfo | null>(null);
 
@@ -1524,6 +1532,7 @@ export function useAppState() {
     rightCollapsed,
     setRightCollapsed,
     filterInputRef,
+    inspectorFindRef,
     confirmClear,
     setConfirmClear,
     requestClearTraffic,

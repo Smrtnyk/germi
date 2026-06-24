@@ -141,25 +141,49 @@ describe("parseFilter summary matching", () => {
   });
 });
 
-describe("parseFilter body terms", () => {
+describe("parseFilter content terms", () => {
   it("extracts body terms without affecting summary matching", () => {
     const parsed = parseFilter("body:secret");
     expect(parsed.matchSummary(summary())).toBe(true);
-    expect(parsed.bodyTerms).toEqual([
-      { side: "either", value: "secret", regex: false, neg: false },
+    expect(parsed.contentTerms).toEqual([
+      { field: "body", side: "either", value: "secret", regex: false, neg: false },
     ]);
   });
 
-  it("distinguishes side, regex and negation", () => {
+  it("distinguishes side, regex and negation for body terms", () => {
     const parsed = parseFilter("req-body:token -resp-body:/foo/");
-    expect(parsed.bodyTerms).toEqual([
-      { side: "request", value: "token", regex: false, neg: false },
-      { side: "response", value: "foo", regex: true, neg: true },
+    expect(parsed.contentTerms).toEqual([
+      { field: "body", side: "request", value: "token", regex: false, neg: false },
+      { field: "body", side: "response", value: "foo", regex: true, neg: true },
     ]);
   });
 
-  it("drops an empty body value", () => {
-    expect(parseFilter("body:").bodyTerms).toEqual([]);
+  it("extracts a header term scoped to either side", () => {
+    const parsed = parseFilter("header:authorization");
+    expect(parsed.contentTerms).toEqual([
+      { field: "headers", side: "either", value: "authorization", regex: false, neg: false },
+    ]);
+  });
+
+  it("distinguishes side, regex and negation for header terms", () => {
+    const parsed = parseFilter("req-header:x-foo -resp-header:/bar/");
+    expect(parsed.contentTerms).toEqual([
+      { field: "headers", side: "request", value: "x-foo", regex: false, neg: false },
+      { field: "headers", side: "response", value: "bar", regex: true, neg: true },
+    ]);
+  });
+
+  it("mixes body and header terms, one per field", () => {
+    const parsed = parseFilter("body:secret header:x-token");
+    expect(parsed.contentTerms).toEqual([
+      { field: "body", side: "either", value: "secret", regex: false, neg: false },
+      { field: "headers", side: "either", value: "x-token", regex: false, neg: false },
+    ]);
+  });
+
+  it("drops an empty body or header value", () => {
+    expect(parseFilter("body:").contentTerms).toEqual([]);
+    expect(parseFilter("header:").contentTerms).toEqual([]);
   });
 });
 

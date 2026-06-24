@@ -39,6 +39,19 @@ fn cached_regex(pattern: &str) -> Option<Regex> {
     Some(re)
 }
 
+/// Which rule fields a deep rule search scans (autoresponder rule filter).
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum RuleSearchScope {
+    Name,
+    Url,
+    Method,
+    Status,
+    Response,
+    Headers,
+    All,
+}
+
 /// How a [`Matcher`]'s `url` pattern is compared against a flow's URL.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -866,6 +879,80 @@ fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
         slot.1 = value.to_string();
     } else {
         headers.push((name.to_string(), value.to_string()));
+    }
+}
+
+/// The status text a rule's action contributes to a `Status`-scope search.
+fn action_status_text(action: &Action) -> Option<String> {
+    match action {
+        Action::Respond { status, .. }
+        | Action::MapLocal { status, .. }
+        | Action::SetStatus { status } => Some(status.to_string()),
+        _ => None,
+    }
+}
+
+/// The response-body text a rule's action contributes to a `Response`-scope search.
+fn action_response_text(action: &Action) -> Option<&str> {
+    match action {
+        Action::Respond { body, .. } => Some(body),
+        _ => None,
+    }
+}
+
+/// The header name/value text a rule's action contributes to a `Headers`-scope
+/// search: a `Respond`'s header table plus its content-type, and the name/value
+/// of header-setting actions, rendered as one `name: value` per line.
+fn action_header_text(action: &Action) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    match action {
+        Action::Respond {
+            headers,
+            content_type,
+            ..
+        } => {
+            lines.extend(headers.iter().map(|(k, v)| format!("{k}: {v}")));
+            if let Some(ct) = content_type {
+                lines.push(format!("content-type: {ct}"));
+            }
+        }
+        Action::SetRequestHeader { name, value }
+        | Action::SetResponseHeader { name, value } => lines.push(format!("{name}: {value}")),
+        _ => {}
+    }
+    lines.join("\n")
+}
+
+/// Whether a single (non-`All`) scope's text for `rule` contains `needle`
+/// (case-insensitive). `needle` is already lowercased by the caller.
+fn scope_text_matches(rule: &Rule, scope: RuleSearchScope, needle: &str) -> bool {
+    let contains = |text: &str| text.to_lowercase().contains(needle);
+    match scope {
+        RuleSearchScope::Name => contains(&rule.name),
+        RuleSearchScope::Url => contains(&rule.matcher.url),
+        RuleSearchScope::Method => rule.matcher.method.as_deref().is_some_and(contains),
+        RuleSearchScope::Status => action_status_text(&rule.action).is_some_and(|s| contains(&s)),
+        RuleSearchScope::Response => action_response_text(&rule.action).is_some_and(contains),
+        RuleSearchScope::Headers => contains(&action_header_text(&rule.action)),
+        RuleSearchScope::All => true,
+    }
+}
+
+/// Whether `rule` matches `needle` under `scope`. `All` ORs the concrete scopes.
+/// `needle` must already be lowercased.
+pub(crate) fn rule_matches_scope(rule: &Rule, scope: RuleSearchScope, needle: &str) -> bool {
+    match scope {
+        RuleSearchScope::All => [
+            RuleSearchScope::Name,
+            RuleSearchScope::Url,
+            RuleSearchScope::Method,
+            RuleSearchScope::Status,
+            RuleSearchScope::Response,
+            RuleSearchScope::Headers,
+        ]
+        .iter()
+        .any(|s| scope_text_matches(rule, *s, needle)),
+        other => scope_text_matches(rule, other, needle),
     }
 }
 

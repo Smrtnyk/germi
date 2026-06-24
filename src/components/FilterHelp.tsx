@@ -9,10 +9,20 @@ const ROWS: { tokens: string[]; desc: string }[] = [
   { tokens: ["larger-than:", "smaller-than:"], desc: "response size (k/m suffix)" },
   { tokens: ["slower-than:"], desc: "duration in ms" },
   { tokens: ["body:", "req-body:", "resp-body:"], desc: "search body content (scans backend)" },
+  {
+    tokens: ["header:", "req-header:", "resp-header:"],
+    desc: "search header name/value (scans backend)",
+  },
   { tokens: ["/regex/"], desc: "regular expression on the URL" },
   { tokens: ["-term"], desc: "negate any term" },
 ];
-const EXAMPLES = ["kind:xhr status:5xx", "host:api -mime:json", "body:timeout", "/\\.woff2/"];
+const EXAMPLES = [
+  "kind:xhr status:5xx",
+  "host:api -mime:json",
+  "body:timeout",
+  "header:authorization",
+  "/\\.woff2/",
+];
 
 interface Props {
   filter: string;

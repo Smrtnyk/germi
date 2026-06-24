@@ -32,7 +32,7 @@ export interface ShortcutCommand {
 // Single source of truth; array order is the display order in Settings + help.
 export const SHORTCUT_COMMANDS: readonly ShortcutCommand[] = [
   { id: "palette", label: "Open command palette", default: "Mod+K" },
-  { id: "focus-filter", label: "Focus the filter", default: "Mod+F" },
+  { id: "focus-filter", label: "Find in request / focus filter", default: "Mod+F" },
   { id: "save", label: "Save session", default: "Mod+S" },
   { id: "open", label: "Open session", default: "Mod+O" },
   { id: "copy-url", label: "Copy URL of selected request", default: "Mod+U" },

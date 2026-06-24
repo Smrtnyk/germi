@@ -12,6 +12,7 @@ import type {
   MockResult,
   ProxySettings,
   Rule,
+  RuleSearchScope,
   RuleSummary,
   ScenarioSummary,
   TestInput,
@@ -94,6 +95,14 @@ export const api = {
     regex: boolean,
     candidates: string[] | null,
   ) => invoke<string[]>("search_bodies", { pattern, side, regex, candidates }),
+  searchHeaders: (
+    pattern: string,
+    side: "request" | "response" | "either",
+    regex: boolean,
+    candidates: string[] | null,
+  ) => invoke<string[]>("search_headers", { pattern, side, regex, candidates }),
+  searchRules: (scenarioId: string, pattern: string, scope: RuleSearchScope) =>
+    invoke<string[]>("search_rules", { scenarioId, pattern, scope }),
 
   caInfo: () => invoke<CaInfo>("ca_info"),
   exportCa: () => invoke<boolean>("export_ca"),

@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use proxy_core::{
     AutoResponderSummary, FlowDetail, FlowEvent, FlowSummary, HistoryStep, HistoryTag, MockResult,
-    ProxySettings, Rule, RuleSummary, Scenario, ScenarioSummary, SearchSide, TestInput, TestResult,
+    ProxySettings, Rule, RuleSearchScope, RuleSummary, Scenario, ScenarioSummary, SearchSide,
+    TestInput, TestResult,
 };
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -583,6 +584,31 @@ pub fn search_bodies(
     state
         .controller
         .search_bodies(&pattern, side, regex, candidates.as_deref())
+}
+
+/// Header search: return the ids of flows whose header table (name/value) matches.
+#[tauri::command]
+pub fn search_headers(
+    state: State<'_, AppState>,
+    pattern: String,
+    side: SearchSide,
+    regex: bool,
+    candidates: Option<Vec<String>>,
+) -> Vec<String> {
+    state
+        .controller
+        .search_headers(&pattern, side, regex, candidates.as_deref())
+}
+
+/// Deep rule search within one scenario: ids of rules whose `scope` fields match.
+#[tauri::command]
+pub fn search_rules(
+    state: State<'_, AppState>,
+    scenario_id: String,
+    pattern: String,
+    scope: RuleSearchScope,
+) -> Vec<String> {
+    state.controller.search_rules(&scenario_id, &pattern, scope)
 }
 
 /// Save the current traffic to a `.germi` session file. Returns false if cancelled.

@@ -56,7 +56,7 @@ pub use flow::{
 pub use history::{HistoryEntryView, HistoryKind, HistoryTag, HistoryView};
 pub use rules::{
     Action, ActionSummary, AutoResponder, AutoResponderSummary, MatchKind, Matcher, Rule,
-    RuleSet, RuleSummary, Scenario, ScenarioSummary,
+    RuleSearchScope, RuleSet, RuleSummary, Scenario, ScenarioSummary,
 };
 pub use rules_export::RulesExport;
 pub use settings::ProxySettings;
@@ -110,6 +110,14 @@ pub enum SearchSide {
     Request,
     Response,
     Either,
+}
+
+/// Which projection of a flow a content search scans.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchField {
+    Body,
+    Headers,
 }
 
 /// Owns the proxy lifecycle, the captured-flow store and the rules.
@@ -355,6 +363,51 @@ impl ProxyController {
         regex: bool,
         candidates: Option<&[String]>,
     ) -> Vec<String> {
+        self.search_messages(pattern, side, regex, candidates, |body, headers| {
+            if !crate::flow::is_textual(headers) {
+                return None; // skip binary blobs (images/fonts/media)
+            }
+            let bytes = match crate::body::decode_body(headers, body) {
+                Some((decoded, _truncated)) => decoded,
+                None => body.to_vec(),
+            };
+            Some(String::from_utf8_lossy(&bytes).into_owned())
+        })
+    }
+
+    /// Scan stored header tables (rendered `name: value`, one per line) for
+    /// `pattern`; returns matching flow ids, optionally restricted to
+    /// `candidates`. Case-insensitive; headers are always text (no binary gate).
+    pub fn search_headers(
+        &self,
+        pattern: &str,
+        side: SearchSide,
+        regex: bool,
+        candidates: Option<&[String]>,
+    ) -> Vec<String> {
+        self.search_messages(pattern, side, regex, candidates, |_body, headers| {
+            Some(
+                headers
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {v}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        })
+    }
+
+    /// Shared scan core for body/header content search. `extract` projects a
+    /// message (body + headers) to the searchable text, or `None` to skip that
+    /// message (e.g. a binary body). Per flow the request side wins first, then
+    /// the response, matching the original `search_bodies` short-circuit.
+    fn search_messages(
+        &self,
+        pattern: &str,
+        side: SearchSide,
+        regex: bool,
+        candidates: Option<&[String]>,
+        extract: impl Fn(&[u8], &[(String, String)]) -> Option<String>,
+    ) -> Vec<String> {
         if pattern.is_empty() {
             return candidates.map(|c| c.to_vec()).unwrap_or_default();
         }
@@ -377,14 +430,9 @@ impl ProxyController {
         let ids = candidates.map_or_else(|| store.ids(), |c| c.to_vec());
 
         let hit = |body: &[u8], headers: &[(String, String)]| -> bool {
-            if !crate::flow::is_textual(headers) {
-                return false; // skip binary blobs (images/fonts/media)
-            }
-            let bytes = match crate::body::decode_body(headers, body) {
-                Some((decoded, _truncated)) => decoded,
-                None => body.to_vec(),
+            let Some(text) = extract(body, headers) else {
+                return false;
             };
-            let text = String::from_utf8_lossy(&bytes);
             match &re {
                 Some(re) => re.is_match(&text),
                 None => text.to_lowercase().contains(&needle),
@@ -514,6 +562,34 @@ impl ProxyController {
                 .find(|rule| rule.id == rule_id)
                 .cloned()
         })
+    }
+
+    /// Deep rule search within one scenario. Returns the ids of rules whose
+    /// `scope` fields contain `pattern` (case-insensitive substring; no regex).
+    /// An empty `pattern` returns every rule id in the scenario; a missing
+    /// scenario returns empty.
+    pub fn search_rules(
+        &self,
+        scenario_id: &str,
+        pattern: &str,
+        scope: RuleSearchScope,
+    ) -> Vec<String> {
+        let Ok(ar) = self.shared.autoresponder.read() else {
+            return Vec::new();
+        };
+        let Some(scenario) = ar.scenarios.iter().find(|s| s.id == scenario_id) else {
+            return Vec::new();
+        };
+        if pattern.is_empty() {
+            return scenario.rules.iter().map(|rule| rule.id.clone()).collect();
+        }
+        let needle = pattern.to_lowercase();
+        scenario
+            .rules
+            .iter()
+            .filter(|rule| rules::rule_matches_scope(rule, scope, &needle))
+            .map(|rule| rule.id.clone())
+            .collect()
     }
 
     pub fn test_scenario(&self, scenario_id: &str, input: &TestInput) -> Result<TestResult> {
@@ -2053,5 +2129,517 @@ mod tests {
         c.clear_history();
         assert!(c.history_view().entries.is_empty());
         assert!(c.undo().is_none());
+    }
+
+    fn flow_with_headers(
+        id: &str,
+        req_headers: Vec<(&str, &str)>,
+        resp_headers: Vec<(&str, &str)>,
+        resp_body: &[u8],
+    ) -> crate::flow::Flow {
+        let mut flow = flow(id);
+        flow.request.headers = req_headers
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        flow.response = Some(CapturedResponse {
+            status: 200,
+            version: "HTTP/1.1".to_string(),
+            headers: resp_headers
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: resp_body.to_vec(),
+            timestamp_ms: 1,
+        });
+        flow
+    }
+
+    #[test]
+    fn search_headers_matches_request_and_response_header_value() {
+        let c = controller();
+        c.shared.record_new(flow_with_headers(
+            "f1",
+            vec![("x-trace", "zzz")],
+            vec![("x-served-by", "edge-7")],
+            b"body",
+        ));
+
+        assert_eq!(
+            c.search_headers("zzz", SearchSide::Either, false, None),
+            vec!["f1".to_string()],
+            "a request header value is found on Either"
+        );
+        assert_eq!(
+            c.search_headers("zzz", SearchSide::Request, false, None),
+            vec!["f1".to_string()],
+            "a request header value is found on the Request side"
+        );
+        assert!(
+            c.search_headers("zzz", SearchSide::Response, false, None).is_empty(),
+            "a request-only value must not match the Response side"
+        );
+        assert_eq!(
+            c.search_headers("edge-7", SearchSide::Response, false, None),
+            vec!["f1".to_string()],
+            "a response header value is found on the Response side"
+        );
+    }
+
+    #[test]
+    fn search_headers_is_case_insensitive_substring() {
+        let c = controller();
+        c.shared.record_new(flow_with_headers(
+            "f1",
+            vec![("Authorization", "Bearer ABC")],
+            vec![],
+            b"body",
+        ));
+
+        assert_eq!(
+            c.search_headers("authorization", SearchSide::Request, false, None),
+            vec!["f1".to_string()],
+            "header name match is case-insensitive"
+        );
+        assert_eq!(
+            c.search_headers("bearer abc", SearchSide::Request, false, None),
+            vec!["f1".to_string()],
+            "header value match is case-insensitive substring"
+        );
+    }
+
+    #[test]
+    fn search_headers_regex() {
+        let c = controller();
+        c.shared.record_new(flow_with_headers(
+            "f1",
+            vec![("x-trace", "zzz")],
+            vec![],
+            b"body",
+        ));
+
+        assert_eq!(
+            c.search_headers("x-tr.*", SearchSide::Request, true, None),
+            vec!["f1".to_string()],
+            "a valid regex matches the rendered header line"
+        );
+        assert!(
+            c.search_headers("x-tr(", SearchSide::Request, true, None).is_empty(),
+            "an invalid regex yields an empty result"
+        );
+    }
+
+    #[test]
+    fn search_headers_respects_candidate_prefilter() {
+        let c = controller();
+        c.shared.record_new(flow_with_headers(
+            "match",
+            vec![("x-trace", "zzz")],
+            vec![],
+            b"body",
+        ));
+        c.shared.record_new(flow_with_headers(
+            "other",
+            vec![("x-trace", "zzz")],
+            vec![],
+            b"body",
+        ));
+
+        let only_other = vec!["other".to_string()];
+        assert_eq!(
+            c.search_headers("zzz", SearchSide::Request, false, Some(&only_other)),
+            vec!["other".to_string()],
+            "a candidate prefilter excludes a matching id that is not a candidate"
+        );
+    }
+
+    #[test]
+    fn search_bodies_still_skips_binary() {
+        let c = controller();
+        c.shared.record_new(flow_with_headers(
+            "png",
+            vec![],
+            vec![("content-type", "image/png"), ("x-trace", "needle-in-header")],
+            b"needle-in-body",
+        ));
+
+        assert!(
+            c.search_bodies("needle-in-body", SearchSide::Response, false, None).is_empty(),
+            "the binary (image/png) gate must keep body search from matching ASCII bytes in a binary body"
+        );
+        assert_eq!(
+            c.search_headers("needle-in-header", SearchSide::Response, false, None),
+            vec!["png".to_string()],
+            "header search has no binary gate and still finds the header value"
+        );
+    }
+
+    #[test]
+    fn search_bodies_unchanged_behavior() {
+        let c = controller();
+        c.shared.record_new(completed_flow("alpha"));
+        c.shared.record_new(completed_flow("beta"));
+
+        assert_eq!(
+            c.search_bodies("response-alpha", SearchSide::Response, false, None),
+            vec!["alpha".to_string()],
+            "body search still matches the decoded text/plain response body"
+        );
+        assert!(
+            c.search_bodies("response-alpha", SearchSide::Request, false, None).is_empty(),
+            "a response-body match must not be reported on the Request side"
+        );
+    }
+
+    #[test]
+    fn search_rules_empty_pattern_returns_all_ids() {
+        let c = controller();
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("S", vec![respond_rule("one"), respond_rule("two")])],
+            active_scenario_id: Some("S".to_string()),
+        });
+
+        assert_eq!(
+            c.search_rules("S", "", RuleSearchScope::All),
+            vec!["one".to_string(), "two".to_string()],
+            "an empty pattern returns every rule id in the scenario"
+        );
+    }
+
+    #[test]
+    fn search_rules_by_name() {
+        let c = controller();
+        let mut a = respond_rule("a");
+        a.name = "Login mock".to_string();
+        let mut b = respond_rule("b");
+        b.name = "Health check".to_string();
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("S", vec![a, b])],
+            active_scenario_id: Some("S".to_string()),
+        });
+
+        assert_eq!(
+            c.search_rules("S", "login", RuleSearchScope::Name),
+            vec!["a".to_string()],
+        );
+    }
+
+    #[test]
+    fn search_rules_by_url() {
+        let c = controller();
+        let mut a = respond_rule("a");
+        a.matcher.url = "https://example.com/login".to_string();
+        let mut b = respond_rule("b");
+        b.matcher.url = "https://example.com/health".to_string();
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("S", vec![a, b])],
+            active_scenario_id: Some("S".to_string()),
+        });
+
+        assert_eq!(
+            c.search_rules("S", "/health", RuleSearchScope::Url),
+            vec!["b".to_string()],
+        );
+    }
+
+    #[test]
+    fn search_rules_by_method() {
+        let c = controller();
+        let mut a = respond_rule("a");
+        a.matcher.method = Some("POST".to_string());
+        let mut b = respond_rule("b");
+        b.matcher.method = Some("GET".to_string());
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("S", vec![a, b])],
+            active_scenario_id: Some("S".to_string()),
+        });
+
+        assert_eq!(
+            c.search_rules("S", "post", RuleSearchScope::Method),
+            vec!["a".to_string()],
+        );
+    }
+
+    #[test]
+    fn search_rules_by_status_matches_respond_and_setstatus() {
+        let c = controller();
+        let mut down = respond_rule("down");
+        down.action = Action::Respond {
+            status: 503,
+            headers: vec![],
+            body: String::new(),
+            content_type: None,
+            content_encoding: None,
+        };
+        let teapot = Rule {
+            id: "teapot".to_string(),
+            name: "teapot".to_string(),
+            enabled: true,
+            fire_limit: None,
+            repeat: false,
+            matcher: Matcher::default(),
+            action: Action::SetStatus { status: 418 },
+        };
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("S", vec![down, teapot])],
+            active_scenario_id: Some("S".to_string()),
+        });
+
+        assert_eq!(
+            c.search_rules("S", "503", RuleSearchScope::Status),
+            vec!["down".to_string()],
+        );
+        assert_eq!(
+            c.search_rules("S", "418", RuleSearchScope::Status),
+            vec!["teapot".to_string()],
+        );
+    }
+
+    #[test]
+    fn search_rules_by_response_body() {
+        let c = controller();
+        let mut a = respond_rule("a");
+        a.action = Action::Respond {
+            status: 200,
+            headers: vec![],
+            body: "needle-XYZ in the body".to_string(),
+            content_type: Some("text/plain".to_string()),
+            content_encoding: None,
+        };
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("S", vec![a, respond_rule("b")])],
+            active_scenario_id: Some("S".to_string()),
+        });
+
+        assert_eq!(
+            c.search_rules("S", "xyz", RuleSearchScope::Response),
+            vec!["a".to_string()],
+            "response-body search is case-insensitive substring"
+        );
+    }
+
+    #[test]
+    fn search_rules_by_headers_matches_set_header_value_and_respond_header() {
+        let c = controller();
+        let mut respond = respond_rule("respond");
+        respond.action = Action::Respond {
+            status: 200,
+            headers: vec![("x-a".to_string(), "val1".to_string())],
+            body: String::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+        };
+        let set_header = Rule {
+            id: "set-header".to_string(),
+            name: "set-header".to_string(),
+            enabled: true,
+            fire_limit: None,
+            repeat: false,
+            matcher: Matcher::default(),
+            action: Action::SetResponseHeader {
+                name: "x-b".to_string(),
+                value: "val2".to_string(),
+            },
+        };
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("S", vec![respond, set_header])],
+            active_scenario_id: Some("S".to_string()),
+        });
+
+        assert_eq!(
+            c.search_rules("S", "val1", RuleSearchScope::Headers),
+            vec!["respond".to_string()],
+            "a Respond header value is searchable",
+        );
+        assert_eq!(
+            c.search_rules("S", "x-b", RuleSearchScope::Headers),
+            vec!["set-header".to_string()],
+            "a SetResponseHeader name is searchable",
+        );
+        assert_eq!(
+            c.search_rules("S", "json", RuleSearchScope::Headers),
+            vec!["respond".to_string()],
+            "the Respond content-type is included in the Headers scope",
+        );
+    }
+
+    #[test]
+    fn search_rules_all_unions_scopes() {
+        let c = controller();
+        let mut a = respond_rule("a");
+        a.name = "plain".to_string();
+        a.matcher = Matcher::default();
+        a.action = Action::Respond {
+            status: 200,
+            headers: vec![],
+            body: "only-in-body-needle".to_string(),
+            content_type: None,
+            content_encoding: None,
+        };
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("S", vec![a, respond_rule("b")])],
+            active_scenario_id: Some("S".to_string()),
+        });
+
+        assert_eq!(
+            c.search_rules("S", "only-in-body-needle", RuleSearchScope::All),
+            vec!["a".to_string()],
+            "a needle present only in the body still matches under All",
+        );
+    }
+
+    #[test]
+    fn search_rules_missing_scenario_returns_empty() {
+        let c = controller();
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("S", vec![respond_rule("a")])],
+            active_scenario_id: Some("S".to_string()),
+        });
+
+        assert!(
+            c.search_rules("ghost", "a", RuleSearchScope::Name).is_empty(),
+            "searching a non-existent scenario returns empty",
+        );
+        assert!(
+            c.search_rules("ghost", "", RuleSearchScope::All).is_empty(),
+            "even an empty pattern returns empty for a missing scenario",
+        );
+    }
+
+    #[test]
+    fn search_rules_is_substring_not_regex() {
+        let c = controller();
+        let mut a = respond_rule("a");
+        a.name = "x-a value".to_string();
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("S", vec![a])],
+            active_scenario_id: Some("S".to_string()),
+        });
+
+        assert!(
+            c.search_rules("S", "x-a.*", RuleSearchScope::Name).is_empty(),
+            "rule search is plain substring, so a regex metacharacter pattern does not match",
+        );
+        assert_eq!(
+            c.search_rules("S", "x-a", RuleSearchScope::Name),
+            vec!["a".to_string()],
+            "the literal prefix still matches as a substring",
+        );
+    }
+
+    #[test]
+    fn search_headers_with_empty_headers_neither_panics_nor_matches() {
+        let c = controller();
+        c.shared.record_new(flow("bare"));
+
+        assert!(
+            c.search_headers("anything", SearchSide::Either, false, None).is_empty(),
+            "a flow with empty request headers and no response yields no header match",
+        );
+    }
+
+    #[test]
+    fn search_headers_either_finds_response_only_match() {
+        let c = controller();
+        c.shared.record_new(flow_with_headers(
+            "f1",
+            vec![("x-trace", "req-only")],
+            vec![("x-served-by", "resp-only")],
+            b"body",
+        ));
+
+        assert_eq!(
+            c.search_headers("resp-only", SearchSide::Either, false, None),
+            vec!["f1".to_string()],
+            "Either must reach the response side when the request header misses (the !req && resp branch)",
+        );
+    }
+
+    #[test]
+    fn search_bodies_either_returns_each_id_once_when_both_sides_match() {
+        let c = controller();
+        let mut both = flow("both");
+        both.request.headers = vec![("content-type".to_string(), "text/plain".to_string())];
+        both.request.body = b"shared-needle in request".to_vec();
+        both.response = Some(CapturedResponse {
+            status: 200,
+            version: "HTTP/1.1".to_string(),
+            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+            body: b"shared-needle in response".to_vec(),
+            timestamp_ms: 1,
+        });
+        c.shared.record_new(both);
+
+        assert_eq!(
+            c.search_bodies("shared-needle", SearchSide::Either, false, None),
+            vec!["both".to_string()],
+            "a flow whose request and response both match on Either is reported exactly once",
+        );
+    }
+
+    #[test]
+    fn search_rules_includes_disabled_rules() {
+        let c = controller();
+        let mut off = respond_rule("off");
+        off.enabled = false;
+        off.name = "disabled login mock".to_string();
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("S", vec![off])],
+            active_scenario_id: Some("S".to_string()),
+        });
+
+        assert_eq!(
+            c.search_rules("S", "login", RuleSearchScope::Name),
+            vec!["off".to_string()],
+            "rule search ignores the enabled flag and still finds a disabled rule",
+        );
+        assert_eq!(
+            c.search_rules("S", "", RuleSearchScope::All),
+            vec!["off".to_string()],
+            "an empty pattern returns disabled rule ids too",
+        );
+    }
+
+    #[test]
+    fn search_rules_method_scope_skips_rules_with_no_method() {
+        let c = controller();
+        let no_method = respond_rule("no-method");
+        let mut posted = respond_rule("posted");
+        posted.matcher.method = Some("POST".to_string());
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("S", vec![no_method, posted])],
+            active_scenario_id: Some("S".to_string()),
+        });
+
+        assert_eq!(
+            c.search_rules("S", "post", RuleSearchScope::Method),
+            vec!["posted".to_string()],
+            "a rule whose matcher.method is None must not match a non-empty Method needle",
+        );
+    }
+
+    #[test]
+    fn search_rules_all_matches_via_headers_only() {
+        let c = controller();
+        let mut a = respond_rule("a");
+        a.name = "plain".to_string();
+        a.matcher = Matcher::default();
+        a.action = Action::Respond {
+            status: 200,
+            headers: vec![("x-flavor".to_string(), "sprinkles".to_string())],
+            body: String::new(),
+            content_type: None,
+            content_encoding: None,
+        };
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("S", vec![a, respond_rule("b")])],
+            active_scenario_id: Some("S".to_string()),
+        });
+
+        assert_eq!(
+            c.search_rules("S", "sprinkles", RuleSearchScope::All),
+            vec!["a".to_string()],
+            "All unions the Headers scope, so a value present only in a response header still matches",
+        );
     }
 }
