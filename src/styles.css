@@ -19,7 +19,7 @@
   --s4: #fbbf24; /* 4xx */
   --s5: #f87171; /* 5xx */
 
-  /* semantic surfaces (tokenized so the light theme can override one place) */
+  /* semantic surfaces */
   --sel-bg: #173a36;
   --sel-multi-bg: rgba(96, 165, 250, 0.13);
   --row-mock-bg: rgba(45, 212, 191, 0.05);
@@ -57,39 +57,6 @@
 
   --scrollbar-thumb: #3a4655;
   --scrollbar-track: transparent;
-}
-
-:root[data-theme="light"] {
-  color-scheme: light;
-
-  --bg: #f6f7f9;
-  --bg-1: #eef0f3;
-  --bg-2: #e7eaef;
-  --bg-3: #dbe0e7;
-  --line: #ccd3dc;
-  --text: #1b2430;
-  --muted: #5c6775;
-  --accent: #0d9488;
-  --accent-dim: #0f766e;
-  --accent-bg: #d4f1ec;
-  --danger: #dc2626;
-  --warn: #b45309;
-
-  --s2: #15803d;
-  --s3: #2563eb;
-  --s4: #b45309;
-  --s5: #dc2626;
-
-  --sel-bg: #cbeee7;
-  --sel-multi-bg: rgba(37, 99, 235, 0.14);
-  --row-mock-bg: rgba(13, 148, 136, 0.1);
-  --drop-overlay: rgba(13, 148, 136, 0.13);
-  --bar-accent-bg: #d4f1ec;
-  --chip-on-bg: #d4f1ec;
-  --banner-warn-bg: #fbf1d6;
-  --banner-warn-line: #e3cd93;
-
-  --scrollbar-thumb: #b6bdc8;
 }
 
 * {
