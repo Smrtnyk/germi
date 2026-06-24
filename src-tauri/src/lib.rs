@@ -99,6 +99,8 @@ pub fn run() {
             commands::pick_file,
             commands::file_exists,
             commands::search_bodies,
+            commands::search_headers,
+            commands::search_rules,
             commands::save_session,
             commands::open_capture,
             commands::export_rules,

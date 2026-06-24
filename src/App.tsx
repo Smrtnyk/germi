@@ -156,7 +156,7 @@ function commandActions(
 ): Record<CommandId, () => void> {
   return {
     palette: () => setPaletteOpen((o) => !o),
-    "focus-filter": () => s.filterInputRef.current?.focus(),
+    "focus-filter": () => focusSearch(s),
     save: () => void s.session.saveSession(),
     open: () => s.requestOpenCapture(),
     "copy-url": () => s.copySelectedUrl(),
@@ -164,6 +164,39 @@ function commandActions(
     "show-autoresponder": () => s.setRightTab("autoresponder"),
     "edit-mock-body": () => s.focusMockBody(),
   };
+}
+
+function elClosest(node: Node | EventTarget | null, selector: string): boolean {
+  const n = node as Node | null;
+  const el = n && n.nodeType === Node.TEXT_NODE ? n.parentElement : (n as Element | null);
+  return !!el?.closest?.(selector);
+}
+
+function findRegion(): "url" | "headers" | "body" | null {
+  const anchor = window.getSelection()?.anchorNode ?? null;
+  if (elClosest(anchor, ".req-url")) return "url";
+  if (elClosest(anchor, ".meta-scroll")) return "headers";
+  if (elClosest(anchor, ".vtext")) return "body";
+  return null;
+}
+
+function focusSearch(s: AppStateValue): void {
+  const active = document.activeElement;
+  if (isTyping(active) && elClosest(active, ".autoresponder")) return;
+  const region = findRegion();
+  if (region === "url") {
+    const sel = window.getSelection()?.toString().trim() ?? "";
+    if (sel) s.filtering.setFilter(sel);
+    s.filterInputRef.current?.focus();
+    return;
+  }
+  const find = s.inspectorFindRef.current;
+  if (find) {
+    const sel = region ? (window.getSelection()?.toString().trim() ?? "") : "";
+    find.openFind(sel || undefined, region === "headers" ? "headers" : "body");
+    return;
+  }
+  s.filterInputRef.current?.focus();
 }
 
 // Fixed Ctrl/⌘ combos that aren't user-rebindable: select-all and undo/redo.
@@ -184,6 +217,14 @@ function handleModShortcut(e: KeyboardEvent, s: AppStateValue) {
   }
 }
 
+function handleFindNav(e: KeyboardEvent, s: AppStateValue): void {
+  const find = s.inspectorFindRef.current;
+  if (!find) return;
+  e.preventDefault();
+  if (find.open) find.step(e.shiftKey ? -1 : 1);
+  else find.openFind();
+}
+
 function handleShortcut(
   e: KeyboardEvent,
   s: AppStateValue,
@@ -199,6 +240,10 @@ function handleShortcut(
   if (cmd) {
     e.preventDefault();
     actions[cmd]();
+    return;
+  }
+  if (e.key === "F3") {
+    handleFindNav(e, s);
     return;
   }
   if (e.metaKey || e.ctrlKey) {
@@ -299,6 +344,7 @@ function RightPanel({
     onSelectOne: (id: string) => void;
     onMockMany: (ids: string[]) => void;
     onClearSelection: () => void;
+    inspectorFindRef: AppStateValue["inspectorFindRef"];
   };
   auto: AutoresponderPanelProps;
 }) {
@@ -522,6 +568,7 @@ export function App() {
                   });
                 },
                 onClearSelection: s.selection.clearSelection,
+                inspectorFindRef: s.inspectorFindRef,
               }}
               auto={{
                 ar: s.ar.autoresponder,

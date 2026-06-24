@@ -6,9 +6,11 @@ import type { FlowSummary, ResourceKind } from "./types";
 // "quoted phrase") is a case-insensitive substring over `method scheme://host
 // path`. A `/regex/` term is a regex over that same string. A leading `-`
 // negates any term. `key:value` tokens filter structured fields. `body:` /
-// `req-body:` / `resp-body:` are the only tokens that cross into the backend.
+// `req-body:` / `resp-body:` and `header:` / `req-header:` / `resp-header:` are
+// the only tokens that cross into the backend.
 
-export interface BodyTerm {
+export interface ContentTerm {
+  field: "body" | "headers";
   side: "request" | "response" | "either";
   value: string;
   regex: boolean;
@@ -21,10 +23,10 @@ type SummaryTerm =
   | { t: "kv"; key: string; value: string; neg: boolean };
 
 export interface ParsedFilter {
-  /** Predicate over a FlowSummary for all non-body terms (instant, frontend). */
+  /** Predicate over a FlowSummary for all non-content terms (instant, frontend). */
   matchSummary: (s: FlowSummary) => boolean;
-  /** Body terms requiring a backend scan. Empty = no backend call needed. */
-  bodyTerms: BodyTerm[];
+  /** Content terms requiring a backend scan. Empty = no backend call needed. */
+  contentTerms: ContentTerm[];
 }
 
 const SUMMARY_KEYS = new Set([
@@ -46,6 +48,7 @@ const SUMMARY_KEYS = new Set([
   "slower-than",
 ]);
 const BODY_KEYS = new Set(["body", "req-body", "resp-body"]);
+const HEADER_KEYS = new Set(["header", "req-header", "resp-header"]);
 
 function skipSpaces(s: string, i: number): number {
   while (i < s.length && /\s/.test(s[i])) i++;
@@ -111,12 +114,20 @@ export function rawSegments(s: string): string[] {
   return out;
 }
 
-type ClassifiedTerm = { kind: "summary"; term: SummaryTerm } | { kind: "body"; term: BodyTerm };
+type ClassifiedTerm =
+  | { kind: "summary"; term: SummaryTerm }
+  | { kind: "content"; term: ContentTerm };
 
-function bodyTermOf(key: string, value: string, neg: boolean): BodyTerm {
-  const side = key === "req-body" ? "request" : key === "resp-body" ? "response" : "either";
+function contentTermOf(key: string, value: string, neg: boolean): ContentTerm {
+  const field = HEADER_KEYS.has(key) ? "headers" : "body";
+  const side =
+    key === "req-body" || key === "req-header"
+      ? "request"
+      : key === "resp-body" || key === "resp-header"
+        ? "response"
+        : "either";
   const m = /^\/(.*)\/$/.exec(value);
-  return { side, value: m ? m[1] : value, regex: !!m, neg };
+  return { field, side, value: m ? m[1] : value, regex: !!m, neg };
 }
 
 function regexTermOf(raw: string, neg: boolean): SummaryTerm | null {
@@ -140,7 +151,9 @@ function classifyTerm(raw: string): ClassifiedTerm {
   if (colon > 0) {
     const key = raw.slice(0, colon).toLowerCase();
     const value = raw.slice(colon + 1);
-    if (BODY_KEYS.has(key)) return { kind: "body", term: bodyTermOf(key, value, neg) };
+    if (BODY_KEYS.has(key) || HEADER_KEYS.has(key)) {
+      return { kind: "content", term: contentTermOf(key, value, neg) };
+    }
     if (SUMMARY_KEYS.has(key)) return { kind: "summary", term: { t: "kv", key, value, neg } };
   }
 
@@ -151,19 +164,19 @@ function classifyTerm(raw: string): ClassifiedTerm {
 
 export function parseFilter(input: string): ParsedFilter {
   const summaryTerms: SummaryTerm[] = [];
-  const bodyTerms: BodyTerm[] = [];
+  const contentTerms: ContentTerm[] = [];
 
   for (const raw of tokenize(input)) {
     if (!raw) continue;
     const classified = classifyTerm(raw);
-    if (classified.kind === "body") {
-      if (classified.term.value !== "") bodyTerms.push(classified.term);
+    if (classified.kind === "content") {
+      if (classified.term.value !== "") contentTerms.push(classified.term);
     } else summaryTerms.push(classified.term);
   }
 
   return {
     matchSummary: (s) => summaryTerms.every((term) => matchTerm(term, s)),
-    bodyTerms,
+    contentTerms,
   };
 }
 

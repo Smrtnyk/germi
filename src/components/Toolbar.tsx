@@ -136,10 +136,10 @@ export function Toolbar(props: ToolbarProps) {
         <input
           ref={filterInputRef}
           className="filter"
-          placeholder="Filter — host: status:4xx kind:xhr body:… -negate /regex/"
+          placeholder="Filter — host: status:4xx kind:xhr body:… header:… -negate /regex/"
           value={filter}
           onChange={(e) => onFilterChange(e.target.value)}
-          title="Tokens: host: path: method: scheme: status: (4xx, >=400) mime: kind: ext: is:imported is:captured rule: larger-than: slower-than: body: req-body: resp-body: — bare words match the URL, /regex/ for regex, leading - negates"
+          title="Tokens: host: path: method: scheme: status: (4xx, >=400) mime: kind: ext: is:imported is:captured rule: larger-than: slower-than: body: req-body: resp-body: header: req-header: resp-header: — bare words match the URL, /regex/ for regex, leading - negates"
         />
         {filter && (
           <button

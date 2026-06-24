@@ -17,7 +17,12 @@ function buildGroups(b: Bindings): { title: string; rows: { keys: string; desc: 
     {
       title: "Traffic",
       rows: [
-        { keys: `/   ·   ${prettyShortcut(b["focus-filter"])}`, desc: "Focus the filter" },
+        { keys: "/", desc: "Focus the filter" },
+        {
+          keys: prettyShortcut(b["focus-filter"]),
+          desc: "Find in the open request, else focus the filter",
+        },
+        { keys: "F3   ·   Shift + F3", desc: "Next / previous find match" },
         { keys: "↑ ↓   ·   j k", desc: "Move selection" },
         { keys: "Shift + ↑ / ↓", desc: "Extend selection" },
         { keys: "Ctrl / ⌘ A", desc: "Select all (filtered) flows" },

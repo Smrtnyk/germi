@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -10,6 +18,14 @@ import { useCopy } from "../useCopy";
 import { useResizable } from "../useResizable";
 import { headersToText, parseCookies, parseQuery, toCurl, type KV } from "../curl";
 import { MaximizedOverlay } from "./MaximizedOverlay";
+import {
+  bodyOccurrences,
+  combineMatches,
+  fold,
+  type FindScope,
+  type InspectorFindHandle,
+  type RegionLocation,
+} from "../inspectorFind";
 
 const ROW_H = 18;
 const MAX_ROW = 2000;
@@ -35,22 +51,29 @@ function pushChunks(line: string, rows: string[]): void {
   }
 }
 
-function highlight(line: string, query: string): ReactNode {
+function highlight(
+  line: string,
+  query: string,
+  activeOccurrence = -1,
+  caseSensitive = false,
+): ReactNode {
   if (!query) return line === "" ? " " : line;
-  const lc = line.toLowerCase();
-  const q = query.toLowerCase();
+  const lc = fold(line, caseSensitive);
+  const q = fold(query, caseSensitive);
   const nodes: ReactNode[] = [];
   let from = 0;
   let key = 0;
+  let occ = 0;
   let i = lc.indexOf(q, from);
   if (i === -1) return line;
   while (i !== -1) {
     if (i > from) nodes.push(line.slice(from, i));
     nodes.push(
-      <mark key={key++} className="vmatch">
+      <mark key={key++} className={occ === activeOccurrence ? "vmatch active" : "vmatch"}>
         {line.slice(i, i + query.length)}
       </mark>,
     );
+    occ++;
     from = i + query.length;
     i = lc.indexOf(q, from);
   }
@@ -58,100 +81,165 @@ function highlight(line: string, query: string): ReactNode {
   return nodes;
 }
 
+type Side = "request" | "response";
+
+interface InspectorFind {
+  open: boolean;
+  query: string;
+  scope: FindScope;
+  caseSensitive: boolean;
+  setQuery: (q: string) => void;
+  setScope: (s: FindScope) => void;
+  toggleCase: () => void;
+  openFind: (seed?: string, scope?: FindScope) => void;
+  close: () => void;
+  step: (dir: number) => void;
+  findRef: React.RefObject<HTMLInputElement | null>;
+  total: number;
+  activeIndex: number;
+  side: Side;
+  urlActive: number;
+  headerActiveRow: number;
+  headerActiveField: number;
+  headerActiveOcc: number;
+  bodyActive: number;
+  onBodyMatchCount: (n: number) => void;
+}
+
+function useInspectorFind() {
+  const findRef = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [scope, setScopeState] = useState<FindScope>("all");
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  const openFind = useCallback((seed?: string, nextScope?: FindScope) => {
+    setOpen(true);
+    setActiveIndex(0);
+    if (seed !== undefined) setQuery(seed);
+    if (nextScope !== undefined) setScopeState(nextScope);
+    requestAnimationFrame(() => findRef.current?.focus());
+  }, []);
+  const close = useCallback(() => setOpen(false), []);
+  const setScope = useCallback((s: FindScope) => {
+    setScopeState(s);
+    setActiveIndex(0);
+  }, []);
+  const toggleCase = useCallback(() => {
+    setCaseSensitive((c) => !c);
+    setActiveIndex(0);
+  }, []);
+
+  return {
+    findRef,
+    open,
+    query,
+    scope,
+    caseSensitive,
+    activeIndex,
+    setQuery,
+    setScope,
+    toggleCase,
+    setActiveIndex,
+    openFind,
+    close,
+  };
+}
+
 type Virtualizer = ReturnType<typeof useVirtualizer<HTMLDivElement, Element>>;
 
 function useFind(
   rows: string[],
   query: string,
-  findOpen: boolean | undefined,
+  caseSensitive: boolean,
+  bodyActive: boolean,
+  bodyIndex: number,
+  onMatchCount: (n: number) => void,
   virtualizer: Virtualizer,
 ) {
-  const findRef = useRef<HTMLInputElement>(null);
-  const [idx, setIdx] = useState(0);
+  const matches = useMemo(
+    () => bodyOccurrences(rows, query, caseSensitive),
+    [rows, query, caseSensitive],
+  );
 
-  const matches = useMemo(() => {
-    if (query.length < 1) return [];
-    const q = query.toLowerCase();
-    const res: number[] = [];
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i].toLowerCase().includes(q)) res.push(i);
-      if (res.length >= 5000) break;
-    }
-    return res;
-  }, [rows, query]);
+  useEffect(() => onMatchCount(matches.length), [matches, onMatchCount]);
 
-  useEffect(() => setIdx(0), [query]);
+  const active =
+    bodyActive && matches.length ? matches[Math.min(bodyIndex, matches.length - 1)] : null;
+  const activeLine = active ? active.line : -1;
+  const activeOcc = active ? active.occ : -1;
+
   useEffect(() => {
-    if (findOpen) findRef.current?.focus();
-  }, [findOpen]);
-  useEffect(() => {
-    if (findOpen && matches.length) {
-      virtualizer.scrollToIndex(matches[Math.min(idx, matches.length - 1)], { align: "center" });
-    }
+    if (activeLine >= 0) virtualizer.scrollToIndex(activeLine, { align: "center" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [idx, matches, findOpen]);
+  }, [activeLine, activeOcc, matches]);
 
-  const activeLine = matches.length ? matches[Math.min(idx, matches.length - 1)] : -1;
-  const step = (dir: number) => {
-    if (matches.length) setIdx((i) => (i + dir + matches.length) % matches.length);
-  };
-
-  return { findRef, idx, matches, activeLine, step };
+  return { activeLine, activeOcc };
 }
 
-function FindBar({
-  findRef,
-  query,
-  setQuery,
-  idx,
-  matches,
-  step,
-  onCloseFind,
-}: {
-  findRef: React.RefObject<HTMLInputElement | null>;
-  query: string;
-  setQuery: (q: string) => void;
-  idx: number;
-  matches: number[];
-  step: (dir: number) => void;
-  onCloseFind?: () => void;
-}) {
+const SCOPES: { id: FindScope; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "url", label: "URL" },
+  { id: "headers", label: "Headers" },
+  { id: "body", label: "Body" },
+];
+
+function ScopeChips({ scope, setScope }: { scope: FindScope; setScope: (s: FindScope) => void }) {
+  return (
+    <div className="seg find-scope">
+      {SCOPES.map((sc) => (
+        <button key={sc.id} className={scope === sc.id ? "on" : ""} onClick={() => setScope(sc.id)}>
+          {sc.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function FindBar({ find }: { find: InspectorFind }) {
+  const { query, total, activeIndex } = find;
   return (
     <div className="vfind">
       <input
-        ref={findRef}
+        ref={find.findRef}
         value={query}
-        placeholder="Find in body"
-        onChange={(e) => setQuery(e.target.value)}
+        placeholder={find.side === "request" ? "Find in request" : "Find in response"}
+        onChange={(e) => find.setQuery(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter") step(e.shiftKey ? -1 : 1);
-          else if (e.key === "Escape") onCloseFind?.();
+          if (e.key === "Enter") find.step(e.shiftKey ? -1 : 1);
+          else if (e.key === "Escape") find.close();
         }}
       />
+      <ScopeChips scope={find.scope} setScope={find.setScope} />
+      <button
+        className={find.caseSensitive ? "btn find-case on" : "btn ghost find-case"}
+        title="Match case"
+        aria-pressed={find.caseSensitive}
+        onClick={find.toggleCase}
+      >
+        Aa
+      </button>
       <span className="vfind-count">
-        {query
-          ? matches.length
-            ? `${Math.min(idx + 1, matches.length)}/${matches.length}`
-            : "0/0"
-          : ""}
+        {query ? (total ? `${Math.min(activeIndex + 1, total)}/${total}` : "0/0") : ""}
       </span>
       <button
         className="btn ghost"
         title="Previous (Shift+Enter)"
-        onClick={() => step(-1)}
-        disabled={!matches.length}
+        onClick={() => find.step(-1)}
+        disabled={!total}
       >
         ↑
       </button>
       <button
         className="btn ghost"
         title="Next (Enter)"
-        onClick={() => step(1)}
-        disabled={!matches.length}
+        onClick={() => find.step(1)}
+        disabled={!total}
       >
         ↓
       </button>
-      <button className="btn ghost" title="Close (Esc)" onClick={onCloseFind}>
+      <button className="btn ghost" title="Close (Esc)" onClick={find.close}>
         ✕
       </button>
     </div>
@@ -164,8 +252,10 @@ function VLine({
   start,
   size,
   query,
+  caseSensitive,
   wrap,
   activeLine,
+  activeOcc,
   measureElement,
 }: {
   line: string;
@@ -173,44 +263,48 @@ function VLine({
   start: number;
   size: number;
   query: string;
+  caseSensitive: boolean;
   wrap: boolean | undefined;
   activeLine: number;
+  activeOcc: number;
   measureElement: Virtualizer["measureElement"];
 }) {
-  const isHit = query.length > 0 && line.toLowerCase().includes(query.toLowerCase());
+  const isHit = query.length > 0 && fold(line, caseSensitive).includes(fold(query, caseSensitive));
+  const isActive = index === activeLine;
+  const style: CSSProperties = wrap
+    ? { transform: `translateY(${start}px)` }
+    : { transform: `translateY(${start}px)`, height: size };
   return (
     <div
       data-index={index}
       ref={wrap ? measureElement : undefined}
-      className={`vline ${isHit ? "hit" : ""} ${index === activeLine ? "active" : ""}`}
-      style={
-        wrap
-          ? { transform: `translateY(${start}px)` }
-          : { transform: `translateY(${start}px)`, height: size }
-      }
+      className={`vline ${isHit ? "hit" : ""} ${isActive ? "active" : ""}`}
+      style={style}
     >
-      {query ? highlight(line, query) : line === "" ? " " : line}
+      {highlight(line, query, isActive ? activeOcc : -1, caseSensitive)}
     </div>
   );
 }
 
-/** Virtualized text viewer with optional find bar and word-wrap. */
+const NO_COUNT = () => {};
+
+/** Virtualized text viewer driven by the lifted inspector find (when present). */
 function VirtualText({
   text,
   hex,
   wrap,
-  findOpen,
-  onCloseFind,
+  find,
 }: {
   text: string;
   hex?: boolean;
   wrap?: boolean;
-  findOpen?: boolean;
-  onCloseFind?: () => void;
+  find?: InspectorFind;
 }) {
   const rows = useMemo(() => toRows(text), [text]);
   const parentRef = useRef<HTMLDivElement>(null);
-  const [query, setQuery] = useState("");
+  const query = find && (find.scope === "all" || find.scope === "body") ? find.query : "";
+  const caseSensitive = !!find && find.caseSensitive;
+  const bodyActive = !!find && find.bodyActive >= 0;
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -219,21 +313,18 @@ function VirtualText({
     overscan: 40,
   });
 
-  const { findRef, idx, matches, activeLine, step } = useFind(rows, query, findOpen, virtualizer);
+  const { activeLine, activeOcc } = useFind(
+    rows,
+    query,
+    caseSensitive,
+    bodyActive,
+    find ? find.bodyActive : 0,
+    find?.onBodyMatchCount ?? NO_COUNT,
+    virtualizer,
+  );
 
   return (
     <div className={`vtext ${hex ? "hex" : ""} ${wrap ? "wrap" : ""}`}>
-      {findOpen && (
-        <FindBar
-          findRef={findRef}
-          query={query}
-          setQuery={setQuery}
-          idx={idx}
-          matches={matches}
-          step={step}
-          onCloseFind={onCloseFind}
-        />
-      )}
       <div ref={parentRef} className="vtext-scroll">
         <div className="vtext-canvas" style={{ height: virtualizer.getTotalSize() }}>
           {virtualizer.getVirtualItems().map((item) => (
@@ -244,8 +335,10 @@ function VirtualText({
               start={item.start}
               size={item.size}
               query={query}
+              caseSensitive={caseSensitive}
               wrap={wrap}
               activeLine={activeLine}
+              activeOcc={activeOcc}
               measureElement={virtualizer.measureElement}
             />
           ))}
@@ -262,6 +355,7 @@ interface SingleProps {
   onMock: (detail: FlowDetail) => void;
   decode: boolean;
   onLoadFull: () => void;
+  inspectorFindRef: React.RefObject<InspectorFindHandle | null>;
 }
 
 interface Props extends SingleProps {
@@ -271,7 +365,6 @@ interface Props extends SingleProps {
   onClearSelection: () => void;
 }
 
-type Side = "request" | "response";
 type BodyView = "pretty" | "raw";
 
 function contentType(headers: [string, string][]): string {
@@ -392,15 +485,31 @@ function KvTable({ label, rows }: { label: string; rows: KV[] }) {
   );
 }
 
-function MessageHeaders({ headers }: { headers: [string, string][] }) {
+function MessageHeaders({ headers, find }: { headers: [string, string][]; find: InspectorFind }) {
+  const activeRef = useRef<HTMLDivElement>(null);
+  const { headerActiveRow, headerActiveField, headerActiveOcc, caseSensitive } = find;
+  const query = find.scope === "all" || find.scope === "headers" ? find.query : "";
+  useEffect(() => {
+    if (find.open && headerActiveRow >= 0) activeRef.current?.scrollIntoView({ block: "center" });
+  }, [find.open, headerActiveRow, query]);
+
   return (
     <div className="headers">
-      {headers.map(([k, v], i) => (
-        <div className="hrow" key={`${k}-${i}`}>
-          <span className="hkey">{k}</span>
-          <span className="hval">{v}</span>
-        </div>
-      ))}
+      {headers.map(([k, v], i) => {
+        const active = i === headerActiveRow;
+        const kOcc = active && headerActiveField === 0 ? headerActiveOcc : -1;
+        const vOcc = active && headerActiveField === 1 ? headerActiveOcc : -1;
+        return (
+          <div
+            className={`hrow ${active ? "active" : ""}`}
+            key={`${k}-${i}`}
+            ref={active ? activeRef : undefined}
+          >
+            <span className="hkey">{query ? highlight(k, query, kOcc, caseSensitive) : k}</span>
+            <span className="hval">{query ? highlight(v, query, vOcc, caseSensitive) : v}</span>
+          </div>
+        );
+      })}
       {headers.length === 0 && <div className="muted">No headers</div>}
     </div>
   );
@@ -457,8 +566,7 @@ function MessageBody({
   ct,
   text,
   wrap,
-  findOpen,
-  onCloseFind,
+  find,
   isRawEncoded,
   showHex,
 }: {
@@ -467,8 +575,7 @@ function MessageBody({
   ct: string;
   text: string;
   wrap: boolean;
-  findOpen: boolean;
-  onCloseFind: () => void;
+  find: InspectorFind;
   isRawEncoded: boolean;
   showHex: boolean;
 }) {
@@ -483,15 +590,14 @@ function MessageBody({
   if (kind === "binary") {
     return <BinaryBody msg={msg} ct={ct} isRawEncoded={isRawEncoded} showHex={showHex} />;
   }
-  return <VirtualText text={text} wrap={wrap} findOpen={findOpen} onCloseFind={onCloseFind} />;
+  return <VirtualText text={text} wrap={wrap} find={find} />;
 }
 
 function useBodyState() {
   const [view, setView] = useState<BodyView>("pretty");
   const [showHex, setShowHex] = useState(false);
   const [wrap, setWrap] = useState(false);
-  const [findOpen, setFindOpen] = useState(false);
-  return { view, setView, showHex, setShowHex, wrap, setWrap, findOpen, setFindOpen };
+  return { view, setView, showHex, setShowHex, wrap, setWrap };
 }
 
 function MetaPanel({
@@ -499,6 +605,7 @@ function MetaPanel({
   side,
   query,
   cookies,
+  find,
   copy,
   style,
 }: {
@@ -506,6 +613,7 @@ function MetaPanel({
   side: Side;
   query: KV[];
   cookies: KV[];
+  find: InspectorFind;
   copy: (label: string, value: string) => void;
   style?: CSSProperties;
 }) {
@@ -524,7 +632,7 @@ function MetaPanel({
             ⧉
           </button>
         </div>
-        <MessageHeaders headers={msg.headers} />
+        <MessageHeaders headers={msg.headers} find={find} />
       </div>
     </div>
   );
@@ -562,13 +670,11 @@ function HexToggle({
 function TextActions({
   wrap,
   setWrap,
-  findOpen,
-  setFindOpen,
+  find,
 }: {
   wrap: boolean;
   setWrap: React.Dispatch<React.SetStateAction<boolean>>;
-  findOpen: boolean;
-  setFindOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  find: InspectorFind;
 }) {
   return (
     <>
@@ -580,9 +686,9 @@ function TextActions({
         Wrap
       </button>
       <button
-        className={findOpen ? "btn active small" : "btn ghost small"}
-        title="Find in body"
-        onClick={() => setFindOpen((f) => !f)}
+        className={find.open ? "btn active small" : "btn ghost small"}
+        title="Find (Ctrl/⌘ F)"
+        onClick={() => (find.open ? find.close() : find.openFind(undefined, "body"))}
       >
         Find
       </button>
@@ -601,8 +707,7 @@ function BodyBar({
   setShowHex,
   wrap,
   setWrap,
-  findOpen,
-  setFindOpen,
+  find,
   copy,
   onMaximize,
 }: {
@@ -616,8 +721,7 @@ function BodyBar({
   setShowHex: React.Dispatch<React.SetStateAction<boolean>>;
   wrap: boolean;
   setWrap: React.Dispatch<React.SetStateAction<boolean>>;
-  findOpen: boolean;
-  setFindOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  find: InspectorFind;
   copy: (label: string, value: string) => void;
   onMaximize?: () => void;
 }) {
@@ -630,14 +734,7 @@ function BodyBar({
       <div className="body-actions">
         {kind === "text" && canPretty && <PrettyRawToggle view={view} setView={setView} />}
         {kind === "binary" && <HexToggle showHex={showHex} setShowHex={setShowHex} />}
-        {kind === "text" && (
-          <TextActions
-            wrap={wrap}
-            setWrap={setWrap}
-            findOpen={findOpen}
-            setFindOpen={setFindOpen}
-          />
-        )}
+        {kind === "text" && <TextActions wrap={wrap} setWrap={setWrap} find={find} />}
         <button
           className="btn ghost small"
           title="Copy body"
@@ -655,44 +752,65 @@ function BodyBar({
   );
 }
 
-function MessageView({
+function useBodyContent(
+  msg: MessageDetail,
+  side: Side,
+  path: string,
+  decode: boolean,
+  view: BodyView,
+) {
+  const ct = contentType(msg.headers);
+  const { pretty, canPretty } = useMemo(() => prettify(ct, msg.bodyText), [ct, msg.bodyText]);
+  return {
+    ct,
+    kind: bodyKind(msg, ct, decode),
+    encLabel: encodingLabel(msg, decode),
+    isRawEncoded: !decode && !!msg.encoding,
+    canPretty,
+    text: view === "pretty" && canPretty ? pretty : msg.bodyText,
+    queryKv: side === "request" ? parseQuery(path) : [],
+    cookies: parseCookies(msg.headers, side),
+  };
+}
+
+function BodyRegion({
   msg,
-  side,
-  path,
-  decode,
+  kind,
+  encLabel,
+  canPretty,
+  view,
+  setView,
+  showHex,
+  setShowHex,
+  wrap,
+  setWrap,
+  find,
+  copy,
+  text,
+  ct,
+  isRawEncoded,
   onLoadFull,
+  onMaximize,
 }: {
   msg: MessageDetail;
-  side: Side;
-  path: string;
-  decode: boolean;
+  kind: "image" | "text" | "binary";
+  encLabel: string | null;
+  canPretty: boolean;
+  view: BodyView;
+  setView: (v: BodyView) => void;
+  showHex: boolean;
+  setShowHex: React.Dispatch<React.SetStateAction<boolean>>;
+  wrap: boolean;
+  setWrap: React.Dispatch<React.SetStateAction<boolean>>;
+  find: InspectorFind;
+  copy: (label: string, value: string) => void;
+  text: string;
+  ct: string;
+  isRawEncoded: boolean;
   onLoadFull: () => void;
+  onMaximize?: () => void;
 }) {
-  const copy = useCopy();
-  const { view, setView, showHex, setShowHex, wrap, setWrap, findOpen, setFindOpen } =
-    useBodyState();
-  const [maximized, setMaximized] = useState(false);
-  const messageRef = useRef<HTMLDivElement>(null);
-  const meta = useResizable({
-    initial: 200,
-    min: 48,
-    getMax: () => (messageRef.current?.clientHeight ?? 400) - 140,
-    storageKey: "germi.metaHeight",
-    axis: "y",
-  });
-
-  const ct = contentType(msg.headers);
-  const isRawEncoded = !decode && !!msg.encoding;
-  const kind = bodyKind(msg, ct, decode);
-  const encLabel = encodingLabel(msg, decode);
-
-  const { pretty, canPretty } = useMemo(() => prettify(ct, msg.bodyText), [ct, msg.bodyText]);
-  const text = view === "pretty" && canPretty ? pretty : msg.bodyText;
-
-  const query = side === "request" ? parseQuery(path) : [];
-  const cookies = parseCookies(msg.headers, side);
-
-  const bodyRegion = (inMaximize: boolean) => (
+  return (
     <>
       <BodyBar
         msg={msg}
@@ -705,10 +823,9 @@ function MessageView({
         setShowHex={setShowHex}
         wrap={wrap}
         setWrap={setWrap}
-        findOpen={findOpen}
-        setFindOpen={setFindOpen}
+        find={find}
         copy={copy}
-        onMaximize={inMaximize ? undefined : () => setMaximized(true)}
+        onMaximize={onMaximize}
       />
 
       {msg.truncated && (
@@ -732,21 +849,76 @@ function MessageView({
         ct={ct}
         text={text}
         wrap={wrap}
-        findOpen={findOpen}
-        onCloseFind={() => setFindOpen(false)}
+        find={find}
         isRawEncoded={isRawEncoded}
         showHex={showHex}
       />
     </>
   );
+}
+
+function MessageView({
+  msg,
+  side,
+  path,
+  decode,
+  find,
+  onLoadFull,
+}: {
+  msg: MessageDetail;
+  side: Side;
+  path: string;
+  decode: boolean;
+  find: InspectorFind;
+  onLoadFull: () => void;
+}) {
+  const copy = useCopy();
+  const { view, setView, showHex, setShowHex, wrap, setWrap } = useBodyState();
+  const [maximized, setMaximized] = useState(false);
+  const messageRef = useRef<HTMLDivElement>(null);
+  const meta = useResizable({
+    initial: 200,
+    min: 48,
+    getMax: () => (messageRef.current?.clientHeight ?? 400) - 140,
+    storageKey: "germi.metaHeight",
+    axis: "y",
+  });
+
+  const { ct, kind, encLabel, isRawEncoded, canPretty, text, queryKv, cookies } = useBodyContent(
+    msg,
+    side,
+    path,
+    decode,
+    view,
+  );
+
+  const bodyProps = {
+    msg,
+    kind,
+    encLabel,
+    canPretty,
+    view,
+    setView,
+    showHex,
+    setShowHex,
+    wrap,
+    setWrap,
+    find,
+    copy,
+    text,
+    ct,
+    isRawEncoded,
+    onLoadFull,
+  };
 
   return (
     <div className="message" ref={messageRef}>
       <MetaPanel
         msg={msg}
         side={side}
-        query={query}
+        query={queryKv}
         cookies={cookies}
+        find={find}
         copy={copy}
         style={{ height: meta.size, flex: "none", maxHeight: "none" }}
       />
@@ -762,10 +934,10 @@ function MessageView({
           title={side === "request" ? "Request body" : "Response body"}
           onClose={() => setMaximized(false)}
         >
-          {bodyRegion(true)}
+          <BodyRegion {...bodyProps} />
         </MaximizedOverlay>
       ) : (
-        bodyRegion(false)
+        <BodyRegion {...bodyProps} onMaximize={() => setMaximized(true)} />
       )}
     </div>
   );
@@ -776,14 +948,18 @@ function RequestHead({
   ttfb,
   onMock,
   url,
+  find,
   copy,
 }: {
   detail: FlowDetail;
   ttfb: number | null;
   onMock: (detail: FlowDetail) => void;
   url: string;
+  find: InspectorFind;
   copy: (label: string, value: string) => void;
 }) {
+  const urlQuery = find.scope === "all" || find.scope === "url" ? find.query : "";
+  const caseSensitive = find.caseSensitive;
   return (
     <div className="req-head">
       <div className="req-line">
@@ -801,7 +977,9 @@ function RequestHead({
         </button>
       </div>
       <div className="req-url">
-        <span className="url-text">{url}</span>
+        <span className="url-text">
+          {urlQuery ? highlight(url, urlQuery, find.urlActive, caseSensitive) : url}
+        </span>
         <div className="url-actions">
           <button className="btn ghost url-copy" title="Copy URL" onClick={() => copy("URL", url)}>
             ⧉ URL
@@ -963,11 +1141,138 @@ function MultiSelectView({
   );
 }
 
-function SingleFlowView({ detail, summary, loading, onMock, decode, onLoadFull }: SingleProps) {
+function activeFields(loc: RegionLocation | null) {
+  return {
+    urlActive: loc?.region === "url" ? loc.localIndex : -1,
+    headerActiveRow: loc?.region === "header" ? loc.localIndex : -1,
+    headerActiveField: loc?.region === "header" ? (loc.field ?? -1) : -1,
+    headerActiveOcc: loc?.region === "header" ? (loc.occ ?? -1) : -1,
+    bodyActive: loc?.region === "body" ? loc.localIndex : -1,
+  };
+}
+
+function useFindCoordinator(
+  detail: FlowDetail | null,
+  side: Side,
+  activeMsg: MessageDetail | null,
+  url: string,
+): InspectorFind {
+  const {
+    query: rawQuery,
+    scope,
+    caseSensitive,
+    activeIndex: rawIndex,
+    setActiveIndex,
+    ...rest
+  } = useInspectorFind();
+  const [bodyCount, setBodyCount] = useState(0);
+  const onBodyMatchCount = useCallback((n: number) => setBodyCount(n), []);
+
+  const query = rest.open ? rawQuery : "";
+  const headerPairs = useMemo(() => activeMsg?.headers ?? [], [activeMsg]);
+  const combined = useMemo(
+    () => combineMatches(url, headerPairs, bodyCount, query, scope, caseSensitive),
+    [url, headerPairs, bodyCount, query, scope, caseSensitive],
+  );
+
+  const { total, regionForIndex } = combined;
+  useEffect(() => setActiveIndex(0), [detail?.id, side, setActiveIndex]);
+
+  const activeIndex = total ? Math.min(rawIndex, total - 1) : 0;
+  const loc = regionForIndex(activeIndex);
+  const step = useCallback(
+    (dir: number) => {
+      if (!total) return;
+      setActiveIndex((i) => (Math.min(i, total - 1) + dir + total) % total);
+    },
+    [setActiveIndex, total],
+  );
+
+  return {
+    query,
+    scope,
+    caseSensitive,
+    open: rest.open,
+    setQuery: rest.setQuery,
+    setScope: rest.setScope,
+    toggleCase: rest.toggleCase,
+    openFind: rest.openFind,
+    close: rest.close,
+    findRef: rest.findRef,
+    step,
+    total,
+    activeIndex,
+    side,
+    ...activeFields(loc),
+    onBodyMatchCount,
+  };
+}
+
+function useRegisterFind(
+  detail: FlowDetail | null,
+  ref: React.RefObject<InspectorFindHandle | null>,
+  find: InspectorFind,
+) {
+  const { openFind, step, open } = find;
+  useEffect(() => {
+    if (!detail) return;
+    ref.current = { openFind, step, open };
+    return () => {
+      ref.current = null;
+    };
+  }, [detail, openFind, step, open, ref]);
+}
+
+function SideToggle({
+  side,
+  setSide,
+  hasResponse,
+}: {
+  side: Side;
+  setSide: (s: Side) => void;
+  hasResponse: boolean;
+}) {
+  return (
+    <div className="seg sides">
+      <button className={side === "request" ? "on" : ""} onClick={() => setSide("request")}>
+        Request
+      </button>
+      <button
+        className={side === "response" ? "on" : ""}
+        onClick={() => setSide("response")}
+        disabled={!hasResponse}
+      >
+        Response {hasResponse ? "" : "(pending)"}
+      </button>
+    </div>
+  );
+}
+
+function resolveActive(detail: FlowDetail | null, side: Side) {
+  const showResponse = !!detail?.response && side === "response";
+  const activeSide: Side = showResponse ? "response" : "request";
+  const activeMsg = detail ? (showResponse ? detail.response : detail.request) : null;
+  const url = detail ? `${detail.scheme}://${detail.host}${detail.path}` : "";
+  return { activeSide, activeMsg, url };
+}
+
+function SingleFlowView({
+  detail,
+  summary,
+  loading,
+  onMock,
+  decode,
+  onLoadFull,
+  inspectorFindRef,
+}: SingleProps) {
   const copy = useCopy();
   const [side, setSide] = useState<Side>("response");
 
-  if (!detail) {
+  const { activeSide, activeMsg, url } = resolveActive(detail, side);
+  const find = useFindCoordinator(detail, activeSide, activeMsg, url);
+  useRegisterFind(detail, inspectorFindRef, find);
+
+  if (!detail || !activeMsg) {
     return (
       <div className="inspector empty-pane">
         <span className="muted">{loading ? "Loading…" : "Select a request to inspect."}</span>
@@ -975,47 +1280,28 @@ function SingleFlowView({ detail, summary, loading, onMock, decode, onLoadFull }
     );
   }
 
-  const showResponse = side === "response" && detail.response;
-  const url = `${detail.scheme}://${detail.host}${detail.path}`;
-  const ttfb = summary?.ttfbMs ?? null;
-
   return (
     <div className="inspector">
-      <RequestHead detail={detail} ttfb={ttfb} onMock={onMock} url={url} copy={copy} />
+      {find.open && <FindBar find={find} />}
+      <RequestHead
+        detail={detail}
+        ttfb={summary?.ttfbMs ?? null}
+        onMock={onMock}
+        url={url}
+        find={find}
+        copy={copy}
+      />
       {summary?.availability && <AvailabilityPanel availability={summary.availability} url={url} />}
-
-      <div className="seg sides">
-        <button className={side === "request" ? "on" : ""} onClick={() => setSide("request")}>
-          Request
-        </button>
-        <button
-          className={side === "response" ? "on" : ""}
-          onClick={() => setSide("response")}
-          disabled={!detail.response}
-        >
-          Response {detail.response ? "" : "(pending)"}
-        </button>
-      </div>
-
-      {showResponse && detail.response ? (
-        <MessageView
-          key={`${detail.id}-response`}
-          msg={detail.response}
-          side="response"
-          path={detail.path}
-          decode={decode}
-          onLoadFull={onLoadFull}
-        />
-      ) : (
-        <MessageView
-          key={`${detail.id}-request`}
-          msg={detail.request}
-          side="request"
-          path={detail.path}
-          decode={decode}
-          onLoadFull={onLoadFull}
-        />
-      )}
+      <SideToggle side={side} setSide={setSide} hasResponse={!!detail.response} />
+      <MessageView
+        key={`${detail.id}-${activeSide}`}
+        msg={activeMsg}
+        side={activeSide}
+        path={detail.path}
+        decode={decode}
+        find={find}
+        onLoadFull={onLoadFull}
+      />
     </div>
   );
 }
@@ -1039,6 +1325,7 @@ export function FlowInspector(props: Props) {
       onMock={props.onMock}
       decode={props.decode}
       onLoadFull={props.onLoadFull}
+      inspectorFindRef={props.inspectorFindRef}
     />
   );
 }

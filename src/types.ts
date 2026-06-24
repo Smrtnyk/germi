@@ -166,6 +166,9 @@ export interface AutoResponderSummary {
   activeScenarioId: string | null;
 }
 
+/** Which rule fields `searchRules` scans (mirrors proxy-core `RuleSearchScope`). */
+export type RuleSearchScope = "name" | "url" | "method" | "status" | "response" | "headers" | "all";
+
 export interface ProxySettings {
   /** Host patterns tunneled without interception (no decrypt, no capture). */
   excludedHosts: string[];

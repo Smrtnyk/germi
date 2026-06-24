@@ -1277,8 +1277,18 @@ textarea {
 .rule-item:hover .rgrip {
   opacity: 0.7;
 }
-.rule-search {
+.rule-search-row {
+  display: flex;
+  gap: 4px;
   margin: 2px 0 4px;
+}
+.rule-search {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+}
+.rule-search-scope {
+  flex: none;
   font-size: var(--fs-sm);
 }
 .scenario-status {
@@ -2415,12 +2425,16 @@ body.resizing.resizing-v * {
 .vline.active {
   background: rgba(45, 212, 191, 0.16);
 }
+.hrow.active {
+  background: rgba(45, 212, 191, 0.16);
+}
 .vmatch {
   background: var(--warn);
   color: #1a1205;
   border-radius: 2px;
 }
-.vline.active .vmatch {
+.vline.active .vmatch,
+.vmatch.active {
   background: var(--accent);
   color: #04201c;
 }
@@ -2436,6 +2450,13 @@ body.resizing.resizing-v * {
   flex: 1;
   min-width: 0;
 }
+.find-scope {
+  flex: none;
+}
+.find-scope button {
+  padding: 3px 8px;
+  font-size: var(--fs-xs);
+}
 .vfind-count {
   font-size: var(--fs-xs);
   color: var(--muted);
@@ -2445,6 +2466,16 @@ body.resizing.resizing-v * {
 }
 .vfind .btn {
   padding: 2px 7px;
+}
+.find-case {
+  flex: none;
+  font-family: var(--mono);
+  font-weight: 600;
+  line-height: 1;
+}
+.find-case.on {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* ---- right panel split mode ---- */
