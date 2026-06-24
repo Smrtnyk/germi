@@ -29,6 +29,7 @@ import {
 } from "./autoresponderState";
 import type {
   AutoResponderSummary,
+  AvailabilityProgress,
   BulkMockEvent,
   CaInfo,
   FlowDetail,
@@ -1078,6 +1079,56 @@ function useViewState() {
   };
 }
 
+// On-demand doc public-availability check (issue #40). Scope: an explicit
+// selection or filter narrows the set; with neither, fall back to doc-kind flows
+// without a verdict yet (a re-click only re-checks the unknowns). The backend
+// re-issues GET/HEAD only and streams each verdict back on the live flow channel.
+function useAvailabilityCheck(
+  flows: FlowSummary[],
+  selectedIds: Set<string>,
+  matchedIds: Set<string> | null,
+  notify: Notify,
+  setError: SetError,
+) {
+  const [availabilityCheck, setAvailabilityCheck] = useState<AvailabilityProgress | null>(null);
+
+  function candidates(): string[] {
+    if (selectedIds.size > 0) {
+      return flows.filter((f) => selectedIds.has(f.id)).map((f) => f.id);
+    }
+    const matched = matchedIds;
+    if (matched) {
+      return flows.filter((f) => matched.has(f.id)).map((f) => f.id);
+    }
+    return flows.filter((f) => f.kind === "doc" && f.availability == null).map((f) => f.id);
+  }
+
+  async function checkAvailability() {
+    if (availabilityCheck) return;
+    const ids = candidates();
+    if (ids.length === 0) {
+      notify("info", "No requests to check for availability");
+      return;
+    }
+    setAvailabilityCheck({ completed: 0, total: ids.length });
+    try {
+      const checked = await api.checkDocAvailability(ids, (p) => setAvailabilityCheck(p));
+      notify(
+        checked > 0 ? "success" : "info",
+        checked > 0
+          ? `Checked ${plural(checked, "request")} for public availability`
+          : "Nothing checkable (only GET/HEAD requests are tested)",
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAvailabilityCheck(null);
+    }
+  }
+
+  return { checkAvailability, availabilityCheck };
+}
+
 export function useAppState() {
   const toasts = useToasts();
   const notify = toasts.notify;
@@ -1121,6 +1172,13 @@ export function useAppState() {
     [flowStore.flows, selection.selectedIds],
   );
   const inspector = useFlowDetail(selection.selectedId, decode, fullBody, selectedSummary);
+  const availability = useAvailabilityCheck(
+    flowStore.flows,
+    selection.selectedIds,
+    filtering.matchedIds,
+    notify,
+    setError,
+  );
 
   // Deferred selection after delete: we don't move the selection until the
   // deleted rows have actually been pruned by the backend's `removed` event,
@@ -1309,6 +1367,8 @@ export function useAppState() {
     notify,
     toasts: toasts.toasts,
     dismissToast: toasts.dismiss,
+    checkAvailability: availability.checkAvailability,
+    availabilityCheck: availability.availabilityCheck,
     rightTab,
     setRightTab,
     rightMode,

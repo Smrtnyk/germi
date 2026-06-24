@@ -180,6 +180,7 @@ pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
             },
             ttfb_ms: None,
             comment: None,
+            availability: None,
         });
     }
 
@@ -267,6 +268,7 @@ pub fn parse_saz(bytes: &[u8]) -> Result<Vec<Flow>> {
             duration_ms: None,
             ttfb_ms: None,
             comment: None,
+            availability: None,
         });
     }
     Ok(flows)

@@ -142,6 +142,28 @@ impl Shared {
         }
     }
 
+    /// Record a flow's public-availability verdict and emit the updated row (the
+    /// frontend upserts by id, so the inline icon refreshes live).
+    pub fn set_availability(&self, id: &str, availability: crate::flow::Availability) {
+        let cols = self.header_cols();
+        let summary = {
+            let Ok(mut store) = self.store.lock() else {
+                return;
+            };
+            if !store.set_availability(id, availability) {
+                return;
+            }
+            store.get(id).map(|f| {
+                let mut s = f.summary();
+                s.extra = extract_header_columns(&f.request, f.response.as_ref(), &cols);
+                s
+            })
+        };
+        if let Some(summary) = summary {
+            let _ = self.events.send(FlowEvent::Completed { summary });
+        }
+    }
+
     /// Clone of a recorded request, for response-phase rule evaluation.
     pub fn get_request(&self, id: &str) -> Option<CapturedRequest> {
         self.store

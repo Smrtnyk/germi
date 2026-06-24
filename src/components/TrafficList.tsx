@@ -11,8 +11,9 @@ import {
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import type { FlowSummary } from "../types";
+import type { Availability, FlowSummary } from "../types";
 import type { ColumnDef } from "../columns";
+import { availabilityLabel } from "../availability";
 import { dragFlowIds, encodeFlowIds, FLOW_DRAG_MIME } from "../dnd";
 import { useToast } from "../toast";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
@@ -234,12 +235,33 @@ interface FlowCellProps {
   comments: CommentDraft;
 }
 
+/** The inline public-availability marker shown beside the status code on a
+ *  checked doc row — a compact colored glyph whose tooltip carries the worded
+ *  verdict and evidence. Nothing for unchecked flows. (The full worded result
+ *  lives in the Inspector's "Public availability" panel.) */
+function AvailabilityBadge({ availability }: { availability: Availability | null }) {
+  if (!availability) return null;
+  const { icon, tone, title } = availabilityLabel(availability);
+  return (
+    <span className={`avail-icon avail-${tone}`} title={title} aria-label={title}>
+      {icon}
+    </span>
+  );
+}
+
 function FlowCell({ c, f, comments }: FlowCellProps) {
   if (c.special === "method") {
     return <span className={`c-method m-${f.method.toLowerCase()}`}>{f.method}</span>;
   }
   if (c.special === "status") {
-    return <span className={`c-status ${statusClass(f.status)}`}>{f.status ?? "···"}</span>;
+    // One wrapper element so this stays a SINGLE grid cell — a fragment would
+    // emit two grid items and shift every later column out of header alignment.
+    return (
+      <span className="c-status-cell">
+        <span className={`c-status ${statusClass(f.status)}`}>{f.status ?? "···"}</span>
+        <AvailabilityBadge availability={f.availability} />
+      </span>
+    );
   }
   if (c.special === "kind") {
     return <span className="c-kind">{f.kind}</span>;

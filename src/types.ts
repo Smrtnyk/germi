@@ -12,6 +12,16 @@ export type ResourceKind =
   | "wasm"
   | "other";
 
+export type AvailabilityVerdict = "public" | "protected" | "notFound" | "error" | "unknown";
+
+export interface Availability {
+  verdict: AvailabilityVerdict;
+  /** Status code from the credential-stripped re-fetch (null on network error). */
+  status: number | null;
+  /** For a redirect, where it pointed (often a login page); null otherwise. */
+  location: string | null;
+}
+
 export interface FlowSummary {
   id: string;
   method: string;
@@ -31,6 +41,9 @@ export interface FlowSummary {
   timestampMs: number;
   /** User note/tag for triage. */
   comment: string | null;
+  /** Public-availability verdict for a checked doc flow (drives the 🔓/🔒 icon);
+   *  null until checked on demand. */
+  availability: Availability | null;
   /** Pinned header-column values, keyed by column spec (e.g. `cf-ray`, `req:referer`). */
   extra: Record<string, string>;
 }
@@ -177,6 +190,13 @@ export interface CaInfo {
 export interface MockResult {
   scenarioId: string;
   newRuleIds: string[];
+}
+
+/** Progress for an in-flight doc public-availability check (per-flow verdicts
+ *  arrive on the live flow stream; this is just the running count). */
+export interface AvailabilityProgress {
+  completed: number;
+  total: number;
 }
 
 export type BulkMockEvent =

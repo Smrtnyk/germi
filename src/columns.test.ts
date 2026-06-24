@@ -19,6 +19,7 @@ function summary(overrides: Partial<FlowSummary> = {}): FlowSummary {
     matchedRule: null,
     timestampMs: 0,
     comment: null,
+    availability: null,
     extra: {},
     ...overrides,
   };

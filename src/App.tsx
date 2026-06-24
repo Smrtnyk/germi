@@ -437,6 +437,8 @@ export function App() {
               searching={s.filtering.searching}
               matchCount={s.matchCount}
               total={s.flowStore.flows.length}
+              onCheckAvailability={s.checkAvailability}
+              availabilityCheck={s.availabilityCheck}
             />
             <TrafficList
               flows={s.flowStore.flows}

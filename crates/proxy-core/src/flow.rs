@@ -58,6 +58,9 @@ pub struct Flow {
     pub ttfb_ms: Option<u64>,
     /// User-entered note/tag for triage (shown in the Comment column).
     pub comment: Option<String>,
+    /// On-demand public-availability verdict (credential-stripped re-fetch);
+    /// `None` until checked. In-memory only — not persisted to `.germi` sessions.
+    pub availability: Option<Availability>,
 }
 
 impl Flow {
@@ -86,6 +89,7 @@ impl Flow {
             matched_rule: self.matched_rule.clone(),
             timestamp_ms: self.request.timestamp_ms,
             comment: self.comment.clone(),
+            availability: self.availability.clone(),
             // Filled by the summary-building call sites that have settings access
             // (which header columns the user pinned). See `extract_header_columns`.
             extra: BTreeMap::new(),
@@ -138,6 +142,9 @@ pub struct FlowSummary {
     pub timestamp_ms: u64,
     /// User note/tag for triage.
     pub comment: Option<String>,
+    /// Public-availability verdict for a doc flow that has been checked on demand
+    /// (drives the inline 🔓/🔒 row icon); `None` when not (yet) checked.
+    pub availability: Option<Availability>,
     /// Pinned header-column values, keyed by the column spec (e.g. `cf-ray` or
     /// `req:referer`). Only present headers are included.
     pub extra: BTreeMap<String, String>,
@@ -189,6 +196,39 @@ pub enum ResourceKind {
     Ws,
     Wasm,
     Other,
+}
+
+/// Verdict of an on-demand "is this doc reachable without my credentials?" check
+/// (issue #40): the request is re-issued stripped of cookies/auth and WITHOUT
+/// following redirects, then classified by the response.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AvailabilityVerdict {
+    /// Loaded without credentials (2xx).
+    Public,
+    /// Auth required or redirected away (401/403, or a 3xx to e.g. a login page).
+    Protected,
+    /// Gone without credentials (404/410).
+    NotFound,
+    /// Could not be checked (connect error / timeout / invalid target).
+    Error,
+    /// Reached the server but the status was inconclusive (other 4xx/5xx).
+    Unknown,
+}
+
+/// Result of a public-availability check: the verdict, the re-checked status
+/// code, and (for a redirect) where it pointed — the evidence the UI shows so a
+/// user can decide whether to open the URL live or replay the session.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Availability {
+    pub verdict: AvailabilityVerdict,
+    /// The status code observed on the credential-stripped re-fetch, if one came
+    /// back at all (`None` on a network error / timeout).
+    pub status: Option<u16>,
+    /// For a redirect, the `Location` it pointed to (often a login page) — the
+    /// strongest "needs the customer's auth" signal. `None` otherwise.
+    pub location: Option<String>,
 }
 
 /// One side (request or response) of a flow, ready for the inspector.

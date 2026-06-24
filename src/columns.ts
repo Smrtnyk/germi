@@ -54,7 +54,7 @@ const BUILTIN_COLUMNS: ColumnDef[] = [
   {
     id: "status",
     label: "Status",
-    width: 56,
+    width: 64,
     special: "status",
     text: (f) => (f.status == null ? "···" : `${f.status}`),
   },

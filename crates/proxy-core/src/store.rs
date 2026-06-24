@@ -87,6 +87,17 @@ impl FlowStore {
         }
     }
 
+    /// Record a flow's public-availability verdict. Returns whether the flow
+    /// existed (so callers can skip emitting an update for an evicted id).
+    pub fn set_availability(&mut self, id: &str, availability: crate::flow::Availability) -> bool {
+        if let Some(flow) = self.flows.get_mut(id) {
+            flow.availability = Some(availability);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn get(&self, id: &str) -> Option<&Flow> {
         self.flows.get(id)
     }
@@ -212,6 +223,7 @@ mod tests {
             duration_ms: None,
             ttfb_ms: None,
             comment: None,
+            availability: None,
         }
     }
 
