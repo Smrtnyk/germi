@@ -314,7 +314,8 @@ function HotkeySection({ settings, onChange }: SectionProps) {
       <h4>Shortcuts</h4>
       <p className="muted small">
         A global hotkey toggles the system proxy on or off — even when Germi isn&apos;t focused. A
-        toast confirms the new state, and the proxy auto-starts first if it isn&apos;t running.
+        system notification confirms the new state, and the proxy auto-starts first if it isn&apos;t
+        running.
       </p>
       <div className="row hotkey-row">
         <label>Toggle system proxy</label>
