@@ -1045,15 +1045,6 @@ function useViewState() {
   }, []);
   const filterInputRef = useRef<HTMLInputElement>(null);
 
-  const [theme, setTheme] = useState<"dark" | "light">(() =>
-    loadString("germi.theme", ["dark", "light"] as const, "dark"),
-  );
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    persist("germi.theme", theme);
-  }, [theme]);
-  const toggleTheme = useCallback(() => setTheme((t) => (t === "dark" ? "light" : "dark")), []);
-
   return {
     rightTab,
     setRightTab,
@@ -1070,8 +1061,6 @@ function useViewState() {
     rightCollapsed,
     setRightCollapsed,
     filterInputRef,
-    theme,
-    toggleTheme,
   };
 }
 
@@ -1101,8 +1090,6 @@ export function useAppState() {
     rightCollapsed,
     setRightCollapsed,
     filterInputRef,
-    theme,
-    toggleTheme,
   } = useViewState();
   const [caInfo, setCaInfo] = useState<CaInfo | null>(null);
 
@@ -1299,8 +1286,6 @@ export function useAppState() {
     setRightMode,
     decode,
     setDecode,
-    theme,
-    toggleTheme,
     setFullBody,
     caInfo,
     caOpen,

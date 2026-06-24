@@ -21,8 +21,6 @@ interface ToolbarProps {
   filter: string;
   onFilterChange: (value: string) => void;
   filterInputRef: RefObject<HTMLInputElement | null>;
-  theme: "dark" | "light";
-  onToggleTheme: () => void;
 }
 
 export function Toolbar(props: ToolbarProps) {
@@ -45,8 +43,6 @@ export function Toolbar(props: ToolbarProps) {
     filter,
     onFilterChange,
     filterInputRef,
-    theme,
-    onToggleTheme,
   } = props;
 
   return (
@@ -133,14 +129,6 @@ export function Toolbar(props: ToolbarProps) {
           title="Trust the Germi root CA for HTTPS"
         >
           CA cert
-        </button>
-        <button
-          className="btn ghost"
-          onClick={onToggleTheme}
-          title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-          aria-label="Toggle color theme"
-        >
-          {theme === "dark" ? "☀" : "☾"}
         </button>
         <button
           className="btn ghost"
