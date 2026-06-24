@@ -65,11 +65,10 @@ function buildActions(s: AppStateValue): PaletteAction[] {
     {
       id: "open",
       group: "Session",
-      label: "Open session…",
+      label: "Open… (.germi, HAR, SAZ)",
       shortcut: "Ctrl/⌘ O",
-      run: s.session.openSession,
+      run: s.requestOpenCapture,
     },
-    { id: "import", group: "Session", label: "Import HAR / SAZ…", run: s.session.importArchive },
     {
       id: "show-inspector",
       group: "View",
@@ -154,7 +153,7 @@ function runModShortcut(
       void s.session.saveSession();
       return true;
     case "o":
-      void s.session.openSession();
+      s.requestOpenCapture();
       return true;
     case "1":
       s.setRightTab("inspector");
@@ -407,11 +406,10 @@ export function App() {
           systemProxy={s.proxy.systemProxy}
           onToggleSystemProxy={s.proxy.toggleSystemProxy}
           onInstallCa={() => s.setCaOpen(true)}
-          onImport={s.session.importArchive}
           decode={s.decode}
           onToggleDecode={() => s.setDecode((d) => !d)}
           onOpenSettings={() => s.settings.setSettingsOpen(true)}
-          onOpenSession={s.session.openSession}
+          onOpen={s.requestOpenCapture}
           onSaveSession={s.session.saveSession}
           onClear={s.requestClearTraffic}
           filter={s.filtering.filter}
@@ -558,6 +556,16 @@ export function App() {
             danger
             onConfirm={s.confirmClearTraffic}
             onCancel={() => s.setConfirmClear(false)}
+          />
+        )}
+
+        {s.confirmOpen && (
+          <ConfirmDialog
+            title="Open a file and replace current traffic?"
+            message={`Opening a capture replaces all ${s.flowStore.orderRef.current.length} captured flow(s). Traffic is never auto-saved, so this can't be undone — use Save first if you want to keep it.`}
+            confirmLabel="Open…"
+            onConfirm={s.confirmOpenCapture}
+            onCancel={() => s.setConfirmOpen(false)}
           />
         )}
 
