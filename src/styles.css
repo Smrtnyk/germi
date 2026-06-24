@@ -60,6 +60,9 @@
 
   --scrollbar-thumb: #3a4655;
   --scrollbar-track: transparent;
+
+  --dur-fast: 0.12s;
+  --press: translateY(1px);
 }
 
 * {
@@ -197,6 +200,9 @@ body {
 .btn.ghost {
   background: transparent;
   border-color: transparent;
+}
+.btn.ghost:hover {
+  background: var(--bg-2);
 }
 .btn.block {
   width: 100%;
@@ -659,7 +665,7 @@ textarea {
   transform: translateX(-50%);
   width: 1px;
   background: var(--line);
-  transition: background 0.12s ease;
+  transition: background var(--dur-fast);
 }
 .flow-head:hover .col-resize::after {
   background: var(--muted);
@@ -2126,7 +2132,7 @@ code {
   position: absolute;
   inset: 0 2px;
   background: var(--line);
-  transition: background 0.12s;
+  transition: background var(--dur-fast);
 }
 .resizer:hover::after {
   background: var(--accent);
@@ -2150,7 +2156,7 @@ body.resizing * {
   position: absolute;
   inset: 2px 0;
   background: var(--line);
-  transition: background 0.12s;
+  transition: background var(--dur-fast);
 }
 .resizer-v:hover::after {
   background: var(--accent);
@@ -2663,4 +2669,82 @@ kbd {
   font-size: var(--fs-xs);
   white-space: nowrap;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.btn,
+.fchip,
+.chip,
+.stab,
+.tab,
+.seg button,
+.help-btn,
+.help-token,
+.help-example,
+.status-key,
+.rail-btn,
+.ctx-item,
+.settings-nav-item,
+.settings-close,
+.toast-x,
+.chips-clear,
+.col-actions .x,
+.excluded-list .x,
+.rsection-head,
+.palette-item,
+.filter-pill,
+.link {
+  transition:
+    background var(--dur-fast),
+    border-color var(--dur-fast),
+    color var(--dur-fast),
+    transform var(--dur-fast),
+    filter var(--dur-fast);
+}
+.filter-clear,
+.follow-pill,
+.error-bar {
+  transition:
+    background var(--dur-fast),
+    border-color var(--dur-fast),
+    color var(--dur-fast),
+    filter var(--dur-fast);
+}
+.btn:active,
+.fchip:active,
+.chip:active,
+.stab:active,
+.tab:active,
+.seg button:active,
+.help-btn:active,
+.help-token:active,
+.help-example:active,
+.status-key:active,
+.rail-btn:active,
+.ctx-item:active:not(:disabled),
+.settings-nav-item:active,
+.settings-close:active,
+.toast-x:active,
+.chips-clear:active,
+.col-actions .x:active:not(:disabled),
+.excluded-list .x:active,
+.rsection-head:active,
+.palette-item:active,
+.filter-pill:active,
+.link:active {
+  transform: var(--press);
+  filter: brightness(0.9);
+}
+.filter-clear:active,
+.follow-pill:active,
+.error-bar:active,
+.flow-canvas .flow-row:active,
+.multi-row:active,
+.rule-item:active {
+  filter: brightness(0.9);
+}
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0s;
+    --press: none;
+  }
 }
