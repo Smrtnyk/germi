@@ -71,11 +71,10 @@ export const api = {
     return invoke<MockResult>("mock_flows", { ids, scenarioId, historyTag, progress });
   },
 
-  importArchive: () => invoke<number>("import_archive"),
   pickFile: () => invoke<string | null>("pick_file"),
   fileExists: (path: string) => invoke<boolean>("file_exists", { path }),
   saveSession: () => invoke<boolean>("save_session"),
-  openSession: () => invoke<number>("open_session"),
+  openCapture: () => invoke<number | null>("open_capture"),
   exportRules: (scenarioId: string | null) => invoke<boolean>("export_rules", { scenarioId }),
   importRules: (replace: boolean, historyTag: HistoryTag) =>
     invoke<number>("import_rules", { replace, historyTag }),

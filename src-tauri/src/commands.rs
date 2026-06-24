@@ -516,37 +516,6 @@ pub fn restore_prior_system_proxy(state: &AppState) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Open a native file picker and import a HAR or Fiddler SAZ archive into the
-/// traffic list. Returns the number of flows imported (0 if the user cancels).
-#[tauri::command]
-pub async fn import_archive(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<usize, String> {
-    let Some(picked) = app
-        .dialog()
-        .file()
-        .add_filter("captures", &["har", "saz"])
-        .blocking_pick_file()
-    else {
-        return Ok(0); // cancelled
-    };
-
-    let path = picked.into_path().map_err(|e| e.to_string())?;
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-
-    match ext.as_str() {
-        "har" => state.controller.import_har(&bytes).map_err(|e| e.to_string()),
-        "saz" => state.controller.import_saz(&bytes).map_err(|e| e.to_string()),
-        other => Err(format!("Unsupported file type: .{other}")),
-    }
-}
-
 /// Open a native file picker (any file) and return the chosen path, for the
 /// Map Local action's "Browse…" button.
 #[tauri::command]
@@ -597,25 +566,33 @@ pub async fn save_session(
     Ok(true)
 }
 
-/// Open a `.germi` session, REPLACING the current traffic. Returns the count.
+/// Open a capture file — a `.germi` session, a HAR, or a Fiddler SAZ archive —
+/// REPLACING the current traffic. Dispatches on the file extension. Returns the
+/// number of flows loaded, or `None` if the user cancels the picker.
 #[tauri::command]
-pub async fn open_session(
+pub async fn open_capture(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> Result<usize, String> {
+) -> Result<Option<usize>, String> {
     let Some(picked) = app
         .dialog()
         .file()
-        .add_filter("Germi session", &["germi"])
+        .add_filter("Captures (.germi, .har, .saz)", &["germi", "har", "saz"])
         .blocking_pick_file()
     else {
-        return Ok(0);
+        return Ok(None);
     };
     let path = picked.into_path().map_err(|e| e.to_string())?;
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     state
         .controller
-        .import_session(&bytes)
+        .open_capture(&bytes, &ext)
+        .map(Some)
         .map_err(|e| e.to_string())
 }
 

@@ -334,16 +334,21 @@ impl ProxyController {
             .collect()
     }
 
-    // ---- import (HAR / SAZ) ----
+    // ---- capture files: open (.germi / .har / .saz) + session export ----
 
-    /// Import a HAR archive's entries as flows. Returns the count imported.
-    pub fn import_har(&self, bytes: &[u8]) -> Result<usize> {
-        Ok(self.import_flows(import::parse_har(bytes)?))
-    }
-
-    /// Import a Fiddler SAZ archive's sessions as flows.
-    pub fn import_saz(&self, bytes: &[u8]) -> Result<usize> {
-        Ok(self.import_flows(import::parse_saz(bytes)?))
+    /// Open a capture file — a `.germi` session, a HAR, or a Fiddler SAZ
+    /// archive, dispatched on the lowercased `ext` — REPLACING the current
+    /// traffic. Returns the number of flows loaded. The file is fully parsed
+    /// before anything is cleared, so a malformed file leaves traffic intact.
+    pub fn open_capture(&self, bytes: &[u8], ext: &str) -> Result<usize> {
+        let flows = match ext {
+            "germi" => session::import_session(bytes)?,
+            "har" => import::parse_har(bytes)?,
+            "saz" => import::parse_saz(bytes)?,
+            other => bail!("Unsupported file type: .{other}"),
+        };
+        self.clear_flows();
+        Ok(self.import_flows(flows))
     }
 
     /// Serialize the current traffic to a `.germi` session (JSON bytes).
@@ -355,13 +360,6 @@ impl ProxyController {
             .map(|s| s.all_flows())
             .unwrap_or_default();
         session::export_session(&flows)
-    }
-
-    /// Replace the current traffic with the flows from a `.germi` session.
-    pub fn import_session(&self, bytes: &[u8]) -> Result<usize> {
-        let flows = session::import_session(bytes)?;
-        self.clear_flows();
-        Ok(self.import_flows(flows))
     }
 
     // ---- autoresponder rules export / import (.germi-rules) ----
@@ -1145,6 +1143,44 @@ mod tests {
             "removing ids that were never captured must not emit an event"
         );
         assert_eq!(c.shared.store.lock().expect("lock store").len(), 1);
+    }
+
+    #[test]
+    fn open_capture_har_replaces_current_traffic() {
+        let c = controller();
+        c.shared.record_new(flow("stale"));
+        let har = br#"{"log":{"entries":[
+          {"request":{"url":"https://a/1"},"response":{"status":200,"headers":[{"name":"x","value":"1"}],"content":{}}},
+          {"request":{"url":"https://a/2"},"response":{"status":200,"headers":[{"name":"x","value":"1"}],"content":{}}}
+        ]}}"#;
+        let n = c.open_capture(har, "har").expect("open har");
+        assert_eq!(n, 2);
+        let store = c.shared.store.lock().expect("lock store");
+        assert_eq!(store.len(), 2, "open replaces — the seeded flow is gone, not appended to");
+        assert!(store.get("stale").is_none());
+    }
+
+    #[test]
+    fn open_capture_germi_round_trips_and_replaces() {
+        let c = controller();
+        c.shared.record_new(flow("stale"));
+        let bytes = crate::session::export_session(&[flow("a"), flow("b")]);
+        let n = c.open_capture(&bytes, "germi").expect("open germi");
+        assert_eq!(n, 2);
+        assert_eq!(c.shared.store.lock().expect("lock store").len(), 2);
+    }
+
+    #[test]
+    fn open_capture_rejects_unsupported_extension_without_clearing() {
+        let c = controller();
+        c.shared.record_new(flow("keep"));
+        let err = c.open_capture(b"irrelevant", "txt").unwrap_err();
+        assert!(err.to_string().contains("Unsupported"));
+        assert_eq!(
+            c.shared.store.lock().expect("lock store").len(),
+            1,
+            "a rejected open must leave existing traffic untouched"
+        );
     }
 
     #[test]

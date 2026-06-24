@@ -980,14 +980,6 @@ function plural(n: number, word: string): string {
 }
 
 function useSession(setError: SetError, onOpened: () => void, notify: Notify) {
-  async function importArchive() {
-    try {
-      const n = await api.importArchive();
-      if (n > 0) notify("success", `Imported ${plural(n, "flow")} from archive`);
-    } catch (e) {
-      setError(String(e));
-    }
-  }
   async function saveSession() {
     try {
       const ok = await api.saveSession();
@@ -996,16 +988,17 @@ function useSession(setError: SetError, onOpened: () => void, notify: Notify) {
       setError(String(e));
     }
   }
-  async function openSession() {
+  async function openCapture() {
     try {
-      const n = await api.openSession();
+      const n = await api.openCapture();
+      if (n === null) return;
       onOpened();
-      if (n >= 0) notify("success", `Opened session — ${plural(n, "flow")}`);
+      notify("success", `Opened ${plural(n, "flow")}`);
     } catch (e) {
       setError(String(e));
     }
   }
-  return { importArchive, saveSession, openSession };
+  return { saveSession, openCapture };
 }
 
 async function copyFlowAsCurlAction(id: string, notify: Notify, setError: SetError) {
@@ -1054,6 +1047,7 @@ function useViewState() {
   const [fullBody, setFullBody] = useState(false);
   const [caOpen, setCaOpen] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [rightCollapsed, setRightCollapsedState] = useState(() =>
     loadBool("germi.rightCollapsed", false),
   );
@@ -1076,6 +1070,8 @@ function useViewState() {
     setCaOpen,
     confirmClear,
     setConfirmClear,
+    confirmOpen,
+    setConfirmOpen,
     rightCollapsed,
     setRightCollapsed,
     filterInputRef,
@@ -1105,6 +1101,8 @@ export function useAppState() {
     setCaOpen,
     confirmClear,
     setConfirmClear,
+    confirmOpen,
+    setConfirmOpen,
     rightCollapsed,
     setRightCollapsed,
     filterInputRef,
@@ -1264,6 +1262,19 @@ export function useAppState() {
     clearTraffic();
   }
 
+  function requestOpenCapture() {
+    if (flowStore.orderRef.current.length === 0) {
+      void session.openCapture();
+      return;
+    }
+    setConfirmOpen(true);
+  }
+
+  function confirmOpenCapture() {
+    setConfirmOpen(false);
+    void session.openCapture();
+  }
+
   // Prune the selected flows (no confirm — the backend `removed` event drops
   // the rows). The actual selection move is deferred until those rows are gone
   // (see pendingSelectRef effect above), so the highlight transfer and the row
@@ -1315,6 +1326,10 @@ export function useAppState() {
     setConfirmClear,
     requestClearTraffic,
     confirmClearTraffic,
+    confirmOpen,
+    setConfirmOpen,
+    requestOpenCapture,
+    confirmOpenCapture,
     settings,
     flowStore,
     filtering,

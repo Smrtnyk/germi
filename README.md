@@ -66,7 +66,7 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   Off). Each rule is `matcher → action`: auto-respond, map-local-file, block, set
   request/response header, set status, or regex-rewrite the body. Built-in **offline
   tester**, lazy-loaded rule details, and SQLite-backed persistence.
-- **Import & bulk-mock** — load **HAR** or Fiddler **SAZ** archives; multi-select
+- **Import & bulk-mock** — load **HAR** or Fiddler **SAZ** archives via **Open**; multi-select
   rows (Shift-range, Ctrl/⌘-click, **Ctrl/⌘ A** to select all) → **Add to scenario**
   to seed mock rules from real responses, or **⚡ Mock this** on one. Selecting
   several shows a summary (counts, hosts, sizes) in the Inspector. Prune noise with
@@ -81,8 +81,9 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   (export/regenerate), Interception (host exclusions, tunneled), Capture (max flows,
   record-only filter, capture-on-start), Throttling (response delay). Import/export
   as JSON.
-- **Sessions** — traffic is **not** auto-persisted (privacy); **Save**/**Open** a
-  lossless `.germi` file explicitly.
+- **Sessions** — traffic is **not** auto-persisted (privacy). **Save** a lossless
+  `.germi` file; one **Open** loads any supported capture — `.germi`, HAR, or SAZ —
+  replacing the current traffic (it confirms first when traffic is present).
 
 ## Limitations
 

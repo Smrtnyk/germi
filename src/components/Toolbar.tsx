@@ -11,11 +11,10 @@ interface ToolbarProps {
   systemProxy: boolean;
   onToggleSystemProxy: () => void;
   onInstallCa: () => void;
-  onImport: () => void;
   decode: boolean;
   onToggleDecode: () => void;
   onOpenSettings: () => void;
-  onOpenSession: () => void;
+  onOpen: () => void;
   onSaveSession: () => void;
   onClear: () => void;
   filter: string;
@@ -33,11 +32,10 @@ export function Toolbar(props: ToolbarProps) {
     systemProxy,
     onToggleSystemProxy,
     onInstallCa,
-    onImport,
     decode,
     onToggleDecode,
     onOpenSettings,
-    onOpenSession,
+    onOpen,
     onSaveSession,
     onClear,
     filter,
@@ -89,8 +87,8 @@ export function Toolbar(props: ToolbarProps) {
       <div className="tb-group" role="group" aria-label="Session">
         <button
           className="btn ghost"
-          onClick={onOpenSession}
-          title="Open a saved .germi session (replaces current traffic)"
+          onClick={onOpen}
+          title="Open a .germi session, HAR or Fiddler SAZ archive (replaces current traffic)"
         >
           Open
         </button>
@@ -100,13 +98,6 @@ export function Toolbar(props: ToolbarProps) {
           title="Save current traffic to a .germi session"
         >
           Save
-        </button>
-        <button
-          className="btn ghost"
-          onClick={onImport}
-          title="Import a HAR or Fiddler SAZ archive"
-        >
-          Import
         </button>
         <button className="btn ghost danger" onClick={onClear} title="Clear captured traffic">
           Clear
