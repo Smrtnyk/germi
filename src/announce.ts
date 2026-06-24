@@ -1,4 +1,3 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   isPermissionGranted,
   requestPermission,
@@ -23,18 +22,13 @@ async function osNotify(body: string): Promise<boolean> {
 }
 
 /**
- * Announce a state change: an in-app toast when the window is focused, an OS
- * notification when it isn't — so a toggle fired by the global hotkey is still
- * visible from another app. Falls back to the toast when OS notifications are
- * unavailable (permission denied / no daemon).
+ * Announce a state change fired by the global hotkey via an OS notification, so
+ * it's visible from another app and doesn't duplicate the system notification
+ * with an in-app toast. Falls back to a toast only when OS notifications are
+ * unavailable (permission denied / no daemon). In-app toggles toast directly
+ * and don't call this.
  */
 export async function announce(notify: Notify, message: string): Promise<void> {
-  let focused = true;
-  try {
-    focused = await getCurrentWindow().isFocused();
-  } catch {
-    focused = true;
-  }
-  if (!focused && (await osNotify(message))) return;
+  if (await osNotify(message)) return;
   notify("info", message);
 }

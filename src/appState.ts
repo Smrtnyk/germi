@@ -574,19 +574,19 @@ function useProxyControl(
     }
   }
 
-  async function toggleSystemProxy() {
+  async function toggleSystemProxyWith(report: (message: string) => void) {
     if (busy) return;
     setBusy(true);
     try {
       if (systemProxy) {
         await api.clearSystemProxy();
         setSystemProxy(false);
-        void announce(notify, "System proxy off");
+        report("System proxy off");
       } else {
         const port = running ? settings.port : await startProxy();
         await api.setSystemProxy(port);
         setSystemProxy(true);
-        void announce(notify, "System proxy on — routed through Germi");
+        report("System proxy on — routed through Germi");
       }
     } catch (e) {
       setError(String(e));
@@ -595,7 +595,25 @@ function useProxyControl(
     }
   }
 
-  return { running, setRunning, systemProxy, busy, toggleProxy, toggleSystemProxy };
+  function toggleSystemProxy() {
+    return toggleSystemProxyWith((m) => notify("info", m));
+  }
+
+  function toggleSystemProxyHotkey() {
+    return toggleSystemProxyWith((m) => {
+      void announce(notify, m);
+    });
+  }
+
+  return {
+    running,
+    setRunning,
+    systemProxy,
+    busy,
+    toggleProxy,
+    toggleSystemProxy,
+    toggleSystemProxyHotkey,
+  };
 }
 
 function useSettings() {
@@ -1132,7 +1150,7 @@ export function useAppState() {
     (port) => saveSettings({ ...settings.settings, port }),
     notify,
   );
-  useSystemHotkeys(settings.settings.systemProxyHotkey, proxy.toggleSystemProxy, setError);
+  useSystemHotkeys(settings.settings.systemProxyHotkey, proxy.toggleSystemProxyHotkey, setError);
   useProxyIndicator(proxy.systemProxy);
   const autoresponderActive = rightTab === "autoresponder" || rightMode === "split";
   const ar = useAutoresponder(setError, setRightTab, notify, autoresponderActive);
