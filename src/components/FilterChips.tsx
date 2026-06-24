@@ -1,4 +1,4 @@
-import type { ResourceKind } from "../types";
+import type { AvailabilityProgress, ResourceKind } from "../types";
 import { KIND_CHIPS, rawSegments, STATUS_CHIPS } from "../filter";
 
 interface Props {
@@ -13,6 +13,29 @@ interface Props {
   /** Number of matching rows, or null when no filter is active. */
   matchCount: number | null;
   total: number;
+  /** Run an on-demand public-availability check over the in-scope requests. */
+  onCheckAvailability: () => void;
+  /** Live progress while a check runs, or null when idle. */
+  availabilityCheck: AvailabilityProgress | null;
+}
+
+function AvailabilityCheckButton({
+  onCheck,
+  progress,
+}: {
+  onCheck: () => void;
+  progress: AvailabilityProgress | null;
+}) {
+  return (
+    <button
+      className="fchip availability-check"
+      onClick={onCheck}
+      disabled={progress !== null}
+      title="Re-issue the selected or filtered requests (or all unchecked doc requests) without your cookies/auth to test whether they are publicly reachable"
+    >
+      {progress ? `Checking ${progress.completed}/${progress.total}…` : "Check availability"}
+    </button>
+  );
 }
 
 export function FilterChips({
@@ -26,6 +49,8 @@ export function FilterChips({
   searching,
   matchCount,
   total,
+  onCheckAvailability,
+  availabilityCheck,
 }: Props) {
   const active = matchCount !== null;
   const segments = filter.trim() ? rawSegments(filter) : [];
@@ -72,6 +97,7 @@ export function FilterChips({
             {c}
           </button>
         ))}
+        <AvailabilityCheckButton onCheck={onCheckAvailability} progress={availabilityCheck} />
         <div className="filter-status">
           {searching && <span className="searching">searching…</span>}
           {active && (

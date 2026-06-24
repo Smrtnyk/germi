@@ -27,6 +27,7 @@ mod flow;
 mod handler;
 mod history;
 mod import;
+mod reissue;
 mod rules;
 mod rules_export;
 mod session;
@@ -44,11 +45,14 @@ use anyhow::{anyhow, bail, Result};
 use hudsucker::rustls::crypto::aws_lc_rs;
 use hudsucker::Proxy;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, oneshot, Mutex};
-use tokio::task::JoinHandle;
+use tokio::sync::{broadcast, oneshot, Mutex, Semaphore};
+use tokio::task::{JoinHandle, JoinSet};
 
 pub use ca::CertAuthority;
-pub use flow::{FlowDetail, FlowEvent, FlowSummary, MessageDetail, ResourceKind};
+pub use flow::{
+    Availability, AvailabilityVerdict, FlowDetail, FlowEvent, FlowSummary, MessageDetail,
+    ResourceKind,
+};
 pub use history::{HistoryEntryView, HistoryKind, HistoryTag, HistoryView};
 pub use rules::{
     Action, ActionSummary, AutoResponder, AutoResponderSummary, MatchKind, Matcher, Rule,
@@ -64,6 +68,8 @@ use shared::Shared;
 
 /// Maximum number of flows retained in memory before oldest are evicted.
 const MAX_FLOWS: usize = 5_000;
+/// Max concurrent outbound availability checks (bounds load + open sockets).
+const AVAILABILITY_CONCURRENCY: usize = 12;
 static ENTITY_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn new_entity_id(prefix: &str) -> String {
@@ -240,6 +246,75 @@ impl ProxyController {
     /// Set or clear a flow's user comment (emits the updated row to subscribers).
     pub fn set_flow_comment(&self, id: &str, comment: Option<String>) {
         self.shared.set_comment(id, comment);
+    }
+
+    /// Re-issue the given flows WITHOUT credentials to test whether they are
+    /// publicly reachable, caching each verdict on its flow and emitting the
+    /// updated row. Only safe methods (GET/HEAD) are re-issued — re-sending a POST
+    /// could mutate server state — so other methods (and unknown ids) are skipped.
+    /// `on_progress(completed, total)` fires as each check resolves. Returns the
+    /// number of flows actually checked.
+    pub async fn check_availability(
+        &self,
+        ids: &[String],
+        mut on_progress: impl FnMut(usize, usize),
+    ) -> usize {
+        // Snapshot targets up front so the network phase never holds the store lock.
+        let targets: Vec<(String, reissue::ReissueTarget)> = {
+            let Ok(store) = self.shared.store.lock() else {
+                return 0;
+            };
+            ids.iter()
+                .filter_map(|id| {
+                    let flow = store.get(id)?;
+                    let method = flow.request.method.to_ascii_uppercase();
+                    if method != "GET" && method != "HEAD" {
+                        return None;
+                    }
+                    let req = &flow.request;
+                    Some((
+                        id.clone(),
+                        reissue::ReissueTarget {
+                            method,
+                            // Rebuild the absolute URL: intercepted-HTTPS captures
+                            // store an origin-form URI (just the path).
+                            url: format!("{}://{}{}", req.scheme, req.host, req.path),
+                            headers: req.headers.clone(),
+                        },
+                    ))
+                })
+                .collect()
+        };
+
+        let total = targets.len();
+        if total == 0 {
+            on_progress(0, 0);
+            return 0;
+        }
+
+        let client = reissue::build_client();
+        let semaphore = Arc::new(Semaphore::new(AVAILABILITY_CONCURRENCY));
+        let mut set = JoinSet::new();
+        for (id, target) in targets {
+            let client = client.clone();
+            let semaphore = semaphore.clone();
+            set.spawn(async move {
+                let _permit = semaphore.acquire_owned().await.ok();
+                let availability =
+                    reissue::check_public(&client, &target, reissue::CHECK_TIMEOUT).await;
+                (id, availability)
+            });
+        }
+
+        let mut completed = 0;
+        while let Some(joined) = set.join_next().await {
+            if let Ok((id, availability)) = joined {
+                self.shared.set_availability(&id, availability);
+            }
+            completed += 1;
+            on_progress(completed, total);
+        }
+        completed
     }
 
     pub fn get_flow(&self, id: &str, decode: bool, full: bool) -> Option<FlowDetail> {
@@ -1087,6 +1162,7 @@ mod tests {
             duration_ms: None,
             ttfb_ms: None,
             comment: None,
+            availability: None,
         }
     }
 
@@ -1102,6 +1178,74 @@ mod tests {
             timestamp_ms: 1,
         });
         flow
+    }
+
+    #[tokio::test]
+    async fn check_availability_caches_verdict_and_emits_row() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                let _ = s.flush();
+            }
+        });
+
+        let c = controller();
+        let mut flow = completed_flow("d1");
+        flow.request.method = "GET".to_string();
+        flow.request.scheme = "http".to_string();
+        flow.request.host = addr.to_string();
+        flow.request.path = "/doc".to_string();
+        c.shared.record_imported(flow);
+        // Subscribe AFTER the import so the only event we see is the verdict update.
+        let mut rx = c.subscribe();
+
+        let checked = c.check_availability(&["d1".to_string()], |_, _| {}).await;
+        assert_eq!(checked, 1);
+
+        let availability = c
+            .list_flows()
+            .into_iter()
+            .find(|s| s.id == "d1")
+            .and_then(|s| s.availability)
+            .expect("verdict cached on the flow");
+        assert_eq!(availability.verdict, AvailabilityVerdict::Public);
+        assert_eq!(availability.status, Some(200));
+
+        match rx.try_recv() {
+            Ok(FlowEvent::Completed { summary }) => {
+                assert_eq!(summary.id, "d1");
+                assert_eq!(
+                    summary.availability.expect("verdict on emitted row").verdict,
+                    AvailabilityVerdict::Public
+                );
+            }
+            other => panic!("expected a Completed availability update, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_availability_skips_non_get_methods() {
+        let c = controller();
+        let mut flow = completed_flow("p1");
+        flow.request.method = "POST".to_string();
+        c.shared.record_imported(flow);
+        // POST is never re-issued (could mutate server state), so nothing is checked.
+        let checked = c.check_availability(&["p1".to_string()], |_, _| {}).await;
+        assert_eq!(checked, 0);
+        assert!(
+            c.list_flows()
+                .into_iter()
+                .find(|s| s.id == "p1")
+                .and_then(|s| s.availability)
+                .is_none(),
+            "a skipped flow keeps a null verdict"
+        );
     }
 
     #[test]

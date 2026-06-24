@@ -170,6 +170,7 @@ pub fn import_session(bytes: &[u8]) -> Result<Vec<Flow>> {
                 duration_ms: sf.duration_ms,
                 ttfb_ms: sf.ttfb_ms,
                 comment: sf.comment,
+                availability: None,
             }
         })
         .collect();
@@ -206,6 +207,7 @@ mod tests {
             duration_ms: Some(7),
             ttfb_ms: Some(3),
             comment: Some("note".into()),
+            availability: None,
         };
         let bytes = export_session(&[flow]);
         let back = import_session(&bytes).unwrap();

@@ -28,6 +28,16 @@ pub struct CaInfo {
     pub dir: String,
 }
 
+/// Progress for an in-flight doc public-availability check. Per-flow verdicts
+/// arrive on the live flow stream (each row updates as it resolves); this channel
+/// only carries the running count for the button's progress label.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailabilityProgress {
+    pub completed: usize,
+    pub total: usize,
+}
+
 #[derive(Serialize, Clone)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum BulkMockEvent {
@@ -425,6 +435,27 @@ pub async fn mock_flows(
     })
     .await
     .map_err(|e| format!("bulk mock task failed: {e}"))?
+}
+
+/// Re-issue the given (doc) flows without credentials to test public
+/// availability, caching each verdict on its flow. Per-flow results stream back
+/// on the live flow channel as each resolves; `progress` carries the running
+/// count. Returns how many flows were actually checked (GET/HEAD only).
+#[tauri::command]
+pub async fn check_doc_availability(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+    progress: Channel<AvailabilityProgress>,
+) -> Result<usize, String> {
+    let controller = state.controller.clone();
+    // `move` so the closure owns the Channel (which is Send) rather than
+    // borrowing it (which would demand Sync) — keeps the command future Send.
+    let checked = controller
+        .check_availability(&ids, move |completed, total| {
+            let _ = progress.send(AvailabilityProgress { completed, total });
+        })
+        .await;
+    Ok(checked)
 }
 
 #[tauri::command]

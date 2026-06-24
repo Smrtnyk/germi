@@ -516,6 +516,19 @@ textarea {
 .chips-clear:hover {
   color: var(--text);
 }
+.availability-check {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  color: var(--accent);
+  white-space: nowrap;
+}
+.availability-check:hover:not(:disabled) {
+  background: var(--chip-on-bg);
+  color: var(--accent);
+}
+.availability-check:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
 
 /* ---- active filter-term pills (removable view of the text query) ---- */
 .filter-pills {
@@ -722,6 +735,65 @@ textarea {
 }
 .c-kind {
   color: var(--muted);
+}
+.c-status-cell {
+  display: inline-flex;
+  align-items: center;
+}
+/* verdict colors — shared by the row icon and the Inspector badge */
+.avail-reachable {
+  color: var(--s2);
+}
+.avail-login {
+  color: var(--s3);
+}
+.avail-forbidden {
+  color: var(--s4);
+}
+.avail-error {
+  color: var(--s5);
+}
+.avail-gone,
+.avail-unknown {
+  color: var(--muted);
+}
+/* compact glyph beside the status code in the traffic row */
+.avail-icon {
+  margin-left: 5px;
+  font-weight: 700;
+}
+/* worded pill in the Inspector's Public-availability panel */
+.avail-badge {
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1.6;
+}
+.avail-panel {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-1);
+  font-size: var(--fs-sm);
+}
+.avail-panel-label {
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.4px;
+}
+.avail-loc {
+  overflow: hidden;
+  max-width: 280px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.avail-open {
+  margin-left: auto;
 }
 .c-comment {
   cursor: text;

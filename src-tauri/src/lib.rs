@@ -89,6 +89,7 @@ pub fn run() {
             commands::import_settings,
             commands::test_scenario,
             commands::mock_flows,
+            commands::check_doc_availability,
             commands::ca_info,
             commands::export_ca,
             commands::regenerate_ca,

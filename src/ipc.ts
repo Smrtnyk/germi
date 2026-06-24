@@ -2,6 +2,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 
 import type {
   AutoResponderSummary,
+  AvailabilityProgress,
   BulkMockEvent,
   CaInfo,
   FlowDetail,
@@ -69,6 +70,11 @@ export const api = {
     const progress = new Channel<BulkMockEvent>();
     progress.onmessage = onProgress;
     return invoke<MockResult>("mock_flows", { ids, scenarioId, historyTag, progress });
+  },
+  checkDocAvailability: (ids: string[], onProgress: (event: AvailabilityProgress) => void) => {
+    const progress = new Channel<AvailabilityProgress>();
+    progress.onmessage = onProgress;
+    return invoke<number>("check_doc_availability", { ids, progress });
   },
 
   importArchive: () => invoke<number>("import_archive"),

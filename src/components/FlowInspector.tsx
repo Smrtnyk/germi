@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import type { FlowDetail, FlowSummary, MessageDetail } from "../types";
+import { openUrl } from "@tauri-apps/plugin-opener";
+
+import type { Availability, FlowDetail, FlowSummary, MessageDetail } from "../types";
+import { availabilityLabel } from "../availability";
 import { useToast } from "../toast";
 import { useCopy } from "../useCopy";
 import { useResizable } from "../useResizable";
@@ -816,6 +819,33 @@ function RequestHead({
   );
 }
 
+/** Public-availability result for the selected doc flow: the worded verdict, the
+ *  evidence (re-checked status + redirect target), and a one-click jump into the
+ *  live URL (no captured credentials) — so a reachable app can be worked in live
+ *  instead of replaying the session. */
+function AvailabilityPanel({ availability, url }: { availability: Availability; url: string }) {
+  const { text, tone, title } = availabilityLabel(availability);
+  return (
+    <div className="avail-panel">
+      <span className="avail-panel-label">Public availability</span>
+      <span className={`avail-badge avail-${tone}`} title={title}>
+        {text}
+      </span>
+      {availability.status !== null && (
+        <span className="muted">re-check {availability.status}</span>
+      )}
+      {availability.location && <span className="muted avail-loc">→ {availability.location}</span>}
+      <button
+        className="btn ghost small avail-open"
+        title="Open this URL in your default browser (without the captured session's cookies)"
+        onClick={() => void openUrl(url)}
+      >
+        ↗ Open in browser
+      </button>
+    </div>
+  );
+}
+
 function statusCls(status: number | null): string {
   if (status === null) return "pending";
   if (status >= 500) return "s5";
@@ -952,6 +982,7 @@ function SingleFlowView({ detail, summary, loading, onMock, decode, onLoadFull }
   return (
     <div className="inspector">
       <RequestHead detail={detail} ttfb={ttfb} onMock={onMock} url={url} copy={copy} />
+      {summary?.availability && <AvailabilityPanel availability={summary.availability} url={url} />}
 
       <div className="seg sides">
         <button className={side === "request" ? "on" : ""} onClick={() => setSide("request")}>
