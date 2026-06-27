@@ -20,6 +20,7 @@ function summary(overrides: Partial<FlowSummary> = {}): FlowSummary {
     timestampMs: 0,
     comment: null,
     availability: null,
+    imported: false,
     extra: {},
     ...overrides,
   };
@@ -76,6 +77,11 @@ describe("column text rendering", () => {
   it("renders durations as plain milliseconds or blank", () => {
     expect(textOf("duration", summary({ durationMs: 123 }))).toBe("123");
     expect(textOf("duration", summary({ durationMs: null }))).toBe("");
+  });
+
+  it("labels the origin column only for imported flows", () => {
+    expect(textOf("origin", summary({ imported: true }))).toBe("imported");
+    expect(textOf("origin", summary({ imported: false }))).toBe("");
   });
 });
 

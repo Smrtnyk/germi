@@ -56,6 +56,12 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       run: s.deleteSelected,
     },
     {
+      id: "delete-captured",
+      group: "Traffic",
+      label: "Delete captured requests (keep imported)",
+      run: s.deleteCaptured,
+    },
+    {
       id: "save",
       group: "Session",
       label: "Save session…",
@@ -439,6 +445,11 @@ export function App() {
               total={s.flowStore.flows.length}
               onCheckAvailability={s.checkAvailability}
               availabilityCheck={s.availabilityCheck}
+              capturedDelete={{
+                capturedCount: s.capturedCount,
+                importedCount: s.importedCount,
+                onDelete: s.deleteCaptured,
+              }}
             />
             <TrafficList
               flows={s.flowStore.flows}

@@ -4,6 +4,7 @@ const ROWS: { tokens: string[]; desc: string }[] = [
   { tokens: ["host:", "path:", "method:", "scheme:"], desc: "URL parts" },
   { tokens: ["status:"], desc: "404, a class (4xx), or a range (>=400, <500)" },
   { tokens: ["mime:", "kind:", "ext:"], desc: "content-type · inferred type · file extension" },
+  { tokens: ["is:imported", "is:captured"], desc: "loaded from a file vs captured live" },
   { tokens: ["rule:"], desc: "matched autoresponder rule" },
   { tokens: ["larger-than:", "smaller-than:"], desc: "response size (k/m suffix)" },
   { tokens: ["slower-than:"], desc: "duration in ms" },

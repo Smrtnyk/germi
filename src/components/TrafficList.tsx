@@ -344,6 +344,15 @@ interface FlowRowProps {
   onDragStart: (e: ReactDragEvent, f: FlowSummary) => void;
 }
 
+/** Row tooltip: combine the "imported from file" marker hint with the mocked-by
+ *  rule hint, so both cues are explained on hover. */
+function rowTitle(f: FlowSummary): string | undefined {
+  const parts: string[] = [];
+  if (f.imported) parts.push("imported from file");
+  if (f.matchedRule) parts.push(`mocked by rule: ${f.matchedRule}`);
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
 function suppressShiftSelect(e: ReactMouseEvent) {
   if (!e.shiftKey) return;
   const tag = (e.target as HTMLElement).tagName;
@@ -368,7 +377,7 @@ function FlowRow({
     <div
       className={`flow-row ${selected ? "selected" : ""} ${inSet ? "checked" : ""} ${
         f.matchedRule ? "ruled" : ""
-      } ${matched ? "match" : ""} ${dimmed ? "dim" : ""}`}
+      } ${f.imported ? "imported" : ""} ${matched ? "match" : ""} ${dimmed ? "dim" : ""}`}
       style={{ transform: `translateY(${item.start}px)`, height: item.size }}
       draggable
       onDragStart={(e) => onDragStart(e, f)}
@@ -378,7 +387,7 @@ function FlowRow({
         onActivate();
       }}
       onContextMenu={(e) => onOpenMenu(e, f)}
-      title={f.matchedRule ? `mocked by rule: ${f.matchedRule}` : undefined}
+      title={rowTitle(f)}
     >
       {columns.map((c) => (
         <FlowCell key={c.id} c={c} f={f} comments={comments} />

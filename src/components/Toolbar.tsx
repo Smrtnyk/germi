@@ -139,7 +139,7 @@ export function Toolbar(props: ToolbarProps) {
           placeholder="Filter — host: status:4xx kind:xhr body:… -negate /regex/"
           value={filter}
           onChange={(e) => onFilterChange(e.target.value)}
-          title="Tokens: host: path: method: scheme: status: (4xx, >=400) mime: kind: ext: rule: larger-than: slower-than: body: req-body: resp-body: — bare words match the URL, /regex/ for regex, leading - negates"
+          title="Tokens: host: path: method: scheme: status: (4xx, >=400) mime: kind: ext: is:imported is:captured rule: larger-than: slower-than: body: req-body: resp-body: — bare words match the URL, /regex/ for regex, leading - negates"
         />
         {filter && (
           <button

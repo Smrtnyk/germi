@@ -1118,6 +1118,7 @@ mod tests {
             ttfb_ms: None,
             comment: None,
             availability: None,
+            imported: false,
         };
         let rule = respond_rule_from_flow(&flow, "r1".into());
         assert_eq!(rule.matcher.method.as_deref(), Some("GET"));
@@ -1159,6 +1160,7 @@ mod tests {
             ttfb_ms: None,
             comment: None,
             availability: None,
+            imported: false,
         };
         // Host-specific full URL preserved (no collapsing) — one rule per request.
         let rule = respond_rule_from_flow(&flow, "r".into());
@@ -1208,6 +1210,7 @@ mod tests {
             ttfb_ms: None,
             comment: None,
             availability: None,
+            imported: false,
         };
 
         let rule = respond_rule_from_flow(&flow, "r".into());
@@ -1278,6 +1281,7 @@ mod tests {
             ttfb_ms: None,
             comment: None,
             availability: None,
+            imported: false,
         };
         let rule = respond_rule_from_flow(&flow, "r".into());
         match rule.action {
@@ -1329,6 +1333,7 @@ mod tests {
             ttfb_ms: None,
             comment: None,
             availability: None,
+            imported: false,
         };
         let rule = respond_rule_from_flow(&flow, "r".into());
         match rule.action {
@@ -1481,6 +1486,7 @@ mod tests {
             ttfb_ms: None,
             comment: None,
             availability: None,
+            imported: false,
         };
         let rule = respond_rule_from_flow(&flow, "r".into());
 
@@ -1500,6 +1506,7 @@ mod tests {
             ttfb_ms: None,
             comment: None,
             availability: None,
+            imported: false,
         };
         let rule = respond_rule_from_flow(&flow, "r".into());
 

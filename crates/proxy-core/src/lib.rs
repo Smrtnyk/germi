@@ -955,6 +955,19 @@ impl ProxyController {
         }
     }
 
+    /// Remove every live-captured (non-imported) flow, keeping the flows that were
+    /// loaded from a file (HAR / SAZ / `.germi`). This is the "clear the replay
+    /// noise, keep the imported reference" action: while replaying an imported
+    /// session, captured traffic piles up, and this prunes exactly that (issue
+    /// #49). Recorded on the undo timeline; a no-op when nothing is captured.
+    pub fn remove_captured_flows(&self) {
+        let ids = match self.shared.store.lock() {
+            Ok(store) => store.ids_where(|flow| !flow.imported),
+            Err(_) => Vec::new(),
+        };
+        self.remove_flows_tracked(&ids);
+    }
+
     /// Like [`clear_flows`](Self::clear_flows), but records the cleared snapshot
     /// so it can be undone.
     pub fn clear_flows_tracked(&self) {
@@ -1161,6 +1174,7 @@ mod tests {
             ttfb_ms: None,
             comment: None,
             availability: None,
+            imported: false,
         }
     }
 
@@ -1287,6 +1301,85 @@ mod tests {
             "removing ids that were never captured must not emit an event"
         );
         assert_eq!(c.shared.store.lock().expect("lock store").len(), 1);
+    }
+
+    #[test]
+    fn remove_captured_flows_keeps_imported_and_is_undoable() {
+        let c = controller();
+        // Two imported reference flows interleaved with two live captures.
+        let mut imp1 = flow("imp1");
+        imp1.imported = true;
+        let mut imp2 = flow("imp2");
+        imp2.imported = true;
+        c.shared.record_imported(imp1);
+        c.shared.record_new(flow("cap1"));
+        c.shared.record_imported(imp2);
+        c.shared.record_new(flow("cap2"));
+
+        // Subscribe after the inserts so the only event seen is the prune.
+        let mut rx = c.subscribe();
+        c.remove_captured_flows();
+
+        {
+            let store = c.shared.store.lock().expect("lock store");
+            assert!(store.get("imp1").is_some(), "imported flows are kept");
+            assert!(store.get("imp2").is_some());
+            assert!(store.get("cap1").is_none(), "captured flows are pruned");
+            assert!(store.get("cap2").is_none());
+            assert_eq!(store.ids(), vec!["imp1".to_string(), "imp2".to_string()]);
+        }
+        match rx.try_recv() {
+            Ok(FlowEvent::Removed { ids }) => {
+                assert_eq!(ids, vec!["cap1".to_string(), "cap2".to_string()]);
+            }
+            other => panic!("expected a Removed event for the captured flows, got {other:?}"),
+        }
+
+        // Recorded on the timeline: undo restores the pruned captures in place.
+        c.undo().expect("undo the capture prune");
+        let store = c.shared.store.lock().expect("lock store");
+        assert_eq!(
+            store.ids(),
+            ["imp1", "cap1", "imp2", "cap2"].map(str::to_string).to_vec(),
+            "undo restores captured flows to their original capture positions"
+        );
+    }
+
+    #[test]
+    fn remove_captured_flows_with_only_imported_emits_nothing() {
+        let c = controller();
+        let mut imp = flow("imp1");
+        imp.imported = true;
+        c.shared.record_imported(imp);
+        let mut rx = c.subscribe();
+        c.remove_captured_flows();
+        assert!(
+            rx.try_recv().is_err(),
+            "with nothing captured, the prune must not emit an event"
+        );
+        assert_eq!(c.shared.store.lock().expect("lock store").len(), 1);
+    }
+
+    #[test]
+    fn live_capture_is_not_imported_but_opened_flows_are() {
+        let c = controller();
+        c.shared.record_new(flow("live"));
+        assert_eq!(
+            c.list_flows().iter().find(|s| s.id == "live").map(|s| s.imported),
+            Some(false),
+            "a live proxy capture is not marked imported"
+        );
+
+        let har = br#"{"log":{"entries":[
+          {"request":{"url":"https://a/1"},"response":{"status":200,"headers":[{"name":"x","value":"1"}],"content":{}}}
+        ]}}"#;
+        c.open_capture(har, "har").expect("open har");
+        let summaries = c.list_flows();
+        assert!(!summaries.is_empty());
+        assert!(
+            summaries.iter().all(|s| s.imported),
+            "every flow loaded via open_capture is marked imported"
+        );
     }
 
     #[test]

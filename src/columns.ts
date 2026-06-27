@@ -81,6 +81,7 @@ const BUILTIN_COLUMNS: ColumnDef[] = [
       f.durationMs != null && f.ttfbMs != null ? `${Math.max(0, f.durationMs - f.ttfbMs)}` : "",
   },
   { id: "rule", label: "Mocked by", width: 150, text: (f) => f.matchedRule ?? "" },
+  { id: "origin", label: "Origin", width: 78, text: (f) => (f.imported ? "imported" : "") },
   { id: "comment", label: "Comment", width: 170, special: "comment", text: (f) => f.comment ?? "" },
 ];
 
@@ -98,7 +99,10 @@ export const PRESETS: { name: string; columns: string[] }[] = [
     name: "Sizes",
     columns: ["method", "path", "status", "reqSize", "respSize", "totalSize", "type"],
   },
-  { name: "Mocking", columns: ["method", "host", "path", "status", "rule", "comment"] },
+  {
+    name: "Mocking",
+    columns: ["method", "host", "path", "status", "origin", "rule", "comment"],
+  },
 ];
 
 export const DEFAULT_COLUMNS = PRESETS[1].columns;

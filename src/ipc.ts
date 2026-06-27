@@ -30,6 +30,7 @@ export const api = {
     invoke<FlowDetail | null>("get_flow", { id, decoded, full }),
   clearFlows: () => invoke<void>("clear_flows"),
   removeFlows: (ids: string[]) => invoke<void>("remove_flows", { ids }),
+  removeCapturedFlows: () => invoke<void>("remove_captured_flows"),
   setFlowComment: (id: string, comment: string | null) =>
     invoke<void>("set_flow_comment", { id, comment }),
 

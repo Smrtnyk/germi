@@ -17,6 +17,33 @@ interface Props {
   onCheckAvailability: () => void;
   /** Live progress while a check runs, or null when idle. */
   availabilityCheck: AvailabilityProgress | null;
+  /** Imported/captured split + the prune action for the "Delete captured" button. */
+  capturedDelete: CapturedDelete;
+}
+
+interface CapturedDelete {
+  /** How many live-captured (non-imported) flows are present. */
+  capturedCount: number;
+  /** How many imported (file-loaded) flows are present. */
+  importedCount: number;
+  /** Prune every live-captured flow, keeping the imported reference (issue #49). */
+  onDelete: () => void;
+}
+
+/** Appears only while replaying an imported session (some imported AND some
+ *  captured flows present) — one click prunes the live-capture noise that piles
+ *  up, keeping the imported reference. Undoable. */
+function DeleteCapturedButton({ capturedCount, importedCount, onDelete }: CapturedDelete) {
+  if (importedCount === 0 || capturedCount === 0) return null;
+  return (
+    <button
+      className="fchip delete-captured"
+      onClick={onDelete}
+      title="Remove every live-captured request, keeping the imported ones (undo with Ctrl/⌘ Z)"
+    >
+      Delete captured ({capturedCount})
+    </button>
+  );
 }
 
 function AvailabilityCheckButton({
@@ -38,6 +65,43 @@ function AvailabilityCheckButton({
   );
 }
 
+/** The trailing status cluster: the live "searching…" hint, the `N of M` match
+ *  count, and the clear-filters button (the last two only with a filter active). */
+function FilterStatus({
+  searching,
+  matchCount,
+  total,
+  onClearAll,
+}: {
+  searching: boolean;
+  matchCount: number | null;
+  total: number;
+  onClearAll: () => void;
+}) {
+  const active = matchCount !== null;
+  return (
+    <div className="filter-status">
+      {searching && <span className="searching">searching…</span>}
+      {active && (
+        <span className={`match-count ${matchCount === 0 ? "zero" : ""}`}>
+          {matchCount === 0 ? (
+            <>no matches of {total}</>
+          ) : (
+            <>
+              <strong>{matchCount}</strong> of {total} match
+            </>
+          )}
+        </span>
+      )}
+      {active && (
+        <button className="chips-clear" onClick={onClearAll} title="Clear all filters">
+          Clear filters
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function FilterChips({
   typeChips,
   statusChips,
@@ -51,8 +115,8 @@ export function FilterChips({
   total,
   onCheckAvailability,
   availabilityCheck,
+  capturedDelete,
 }: Props) {
-  const active = matchCount !== null;
   const segments = filter.trim() ? rawSegments(filter) : [];
 
   function removeSegment(idx: number) {
@@ -98,25 +162,13 @@ export function FilterChips({
           </button>
         ))}
         <AvailabilityCheckButton onCheck={onCheckAvailability} progress={availabilityCheck} />
-        <div className="filter-status">
-          {searching && <span className="searching">searching…</span>}
-          {active && (
-            <span className={`match-count ${matchCount === 0 ? "zero" : ""}`}>
-              {matchCount === 0 ? (
-                <>no matches of {total}</>
-              ) : (
-                <>
-                  <strong>{matchCount}</strong> of {total} match
-                </>
-              )}
-            </span>
-          )}
-          {active && (
-            <button className="chips-clear" onClick={onClearAll} title="Clear all filters">
-              Clear filters
-            </button>
-          )}
-        </div>
+        <DeleteCapturedButton {...capturedDelete} />
+        <FilterStatus
+          searching={searching}
+          matchCount={matchCount}
+          total={total}
+          onClearAll={onClearAll}
+        />
       </div>
     </>
   );

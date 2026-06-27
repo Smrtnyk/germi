@@ -20,6 +20,7 @@ function summary(overrides: Partial<FlowSummary> = {}): FlowSummary {
     timestampMs: 0,
     comment: null,
     availability: null,
+    imported: false,
     extra: {},
     ...overrides,
   };
@@ -94,6 +95,22 @@ describe("parseFilter summary matching", () => {
     it("derives ext from the path", () => {
       expect(matches("ext:js", summary({ path: "/app.min.js?v=1" }))).toBe(true);
       expect(matches("ext:js", summary({ path: "/api/users" }))).toBe(false);
+    });
+
+    it("splits imported vs captured flows with is:", () => {
+      const imp = summary({ imported: true });
+      const cap = summary({ imported: false });
+      expect(matches("is:imported", imp)).toBe(true);
+      expect(matches("is:imported", cap)).toBe(false);
+      expect(matches("is:captured", cap)).toBe(true);
+      expect(matches("is:live", cap)).toBe(true);
+      expect(matches("is:captured", imp)).toBe(false);
+      // negation is the complement
+      expect(matches("-is:imported", cap)).toBe(true);
+      expect(matches("-is:imported", imp)).toBe(false);
+      // an unknown is: value matches nothing, even negated (no flip to all)
+      expect(matches("is:bogus", imp)).toBe(false);
+      expect(matches("-is:bogus", imp)).toBe(false);
     });
 
     it("compares sizes with k/m suffixes", () => {

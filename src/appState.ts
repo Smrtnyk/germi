@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type MutableRefObject,
 } from "react";
 
 import { announce } from "./announce";
@@ -1028,6 +1029,62 @@ async function copyFlowBodyAction(id: string, decode: boolean, notify: Notify, s
   }
 }
 
+type PendingSelect = { nextId: string | null; deleted: Set<string> } | null;
+
+/** Imported vs live-captured split, for the contextual "Delete captured" button. */
+function countFlows(flows: FlowSummary[]): { imported: number; captured: number } {
+  let imported = 0;
+  for (const f of flows) if (f.imported) imported++;
+  return { imported, captured: flows.length - imported };
+}
+
+/** Prune every live-captured (non-imported) flow, keeping the imported reference
+ *  — the "clear the replay noise" action (issue #49). Reuses the same deferred-
+ *  selection machinery as deleteSelected (the backend `removed` event drops the
+ *  rows; it's undoable via Ctrl/⌘ Z). */
+function deleteCapturedAction(
+  flows: FlowSummary[],
+  orderRef: MutableRefObject<string[]>,
+  selectedId: string | null,
+  pendingSelectRef: MutableRefObject<PendingSelect>,
+  notify: Notify,
+  setError: SetError,
+): void {
+  const capturedIds = flows.filter((f) => !f.imported).map((f) => f.id);
+  if (capturedIds.length === 0) {
+    notify("info", "No captured requests to delete");
+    return;
+  }
+  const deleted = new Set(capturedIds);
+  pendingSelectRef.current = {
+    nextId: nextIdAfterDelete(orderRef.current, deleted, selectedId),
+    deleted,
+  };
+  void api
+    .removeCapturedFlows()
+    .then(() => notify("success", `Deleted ${plural(capturedIds.length, "captured request")}`))
+    .catch((e) => {
+      pendingSelectRef.current = null;
+      setError(String(e));
+    });
+}
+
+/** Bundles the imported/captured split and the "Delete captured" action (issue
+ *  #49) so the composition root just wires it, like the other feature hooks. */
+function useCapturedDelete(
+  flows: FlowSummary[],
+  orderRef: MutableRefObject<string[]>,
+  selectedId: string | null,
+  pendingSelectRef: MutableRefObject<PendingSelect>,
+  notify: Notify,
+  setError: SetError,
+) {
+  const counts = useMemo(() => countFlows(flows), [flows]);
+  const deleteCaptured = () =>
+    deleteCapturedAction(flows, orderRef, selectedId, pendingSelectRef, notify, setError);
+  return { deleteCaptured, capturedCount: counts.captured, importedCount: counts.imported };
+}
+
 function useViewState() {
   const [rightTab, setRightTabState] = useState<RightTab>(() =>
     loadString("germi.rightTab", ["inspector", "autoresponder"] as const, "inspector"),
@@ -1184,7 +1241,7 @@ export function useAppState() {
   // deleted rows have actually been pruned by the backend's `removed` event,
   // so the row-swap and the highlight move land in the same frame instead of
   // "next lights up, then old pops out and lit row jumps up" (issue #4).
-  const pendingSelectRef = useRef<{ nextId: string | null; deleted: Set<string> } | null>(null);
+  const pendingSelectRef = useRef<PendingSelect>(null);
   useEffect(() => {
     const pending = pendingSelectRef.current;
     if (!pending) return;
@@ -1199,6 +1256,15 @@ export function useAppState() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flowStore.flows]);
+
+  const captured = useCapturedDelete(
+    flowStore.flows,
+    flowStore.orderRef,
+    selection.selectedId,
+    pendingSelectRef,
+    notify,
+    setError,
+  );
 
   const proxy = useProxyControl(
     settings.settings,
@@ -1416,6 +1482,9 @@ export function useAppState() {
     copyFlowBody,
     clearTraffic,
     deleteSelected,
+    deleteCaptured: captured.deleteCaptured,
+    capturedCount: captured.capturedCount,
+    importedCount: captured.importedCount,
     refreshCa,
     activeScenario,
     matchCount,

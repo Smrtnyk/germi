@@ -171,6 +171,9 @@ pub fn import_session(bytes: &[u8]) -> Result<Vec<Flow>> {
                 ttfb_ms: sf.ttfb_ms,
                 comment: sf.comment,
                 availability: None,
+                // A `.germi` file is itself a capture loaded from disk, so its
+                // flows count as imported (kept by "Delete captured", issue #49).
+                imported: true,
             }
         })
         .collect();
@@ -208,10 +211,14 @@ mod tests {
             ttfb_ms: Some(3),
             comment: Some("note".into()),
             availability: None,
+            imported: false,
         };
         let bytes = export_session(&[flow]);
         let back = import_session(&bytes).unwrap();
         assert_eq!(back.len(), 1);
+        // The session format does not carry the in-memory `imported` flag; a
+        // reopened `.germi` is treated as imported regardless of what it held.
+        assert!(back[0].imported, "reopened session flows are marked imported");
         let f = &back[0];
         assert_eq!(f.request.method, "GET");
         assert_eq!(f.request.body, vec![1, 2, 3]);
