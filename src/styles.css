@@ -2433,7 +2433,6 @@ body.resizing.resizing-v * {
   color: #1a1205;
   border-radius: 2px;
 }
-.vline.active .vmatch,
 .vmatch.active {
   background: var(--accent);
   color: #04201c;
