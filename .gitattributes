@@ -1,0 +1,20 @@
+# Normalize line endings. Germi is cross-platform (Windows dev + Linux CI) and
+# the whole tree is LF; without this, core.autocrlf=true on Windows flags every
+# text file as modified (LF<->CRLF churn). Store LF in the repo and check out LF
+# everywhere, regardless of each machine's core.autocrlf setting.
+* text=auto eol=lf
+
+# Binary assets — never run through line-ending normalization.
+*.png   binary
+*.ico   binary
+*.icns  binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.wasm  binary
+*.der   binary
