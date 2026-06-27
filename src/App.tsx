@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
 import { useAppState, type RightMode, type RightTab } from "./appState";
+import {
+  accelFromEvent,
+  prettyShortcut,
+  reverseLookup,
+  type Accel,
+  type Bindings,
+  type CommandId,
+} from "./shortcuts";
 import { hasFlowDrag } from "./dnd";
 import type { CaInfo, FlowDetail, FlowSummary, ProxySettings } from "./types";
 import { Toolbar } from "./components/Toolbar";
@@ -39,7 +47,7 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       id: "focus-filter",
       group: "Traffic",
       label: "Focus filter",
-      shortcut: "/",
+      shortcut: prettyShortcut(s.shortcuts["focus-filter"]),
       run: () => s.filterInputRef.current?.focus(),
     },
     { id: "clear", group: "Traffic", label: "Clear traffic", run: s.requestClearTraffic },
@@ -65,28 +73,28 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       id: "save",
       group: "Session",
       label: "Save session…",
-      shortcut: "Ctrl/⌘ S",
+      shortcut: prettyShortcut(s.shortcuts.save),
       run: s.session.saveSession,
     },
     {
       id: "open",
       group: "Session",
       label: "Open… (.germi, HAR, SAZ)",
-      shortcut: "Ctrl/⌘ O",
+      shortcut: prettyShortcut(s.shortcuts.open),
       run: s.requestOpenCapture,
     },
     {
       id: "show-inspector",
       group: "View",
       label: "Show Inspector",
-      shortcut: "Ctrl/⌘ 1",
+      shortcut: prettyShortcut(s.shortcuts["show-inspector"]),
       run: () => s.setRightTab("inspector"),
     },
     {
       id: "show-auto",
       group: "View",
       label: "Show Autoresponder",
-      shortcut: "Ctrl/⌘ 2",
+      shortcut: prettyShortcut(s.shortcuts["show-autoresponder"]),
       run: () => s.setRightTab("autoresponder"),
     },
     {
@@ -142,67 +150,59 @@ function isTyping(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
 }
 
-function runModShortcut(
-  e: KeyboardEvent,
-  k: string,
+function commandActions(
   s: AppStateValue,
   setPaletteOpen: Dispatch<SetStateAction<boolean>>,
-): boolean {
-  switch (k) {
-    case "k":
-      setPaletteOpen((o) => !o);
-      return true;
-    case "f":
-      s.filterInputRef.current?.focus();
-      return true;
-    case "s":
-      void s.session.saveSession();
-      return true;
-    case "o":
-      s.requestOpenCapture();
-      return true;
-    case "u":
-      s.copySelectedUrl();
-      return true;
-    case "1":
-      s.setRightTab("inspector");
-      return true;
-    case "2":
-      s.setRightTab("autoresponder");
-      return true;
-    case "z":
-    case "y":
-      // Global undo/redo — pass through to CodeMirror / inputs when one is
-      // focused so they keep their own native undo. The History panel always works.
-      if (isTyping(e.target)) return false;
-      if (k === "y" || e.shiftKey) s.history.redo();
-      else s.history.undo();
-      return true;
-    default:
-      return false;
+): Record<CommandId, () => void> {
+  return {
+    palette: () => setPaletteOpen((o) => !o),
+    "focus-filter": () => s.filterInputRef.current?.focus(),
+    save: () => void s.session.saveSession(),
+    open: () => s.requestOpenCapture(),
+    "copy-url": () => s.copySelectedUrl(),
+    "show-inspector": () => s.setRightTab("inspector"),
+    "show-autoresponder": () => s.setRightTab("autoresponder"),
+    "edit-mock-body": () => s.focusMockBody(),
+  };
+}
+
+// Fixed Ctrl/⌘ combos that aren't user-rebindable: select-all and undo/redo.
+// Other Mod combos (copy / paste / cut, …) fall through to the browser.
+function handleModShortcut(e: KeyboardEvent, s: AppStateValue) {
+  const k = e.key.toLowerCase();
+  if (k === "a" && !isTyping(e.target)) {
+    e.preventDefault();
+    s.selectAllVisible();
+    return;
+  }
+  // Undo/redo — pass through to CodeMirror / inputs when one is focused so they
+  // keep their native undo. The History panel always works otherwise.
+  if ((k === "z" || k === "y") && !isTyping(e.target)) {
+    if (k === "y" || e.shiftKey) s.history.redo();
+    else s.history.undo();
+    e.preventDefault();
   }
 }
 
 function handleShortcut(
   e: KeyboardEvent,
   s: AppStateValue,
-  setPaletteOpen: Dispatch<SetStateAction<boolean>>,
+  reverse: Map<Accel, CommandId>,
+  actions: Record<CommandId, () => void>,
   setCheatOpen: (v: boolean) => void,
 ) {
-  const mod = e.metaKey || e.ctrlKey;
-  if (mod) {
-    const k = e.key.toLowerCase();
-    if (k === "a" && !isTyping(e.target)) {
-      e.preventDefault();
-      s.selectAllVisible();
-      return;
-    }
-    if (runModShortcut(e, k, s, setPaletteOpen)) e.preventDefault();
+  // Configurable commands run first; only their accels live in `reverse`, so the
+  // fixed combos keep their exact semantics. All eight fire even while typing
+  // (e.g. Ctrl+S in the filter), matching the previous behavior.
+  const accel = accelFromEvent(e);
+  const cmd = accel ? reverse.get(accel) : undefined;
+  if (cmd) {
+    e.preventDefault();
+    actions[cmd]();
     return;
   }
-  if (e.key === "F2") {
-    e.preventDefault();
-    s.focusMockBody();
+  if (e.metaKey || e.ctrlKey) {
+    handleModShortcut(e, s);
     return;
   }
   if (isTyping(e.target)) return;
@@ -356,6 +356,8 @@ function AppDialogs({
   onSettingsImported,
   columnOrder,
   onColumnOrderChange,
+  shortcuts,
+  onShortcutsChange,
   running,
   onCaChanged,
   onSettingsClose,
@@ -369,6 +371,8 @@ function AppDialogs({
   onSettingsImported: (s: ProxySettings) => void;
   columnOrder: string[];
   onColumnOrderChange: (order: string[]) => void;
+  shortcuts: Bindings;
+  onShortcutsChange: (b: Bindings) => void;
   running: boolean;
   onCaChanged: () => void;
   onSettingsClose: () => void;
@@ -383,6 +387,8 @@ function AppDialogs({
           onImportApplied={onSettingsImported}
           columnOrder={columnOrder}
           onColumnOrderChange={onColumnOrderChange}
+          shortcuts={shortcuts}
+          onShortcutsChange={onShortcutsChange}
           running={running}
           onCaChanged={onCaChanged}
           onClose={onSettingsClose}
@@ -398,9 +404,11 @@ export function App() {
   const [cheatOpen, setCheatOpen] = useState(false);
 
   const actions = useMemo(() => buildActions(s), [s]);
+  const reverse = useMemo(() => reverseLookup(s.shortcuts), [s.shortcuts]);
+  const cmdActions = commandActions(s, setPaletteOpen);
 
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => {});
-  keyRef.current = (e: KeyboardEvent) => handleShortcut(e, s, setPaletteOpen, setCheatOpen);
+  keyRef.current = (e: KeyboardEvent) => handleShortcut(e, s, reverse, cmdActions, setCheatOpen);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => keyRef.current(e);
@@ -550,6 +558,7 @@ export function App() {
           allowRemote={s.settings.settings.allowRemote}
           flowCount={s.flowStore.orderRef.current.length}
           activeScenario={s.activeScenario}
+          paletteAccel={prettyShortcut(s.shortcuts.palette)}
           onOpenPalette={() => setPaletteOpen(true)}
           onShowShortcuts={() => setCheatOpen(true)}
         />
@@ -564,6 +573,8 @@ export function App() {
           onSettingsImported={s.applyImportedSettings}
           columnOrder={s.columns.columnOrder}
           onColumnOrderChange={s.columns.setColumnOrder}
+          shortcuts={s.shortcuts}
+          onShortcutsChange={s.setShortcuts}
           running={s.proxy.running}
           onCaChanged={s.refreshCa}
           onSettingsClose={() => s.settings.setSettingsOpen(false)}
@@ -591,7 +602,7 @@ export function App() {
         )}
 
         {paletteOpen && <CommandPalette actions={actions} onClose={() => setPaletteOpen(false)} />}
-        {cheatOpen && <Shortcuts onClose={() => setCheatOpen(false)} />}
+        {cheatOpen && <Shortcuts bindings={s.shortcuts} onClose={() => setCheatOpen(false)} />}
       </div>
 
       <ToastHost toasts={s.toasts} onDismiss={s.dismissToast} />

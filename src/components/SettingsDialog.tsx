@@ -2,6 +2,15 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import { api } from "../ipc";
 import { accelFromKeyboardEvent, prettyAccel } from "../hotkey";
+import {
+  accelFromEvent,
+  DEFAULT_SHORTCUTS,
+  findConflict,
+  prettyShortcut,
+  SHORTCUT_COMMANDS,
+  type Bindings,
+  type CommandId,
+} from "../shortcuts";
 import { useHotkeyMode } from "../useHotkeyMode";
 import type { ProxySettings } from "../types";
 import { useToast } from "../toast";
@@ -17,6 +26,8 @@ interface SectionProps {
 interface SectionCtx extends SectionProps {
   columnOrder: string[];
   onColumnOrderChange: (order: string[]) => void;
+  shortcuts: Bindings;
+  onShortcutsChange: (b: Bindings) => void;
   running: boolean;
   onCaChanged: () => void;
 }
@@ -107,7 +118,12 @@ const SECTIONS: Section[] = [
   {
     id: "shortcuts",
     label: "Shortcuts",
-    render: (c) => <HotkeySection settings={c.settings} onChange={c.onChange} />,
+    render: (c) => (
+      <>
+        <HotkeySection settings={c.settings} onChange={c.onChange} />
+        <InAppShortcutsSection bindings={c.shortcuts} onChange={c.onShortcutsChange} />
+      </>
+    ),
   },
   {
     id: "columns",
@@ -351,6 +367,95 @@ function HotkeySection({ settings, onChange }: SectionProps) {
   );
 }
 
+function labelOf(id: CommandId): string {
+  return SHORTCUT_COMMANDS.find((c) => c.id === id)?.label ?? id;
+}
+
+/** Editor for the in-app (focus-only) keyboard shortcuts. Bindings live in
+ *  localStorage (frontend-only), so this edits them directly rather than through
+ *  ProxySettings. The recorder mirrors HotkeySection's capture-phase listener. */
+function InAppShortcutsSection({
+  bindings,
+  onChange,
+}: {
+  bindings: Bindings;
+  onChange: (b: Bindings) => void;
+}) {
+  const [recordingId, setRecordingId] = useState<CommandId | null>(null);
+  const [conflict, setConflict] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!recordingId) return;
+    const id = recordingId;
+    function onKey(e: KeyboardEvent) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        setRecordingId(null);
+        return;
+      }
+      const accel = accelFromEvent(e);
+      if (!accel) return;
+      const clash = findConflict(bindings, accel, id);
+      if (clash) {
+        setConflict(
+          clash.kind === "reserved"
+            ? `${prettyShortcut(accel)} is reserved by Germi`
+            : `${prettyShortcut(accel)} is already used by “${labelOf(clash.id)}”`,
+        );
+        return;
+      }
+      onChange({ ...bindings, [id]: accel });
+      setRecordingId(null);
+      setConflict(null);
+    }
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [recordingId, bindings, onChange]);
+
+  function record(id: CommandId) {
+    setConflict(null);
+    setRecordingId((cur) => (cur === id ? null : id));
+  }
+
+  return (
+    <div className="settings-pane">
+      <h4>In-app shortcuts</h4>
+      <p className="muted small">
+        These work while Germi is focused. Click Record, then press the keys (Esc cancels). Use
+        Ctrl, Alt, or ⌘ — optionally with Shift — plus a key, or a function key like <kbd>F2</kbd>.
+      </p>
+      {SHORTCUT_COMMANDS.map((c) => {
+        const recording = recordingId === c.id;
+        return (
+          <div className="row hotkey-row" key={c.id}>
+            <label>{c.label}</label>
+            <span className={`btn small hotkey-display ${recording ? "recording" : ""}`}>
+              {recording ? "Press keys…" : prettyShortcut(bindings[c.id])}
+            </span>
+            <button className="btn small" onClick={() => record(c.id)}>
+              {recording ? "Cancel" : "Record"}
+            </button>
+            <button
+              className="btn small"
+              onClick={() => onChange({ ...bindings, [c.id]: DEFAULT_SHORTCUTS[c.id] })}
+              disabled={bindings[c.id] === DEFAULT_SHORTCUTS[c.id] || recording}
+            >
+              Reset
+            </button>
+          </div>
+        );
+      })}
+      {conflict && <p className="warn small">⚠ {conflict}</p>}
+      <div className="col-add-list">
+        <button className="btn small" onClick={() => onChange(DEFAULT_SHORTCUTS)}>
+          Reset all to defaults
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function CertificatesSection({
   running,
   onCaChanged,
@@ -498,6 +603,8 @@ interface Props {
   onImportApplied: (s: ProxySettings) => void;
   columnOrder: string[];
   onColumnOrderChange: (order: string[]) => void;
+  shortcuts: Bindings;
+  onShortcutsChange: (b: Bindings) => void;
   running: boolean;
   onCaChanged: () => void;
   onClose: () => void;
@@ -518,6 +625,8 @@ export function SettingsDialog({
   onImportApplied,
   columnOrder,
   onColumnOrderChange,
+  shortcuts,
+  onShortcutsChange,
   running,
   onCaChanged,
   onClose,
@@ -585,6 +694,8 @@ export function SettingsDialog({
             onChange,
             columnOrder,
             onColumnOrderChange,
+            shortcuts,
+            onShortcutsChange,
             running,
             onCaChanged,
           })}
