@@ -14,6 +14,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import type { Availability, FlowSummary } from "../types";
 import type { ColumnDef } from "../columns";
 import { availabilityLabel } from "../availability";
+import { flowUrl } from "../flowUrl";
 import { dragFlowIds, encodeFlowIds, FLOW_DRAG_MIME } from "../dnd";
 import { useToast } from "../toast";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
@@ -417,10 +418,6 @@ interface MenuActions {
   onDeleteSelected: () => void;
 }
 
-function urlOf(f: FlowSummary): string {
-  return `${f.scheme}://${f.host}${f.path}`;
-}
-
 function menuItemsFor(
   f: FlowSummary,
   a: MenuActions,
@@ -434,7 +431,7 @@ function menuItemsFor(
     {
       label: "Copy URL",
       onClick: () => {
-        void navigator.clipboard.writeText(urlOf(f));
+        void navigator.clipboard.writeText(flowUrl(f));
         notify("success", "URL copied");
       },
     },
