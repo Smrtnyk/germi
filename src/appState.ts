@@ -22,6 +22,7 @@ import { toCurl } from "./curl";
 import { flowUrl } from "./flowUrl";
 import { focusMockResponseBody } from "./focusMockBody";
 import { nextIdAfterDelete, toggleSelection } from "./selection";
+import { DEFAULT_SHORTCUTS, resolveBindings, type Bindings } from "./shortcuts";
 import {
   appendBulkRuleSummaries,
   appendRuleSummary,
@@ -979,6 +980,22 @@ function usePersistentColumns(headerColumns: string[]) {
   return { columnOrder, setColumnOrder, visibleColumns };
 }
 
+function loadShortcuts(): Bindings {
+  try {
+    return resolveBindings(JSON.parse(localStorage.getItem("germi.shortcuts") ?? "null"));
+  } catch {
+    return DEFAULT_SHORTCUTS;
+  }
+}
+
+function usePersistentShortcuts() {
+  const [shortcuts, setShortcuts] = useState<Bindings>(loadShortcuts);
+  useEffect(() => {
+    persist("germi.shortcuts", JSON.stringify(shortcuts));
+  }, [shortcuts]);
+  return { shortcuts, setShortcuts };
+}
+
 function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
@@ -1280,6 +1297,7 @@ export function useAppState() {
   const ar = useAutoresponder(setError, setRightTab, notify, autoresponderActive);
   const history = useHistory(ar.refresh, setError);
   const columns = usePersistentColumns(settings.settings.headerColumns);
+  const shortcuts = usePersistentShortcuts();
   const session = useSession(
     setError,
     () => {
@@ -1488,6 +1506,8 @@ export function useAppState() {
     ar,
     history,
     columns,
+    shortcuts: shortcuts.shortcuts,
+    setShortcuts: shortcuts.setShortcuts,
     session,
     trafficSplit,
     saveSettings,

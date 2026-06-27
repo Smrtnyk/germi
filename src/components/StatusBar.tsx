@@ -7,6 +7,8 @@ interface Props {
   activeScenario: string | null;
   onOpenPalette: () => void;
   onShowShortcuts: () => void;
+  /** Pretty label of the configurable command-palette shortcut, for the tooltip. */
+  paletteAccel: string;
 }
 
 export function StatusBar({
@@ -17,6 +19,7 @@ export function StatusBar({
   activeScenario,
   onOpenPalette,
   onShowShortcuts,
+  paletteAccel,
 }: Props) {
   const host = allowRemote ? "0.0.0.0" : "127.0.0.1";
   return (
@@ -37,7 +40,11 @@ export function StatusBar({
         )}
       </span>
       <span className="sep">·</span>
-      <button className="status-key" onClick={onOpenPalette} title="Command palette (Ctrl/⌘ K)">
+      <button
+        className="status-key"
+        onClick={onOpenPalette}
+        title={`Command palette (${paletteAccel})`}
+      >
         ⌘K
       </button>
       <button className="status-key" onClick={onShowShortcuts} title="Keyboard shortcuts (?)">
