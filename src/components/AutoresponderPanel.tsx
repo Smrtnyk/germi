@@ -1694,6 +1694,7 @@ function RespondFields({
   setAction: (patch: Partial<Action>, tag?: HistoryTag) => void;
 }) {
   const [maximized, setMaximized] = useState(false);
+  const [wrap, setWrap] = useState(false);
   const contentType = action.contentType ?? "";
   const textual = isTextualContentType(contentType);
 
@@ -1704,6 +1705,7 @@ function RespondFields({
         contentType={contentType}
         onChange={(b) => setAction({ body: b })}
         fill={fill}
+        wrap={wrap}
       />
     </Suspense>
   );
@@ -1737,6 +1739,13 @@ function RespondFields({
               }}
             >
               Format
+            </button>
+            <button
+              className={wrap ? "btn small active" : "btn small"}
+              title="Toggle word wrap"
+              onClick={() => setWrap((w) => !w)}
+            >
+              Wrap
             </button>
             <button
               className="btn small"

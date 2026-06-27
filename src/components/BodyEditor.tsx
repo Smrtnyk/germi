@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import CodeMirror from "@uiw/react-codemirror";
+import CodeMirror, { EditorView } from "@uiw/react-codemirror";
 import { json, jsonParseLinter } from "@codemirror/lang-json";
 import { html } from "@codemirror/lang-html";
 import { javascript } from "@codemirror/lang-javascript";
@@ -25,11 +25,17 @@ interface Props {
   contentType: string;
   /** Fill the available height (used inside the maximized overlay). */
   fill?: boolean;
+  /** Soft-wrap long lines instead of scrolling horizontally. */
+  wrap?: boolean;
 }
 
 /** A content-type-aware code editor (CodeMirror 6) for mock response bodies. */
-export function BodyEditor({ value, onChange, contentType, fill }: Props) {
-  const extensions = useMemo(() => languageFor(contentType), [contentType]);
+export function BodyEditor({ value, onChange, contentType, fill, wrap }: Props) {
+  const extensions = useMemo(
+    () =>
+      wrap ? [...languageFor(contentType), EditorView.lineWrapping] : languageFor(contentType),
+    [contentType, wrap],
+  );
   return (
     <CodeMirror
       className={fill ? "cm-body cm-fill" : "cm-body"}
