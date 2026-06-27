@@ -171,7 +171,19 @@ function useFind(
   const activeOcc = active ? active.occ : -1;
 
   useEffect(() => {
-    if (activeLine >= 0) virtualizer.scrollToIndex(activeLine, { align: "center" });
+    if (activeLine < 0) return;
+    // Step 1: scroll the row into the virtual window so its DOM exists.
+    virtualizer.scrollToIndex(activeLine, { align: "center" });
+    // Step 2: row-centering only handles vertical placement of the whole row,
+    // which misses the exact hit on a wrapped row taller than the viewport and
+    // never scrolls horizontally for a long unwrapped line. Once the row has
+    // rendered, bring the active occurrence itself into view in both axes.
+    const raf = requestAnimationFrame(() => {
+      virtualizer.scrollElement
+        ?.querySelector(".vmatch.active")
+        ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+    return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeLine, activeOcc, matches]);
 
@@ -670,29 +682,18 @@ function HexToggle({
 function TextActions({
   wrap,
   setWrap,
-  find,
 }: {
   wrap: boolean;
   setWrap: React.Dispatch<React.SetStateAction<boolean>>;
-  find: InspectorFind;
 }) {
   return (
-    <>
-      <button
-        className={wrap ? "btn active small" : "btn ghost small"}
-        title="Toggle word wrap"
-        onClick={() => setWrap((w) => !w)}
-      >
-        Wrap
-      </button>
-      <button
-        className={find.open ? "btn active small" : "btn ghost small"}
-        title="Find (Ctrl/⌘ F)"
-        onClick={() => (find.open ? find.close() : find.openFind(undefined, "body"))}
-      >
-        Find
-      </button>
-    </>
+    <button
+      className={wrap ? "btn active small" : "btn ghost small"}
+      title="Toggle word wrap"
+      onClick={() => setWrap((w) => !w)}
+    >
+      Wrap
+    </button>
   );
 }
 
@@ -707,7 +708,6 @@ function BodyBar({
   setShowHex,
   wrap,
   setWrap,
-  find,
   copy,
   onMaximize,
 }: {
@@ -721,7 +721,6 @@ function BodyBar({
   setShowHex: React.Dispatch<React.SetStateAction<boolean>>;
   wrap: boolean;
   setWrap: React.Dispatch<React.SetStateAction<boolean>>;
-  find: InspectorFind;
   copy: (label: string, value: string) => void;
   onMaximize?: () => void;
 }) {
@@ -734,7 +733,7 @@ function BodyBar({
       <div className="body-actions">
         {kind === "text" && canPretty && <PrettyRawToggle view={view} setView={setView} />}
         {kind === "binary" && <HexToggle showHex={showHex} setShowHex={setShowHex} />}
-        {kind === "text" && <TextActions wrap={wrap} setWrap={setWrap} find={find} />}
+        {kind === "text" && <TextActions wrap={wrap} setWrap={setWrap} />}
         <button
           className="btn ghost small"
           title="Copy body"
@@ -823,7 +822,6 @@ function BodyRegion({
         setShowHex={setShowHex}
         wrap={wrap}
         setWrap={setWrap}
-        find={find}
         copy={copy}
         onMaximize={onMaximize}
       />

@@ -267,6 +267,7 @@ function RightPanelHeader({
   setRightMode,
   activeScenario,
   onCollapse,
+  onOpenFind,
 }: {
   rightTab: RightTab;
   setRightTab: (tab: RightTab) => void;
@@ -274,6 +275,7 @@ function RightPanelHeader({
   setRightMode: (mode: RightMode) => void;
   activeScenario: string | null;
   onCollapse: () => void;
+  onOpenFind: () => void;
 }) {
   return (
     <div className="right-header">
@@ -299,6 +301,15 @@ function RightPanelHeader({
       )}
       {split && <span className="split-label">Inspector + Autoresponder</span>}
       <div className="spacer" />
+      {(split || rightTab === "inspector") && (
+        <button
+          className="btn ghost small"
+          title="Search the inspected request & response (Ctrl/⌘ F)"
+          onClick={onOpenFind}
+        >
+          🔎 Search
+        </button>
+      )}
       <button
         className={split ? "btn active small" : "btn ghost small"}
         title={split ? "Show one panel at a time" : "Show Inspector and Autoresponder together"}
@@ -361,6 +372,7 @@ function RightPanel({
         setRightMode={setRightMode}
         activeScenario={activeScenario}
         onCollapse={onCollapse}
+        onOpenFind={() => inspector.inspectorFindRef.current?.openFind(undefined, "body")}
       />
 
       <div className={`right-content ${split ? "split" : ""}`}>
