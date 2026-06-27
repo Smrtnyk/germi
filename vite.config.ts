@@ -15,8 +15,11 @@ export default defineConfig({
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
     watch: {
-      // Don't reload the dev server when Rust files change.
-      ignored: ["**/src-tauri/**"],
+      // Don't reload the dev server when Rust files change. This is a Cargo
+      // workspace, so build output lands in target/ at the REPO ROOT (not under
+      // src-tauri/) — watching it races the linker writing germi_lib.dll and
+      // crashes Vite's file watcher with EBUSY on Windows.
+      ignored: ["**/src-tauri/**", "**/target/**"],
     },
   },
 });
