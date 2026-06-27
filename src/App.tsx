@@ -161,6 +161,9 @@ function runModShortcut(
     case "o":
       s.requestOpenCapture();
       return true;
+    case "u":
+      s.copySelectedUrl();
+      return true;
     case "1":
       s.setRightTab("inspector");
       return true;
@@ -195,6 +198,11 @@ function handleShortcut(
       return;
     }
     if (runModShortcut(e, k, s, setPaletteOpen)) e.preventDefault();
+    return;
+  }
+  if (e.key === "F2") {
+    e.preventDefault();
+    s.focusMockBody();
     return;
   }
   if (isTyping(e.target)) return;

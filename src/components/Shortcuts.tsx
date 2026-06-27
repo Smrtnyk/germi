@@ -21,6 +21,7 @@ const GROUPS: { title: string; rows: { keys: string; desc: string }[] }[] = [
       { keys: "Home / End", desc: "Jump to first / last flow" },
       { keys: "Esc", desc: "Clear selection" },
       { keys: "Delete / Backspace", desc: "Delete selected requests" },
+      { keys: "Ctrl / ⌘ U", desc: "Copy URL of selected request" },
       { keys: "Right-click", desc: "Row actions (mock, copy, filter…)" },
     ],
   },
@@ -29,6 +30,7 @@ const GROUPS: { title: string; rows: { keys: string; desc: string }[] }[] = [
     rows: [
       { keys: "Ctrl / ⌘ 1", desc: "Show Inspector" },
       { keys: "Ctrl / ⌘ 2", desc: "Show Autoresponder" },
+      { keys: "F2", desc: "Edit mock response body" },
     ],
   },
 ];

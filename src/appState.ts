@@ -19,6 +19,8 @@ import { useProxyIndicator } from "./useProxyIndicator";
 import { useSystemHotkeys } from "./useSystemHotkeys";
 import { useToasts, type Notify } from "./toast";
 import { toCurl } from "./curl";
+import { flowUrl } from "./flowUrl";
+import { focusMockResponseBody } from "./focusMockBody";
 import { nextIdAfterDelete, toggleSelection } from "./selection";
 import {
   appendBulkRuleSummaries,
@@ -1370,6 +1372,24 @@ export function useAppState() {
   const copyFlowAsCurl = (id: string) => copyFlowAsCurlAction(id, notify, setError);
   const copyFlowBody = (id: string) => copyFlowBodyAction(id, decode, notify, setError);
 
+  function copySelectedUrl() {
+    const fs = selectedSummary;
+    if (!fs) {
+      notify("info", "No request selected");
+      return;
+    }
+    void navigator.clipboard.writeText(flowUrl(fs));
+    notify("success", "URL copied");
+  }
+
+  // F2: reveal the Autoresponder (un-collapse / switch to its tab in single
+  // mode), then focus the mock response-body editor if a respond rule is open.
+  function focusMockBody() {
+    if (rightCollapsed) setRightCollapsed(false);
+    if (rightMode === "single") setRightTab("autoresponder");
+    focusMockResponseBody();
+  }
+
   function clearTraffic() {
     void api.clearFlows();
     selection.clearSelection();
@@ -1480,6 +1500,8 @@ export function useAppState() {
     excludeHost,
     copyFlowAsCurl,
     copyFlowBody,
+    copySelectedUrl,
+    focusMockBody,
     clearTraffic,
     deleteSelected,
     deleteCaptured: captured.deleteCaptured,
