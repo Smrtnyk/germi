@@ -2818,6 +2818,7 @@ kbd {
     color var(--dur-fast),
     filter var(--dur-fast);
 }
+/* Raised controls (filled/bordered buttons, chips, tabs): a brief press. */
 .btn:active,
 .fchip:active,
 .chip:active,
@@ -2829,19 +2830,30 @@ kbd {
 .help-example:active,
 .status-key:active,
 .rail-btn:active,
-.ctx-item:active:not(:disabled),
+.filter-pill:active {
+  transform: var(--press);
+  filter: brightness(0.9);
+}
+/* Flat / text-like controls (ghost buttons, menu & list rows, section heads):
+   no press — they don't read as buttons at rest, so the translate felt heavy
+   (issue #36 review). A background step + faint darken reads as a press instead. */
+.btn.ghost:active,
 .settings-nav-item:active,
+.ctx-item:active:not(:disabled),
+.palette-item:active,
+.rsection-head:active {
+  transform: none;
+  background: var(--bg-3);
+  filter: brightness(0.92);
+}
+/* Bare icon closers and inline links: a faint darken only — no box, no move. */
 .settings-close:active,
 .toast-x:active,
 .chips-clear:active,
 .col-actions .x:active:not(:disabled),
 .excluded-list .x:active,
-.rsection-head:active,
-.palette-item:active,
-.filter-pill:active,
 .link:active {
-  transform: var(--press);
-  filter: brightness(0.9);
+  filter: brightness(0.85);
 }
 .filter-clear:active,
 .follow-pill:active,
