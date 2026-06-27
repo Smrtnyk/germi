@@ -61,6 +61,10 @@ pub struct Flow {
     /// On-demand public-availability verdict (credential-stripped re-fetch);
     /// `None` until checked. In-memory only — not persisted to `.germi` sessions.
     pub availability: Option<Availability>,
+    /// True when this flow was loaded from a file (HAR / SAZ / `.germi`) rather
+    /// than captured live by the proxy. Drives the "imported" row marker and the
+    /// `is:imported` filter, and is what "Delete captured" keeps (issue #49).
+    pub imported: bool,
 }
 
 impl Flow {
@@ -90,6 +94,7 @@ impl Flow {
             timestamp_ms: self.request.timestamp_ms,
             comment: self.comment.clone(),
             availability: self.availability.clone(),
+            imported: self.imported,
             // Filled by the summary-building call sites that have settings access
             // (which header columns the user pinned). See `extract_header_columns`.
             extra: BTreeMap::new(),
@@ -145,6 +150,9 @@ pub struct FlowSummary {
     /// Public-availability verdict for a doc flow that has been checked on demand
     /// (drives the inline 🔓/🔒 row icon); `None` when not (yet) checked.
     pub availability: Option<Availability>,
+    /// True when this flow was loaded from a file rather than captured live —
+    /// drives the "imported" row marker and the `is:imported` filter (issue #49).
+    pub imported: bool,
     /// Pinned header-column values, keyed by the column spec (e.g. `cf-ray` or
     /// `req:referer`). Only present headers are included.
     pub extra: BTreeMap<String, String>,

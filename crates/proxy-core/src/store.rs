@@ -133,6 +133,16 @@ impl FlowStore {
         self.order.iter().cloned().collect()
     }
 
+    /// Flow ids in capture order for which `keep` returns true. Used to target a
+    /// subset for bulk removal (e.g. every non-imported flow — issue #49).
+    pub fn ids_where(&self, keep: impl Fn(&Flow) -> bool) -> Vec<String> {
+        self.order
+            .iter()
+            .filter(|id| self.flows.get(id.as_str()).is_some_and(&keep))
+            .cloned()
+            .collect()
+    }
+
     pub fn clear(&mut self) {
         self.flows.clear();
         self.order.clear();
@@ -224,6 +234,7 @@ mod tests {
             ttfb_ms: None,
             comment: None,
             availability: None,
+            imported: false,
         }
     }
 
@@ -311,6 +322,22 @@ mod tests {
             ["a", "b", "c", "d"].map(str::to_string).to_vec(),
             "restore rebuilds the original capture order exactly"
         );
+    }
+
+    #[test]
+    fn ids_where_filters_in_capture_order() {
+        let mut store = FlowStore::new(10);
+        for id in ["a", "b", "c"] {
+            let mut f = flow(id);
+            f.imported = id == "b"; // only "b" is imported
+            store.insert(f);
+        }
+        assert_eq!(
+            store.ids_where(|f| !f.imported),
+            vec!["a".to_string(), "c".to_string()],
+            "captured (non-imported) ids keep capture order"
+        );
+        assert_eq!(store.ids_where(|f| f.imported), vec!["b".to_string()]);
     }
 
     #[test]

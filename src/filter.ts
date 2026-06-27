@@ -37,6 +37,7 @@ const SUMMARY_KEYS = new Set([
   "mime",
   "kind",
   "ext",
+  "is",
   "rule",
   "matched",
   "larger-than",
@@ -187,10 +188,14 @@ function parseSize(v: string): number {
 
 const SIZE_KEYS = new Set(["larger-than", "smaller-than", "req-larger-than"]);
 
-/** Whether a numeric-comparison term has an unparseable value (empty or junk).
- *  Such a term must match NOTHING — and, crucially, must not flip to matching
- *  EVERYTHING when negated (see matchTerm). */
+/** Whether a comparison/enum term has an unusable value (empty or junk). Such a
+ *  term must match NOTHING — and, crucially, must not flip to matching EVERYTHING
+ *  when negated (see matchTerm). */
 function numericValueInvalid(key: string, value: string): boolean {
+  if (key === "is") {
+    const v = value.trim().toLowerCase();
+    return v !== "imported" && v !== "captured" && v !== "live";
+  }
   if (SIZE_KEYS.has(key)) return Number.isNaN(parseSize(value));
   if (key === "slower-than") {
     const t = value.trim();
@@ -247,6 +252,12 @@ function matchKv(key: string, value: string, s: FlowSummary): boolean {
       return s.kind === (v === "fetch" ? "xhr" : v);
     case "ext":
       return extOf(s.path) === v;
+    case "is":
+      // is:imported (loaded from a file) vs is:captured / is:live (live proxy).
+      // An unknown value matches nothing (it must not flip to all when negated).
+      if (v === "imported") return s.imported;
+      if (v === "captured" || v === "live") return !s.imported;
+      return false;
     case "rule":
     case "matched":
       return value ? (s.matchedRule ?? "").toLowerCase().includes(v) : s.matchedRule != null;

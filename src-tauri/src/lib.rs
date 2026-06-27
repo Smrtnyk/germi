@@ -69,6 +69,7 @@ pub fn run() {
             commands::get_flow,
             commands::clear_flows,
             commands::remove_flows,
+            commands::remove_captured_flows,
             commands::set_flow_comment,
             commands::get_autoresponder_summary,
             commands::get_rule,

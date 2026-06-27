@@ -71,9 +71,13 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   to seed mock rules from real responses, or **⚡ Mock this** on one. Selecting
   several shows a summary (counts, hosts, sizes) in the Inspector. Prune noise with
   **Delete** (or right-click → Delete) to save a cleaned-up session.
+- **Replay-friendly** — imported flows are marked with a violet bar (and an optional
+  **Origin** column) so they stand out from live captures. While replaying through the
+  auto-responder, captured traffic piles up — one **Delete captured** click prunes it
+  and keeps only the imported reference (undoable). Filter with `is:imported` / `is:captured`.
 - **Filtering** — highlights matches in place (Fiddler-style) with an `N of M` count:
-  type/status chips, a token filter (`host: status:4xx kind:xhr -neg /regex/` — see
-  the `?` popover), and backend `body:` / `req-body:` / `resp-body:` content search.
+  type/status chips, a token filter (`host: status:4xx kind:xhr is:imported -neg /regex/` —
+  see the `?` popover), and backend `body:` / `req-body:` / `resp-body:` content search.
 - **Columns** — configurable in **Settings → Columns** (show/hide, reorder, presets,
   drag-resize): scheme, sizes, **timing (TTFB / Time / Download)**, **Mocked-by**, an
   editable **Comment**, and **pin-any-header** columns.

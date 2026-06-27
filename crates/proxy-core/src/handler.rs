@@ -128,6 +128,7 @@ impl HttpHandler for CaptureHandler {
             ttfb_ms: None,
             comment: None,
             availability: None,
+            imported: false,
         });
 
         match outcome {

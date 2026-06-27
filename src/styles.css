@@ -13,6 +13,7 @@
   --accent-bg: #113333;
   --danger: #f87171;
   --warn: #fbbf24;
+  --imported: #a78bfa; /* violet — marks file-loaded (imported) flows */
 
   --s2: #34d399; /* 2xx */
   --s3: #60a5fa; /* 3xx */
@@ -23,6 +24,7 @@
   --sel-bg: #173a36;
   --sel-multi-bg: rgba(96, 165, 250, 0.13);
   --row-mock-bg: rgba(45, 212, 191, 0.05);
+  --row-imported-bg: rgba(167, 139, 250, 0.06);
   --drop-overlay: rgba(45, 212, 191, 0.13);
   --bar-accent-bg: #13302c;
   --chip-on-bg: #112e2e;
@@ -532,6 +534,17 @@ textarea {
   opacity: 0.6;
   cursor: default;
 }
+/* "Delete captured" — shown only mid-replay (imported + captured both present);
+   a danger-tinted chip that prunes the live-capture noise (issue #49) */
+.delete-captured {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
+  color: var(--danger);
+  white-space: nowrap;
+}
+.delete-captured:hover {
+  background: color-mix(in srgb, var(--danger) 15%, var(--bg-2));
+  color: var(--danger);
+}
 
 /* ---- active filter-term pills (removable view of the text query) ---- */
 .filter-pills {
@@ -703,6 +716,15 @@ textarea {
 .flow-canvas .flow-row.ruled {
   box-shadow: inset 3px 0 0 var(--accent);
   background: var(--row-mock-bg);
+}
+/* imported rows (loaded from a HAR/SAZ/.germi file): a violet left bar + faint
+   tint so they read distinct from live captures at a glance. Defined after
+   .ruled so the provenance bar wins on the rare imported-and-mocked row. The
+   bar is box-shadow, so it survives the selected/checked/match backgrounds
+   below (issue #49). */
+.flow-canvas .flow-row.imported {
+  box-shadow: inset 3px 0 0 var(--imported);
+  background: var(--row-imported-bg);
 }
 /* multi-select members read distinct from the single active row */
 .flow-canvas .flow-row.checked {
