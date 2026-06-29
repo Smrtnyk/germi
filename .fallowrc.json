@@ -7,8 +7,8 @@
       {
         "files": ["src/appState.ts"],
         "functions": ["useAppState"],
-        "maxCognitive": 28,
-        "reason": "Composition-root hook that wires the feature hooks (incl. useAvailabilityCheck, useCapturedDelete and usePersistentShortcuts); fallow's cognitive score here reflects hook count (cyclomatic is 6), not branching."
+        "maxCognitive": 29,
+        "reason": "Composition-root hook that wires the feature hooks (incl. useAvailabilityCheck, useCapturedDelete, usePersistentShortcuts and useFlowSort); fallow's cognitive score here reflects hook count (cyclomatic is 6), not branching."
       },
       {
         "files": ["src/components/TrafficList.tsx"],

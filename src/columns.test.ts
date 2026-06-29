@@ -32,6 +32,16 @@ function textOf(id: string, s: FlowSummary, headerSpecs: string[] = []): string 
   return col.text(s);
 }
 
+function sortKeyOf(
+  id: string,
+  s: FlowSummary,
+  headerSpecs: string[] = [],
+): string | number | null | undefined {
+  const col = allColumns(headerSpecs).find((c) => c.id === id);
+  if (!col) throw new Error(`no column ${id}`);
+  return col.sortKey?.(s);
+}
+
 describe("allColumns", () => {
   it("exposes the built-in columns", () => {
     const ids = allColumns([]).map((c) => c.id);
@@ -82,6 +92,48 @@ describe("column text rendering", () => {
   it("labels the origin column only for imported flows", () => {
     expect(textOf("origin", summary({ imported: true }))).toBe("imported");
     expect(textOf("origin", summary({ imported: false }))).toBe("");
+  });
+});
+
+describe("availability column", () => {
+  it("words the verdict for a checked flow and blanks an unchecked one", () => {
+    const checked = summary({ availability: { verdict: "public", status: 200, location: null } });
+    expect(textOf("availability", checked)).toBe("Reachable");
+    expect(textOf("availability", summary())).toBe("");
+  });
+
+  it("sorts by verdict severity, null for unchecked", () => {
+    expect(
+      sortKeyOf(
+        "availability",
+        summary({ availability: { verdict: "public", status: 200, location: null } }),
+      ),
+    ).toBe(0);
+    expect(
+      sortKeyOf(
+        "availability",
+        summary({ availability: { verdict: "error", status: null, location: null } }),
+      ),
+    ).toBe(3);
+    expect(sortKeyOf("availability", summary())).toBeNull();
+  });
+});
+
+describe("sort keys", () => {
+  it("exposes a sort key on every built-in and pinned header column", () => {
+    for (const c of allColumns(["cf-ray"])) {
+      expect(typeof c.sortKey).toBe("function");
+    }
+  });
+
+  it("reads raw numeric and string values rather than formatted text", () => {
+    expect(sortKeyOf("respSize", summary({ respSize: 2048 }))).toBe(2048);
+    expect(sortKeyOf("status", summary({ status: null }))).toBeNull();
+    expect(sortKeyOf("origin", summary({ imported: true }))).toBe(1);
+    expect(sortKeyOf("origin", summary({ imported: false }))).toBe(0);
+    expect(sortKeyOf("hdr:cf-ray", summary({ extra: { "cf-ray": "abc" } }), ["cf-ray"])).toBe(
+      "abc",
+    );
   });
 });
 

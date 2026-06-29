@@ -468,8 +468,10 @@ export function App() {
               }}
             />
             <TrafficList
-              flows={s.flowStore.flows}
+              flows={s.flows}
               columns={s.columns.visibleColumns}
+              sort={s.sort}
+              onToggleSort={s.toggleSort}
               matchedIds={s.filtering.matchedIds}
               selectedId={s.selection.selectedId}
               selectedIds={s.selection.selectedIds}
