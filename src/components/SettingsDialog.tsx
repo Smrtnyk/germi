@@ -425,27 +425,29 @@ function InAppShortcutsSection({
         These work while Germi is focused. Click Record, then press the keys (Esc cancels). Use
         Ctrl, Alt, or ⌘ — optionally with Shift — plus a key, or a function key like <kbd>F2</kbd>.
       </p>
-      {SHORTCUT_COMMANDS.map((c) => {
-        const recording = recordingId === c.id;
-        return (
-          <div className="row hotkey-row" key={c.id}>
-            <label>{c.label}</label>
-            <span className={`btn small hotkey-display ${recording ? "recording" : ""}`}>
-              {recording ? "Press keys…" : prettyShortcut(bindings[c.id])}
-            </span>
-            <button className="btn small" onClick={() => record(c.id)}>
-              {recording ? "Cancel" : "Record"}
-            </button>
-            <button
-              className="btn small"
-              onClick={() => onChange({ ...bindings, [c.id]: DEFAULT_SHORTCUTS[c.id] })}
-              disabled={bindings[c.id] === DEFAULT_SHORTCUTS[c.id] || recording}
-            >
-              Reset
-            </button>
-          </div>
-        );
-      })}
+      <ul className="shortcut-grid">
+        {SHORTCUT_COMMANDS.map((c) => {
+          const recording = recordingId === c.id;
+          return (
+            <li className="shortcut-row" key={c.id}>
+              <span className="shortcut-cmd">{c.label}</span>
+              <span className={`btn small hotkey-display ${recording ? "recording" : ""}`}>
+                {recording ? "Press keys…" : prettyShortcut(bindings[c.id])}
+              </span>
+              <button className="btn small" onClick={() => record(c.id)}>
+                {recording ? "Cancel" : "Record"}
+              </button>
+              <button
+                className="btn small"
+                onClick={() => onChange({ ...bindings, [c.id]: DEFAULT_SHORTCUTS[c.id] })}
+                disabled={bindings[c.id] === DEFAULT_SHORTCUTS[c.id] || recording}
+              >
+                Reset
+              </button>
+            </li>
+          );
+        })}
+      </ul>
       {conflict && <p className="warn small">⚠ {conflict}</p>}
       <div className="col-add-list">
         <button className="btn small" onClick={() => onChange(DEFAULT_SHORTCUTS)}>
