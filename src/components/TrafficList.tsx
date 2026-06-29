@@ -13,6 +13,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 
 import type { Availability, FlowSummary } from "../types";
 import type { ColumnDef } from "../columns";
+import type { SortState } from "../sort";
 import { availabilityLabel } from "../availability";
 import { flowUrl } from "../flowUrl";
 import { dragFlowIds, encodeFlowIds, FLOW_DRAG_MIME } from "../dnd";
@@ -22,6 +23,8 @@ import { ContextMenu, type MenuItem } from "./ContextMenu";
 interface Props {
   flows: FlowSummary[];
   columns: ColumnDef[];
+  sort: SortState | null;
+  onToggleSort: (columnId: string) => void;
   matchedIds: Set<string> | null;
   selectedId: string | null;
   selectedIds: Set<string>;
@@ -135,6 +138,7 @@ function useFollowTail(
   flows: FlowSummary[],
   parentRef: React.RefObject<HTMLDivElement | null>,
   virtualizer: ReturnType<typeof useVirtualizer<HTMLDivElement, Element>>,
+  enabled: boolean,
 ): FollowTail {
   const [follow, setFollow] = useState(true);
   const [newCount, setNewCount] = useState(0);
@@ -144,7 +148,7 @@ function useFollowTail(
   // accrue a "new" count so the user can jump back without losing their place.
   useEffect(() => {
     const grew = flows.length - prevLen.current;
-    if (grew > 0) {
+    if (enabled && grew > 0) {
       if (follow) virtualizer.scrollToIndex(flows.length - 1, { align: "end" });
       else setNewCount((c) => c + grew);
     } else if (flows.length < prevLen.current) {
@@ -152,7 +156,7 @@ function useFollowTail(
     }
     prevLen.current = flows.length;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flows.length, follow]);
+  }, [flows.length, follow, enabled]);
 
   function onScroll() {
     const el = parentRef.current;
@@ -208,24 +212,51 @@ function useCommentDraft(
 interface HeaderRowProps {
   columns: ColumnDef[];
   headerRef: React.RefObject<HTMLDivElement | null>;
+  sort: SortState | null;
+  onToggleSort: (columnId: string) => void;
   startResize: (e: ReactPointerEvent, c: ColumnDef) => void;
   resetWidth: (id: string, width: number) => void;
 }
 
-function HeaderRow({ columns, headerRef, startResize, resetWidth }: HeaderRowProps) {
+function HeaderRow({
+  columns,
+  headerRef,
+  sort,
+  onToggleSort,
+  startResize,
+  resetWidth,
+}: HeaderRowProps) {
   return (
     <div className="flow-row flow-head" ref={headerRef}>
-      {columns.map((c) => (
-        <span key={c.id} className={c.align === "right" ? "cell-right" : ""}>
-          {c.label}
-          <span
-            className="col-resize right"
-            onPointerDown={(e) => startResize(e, c)}
-            onDoubleClick={() => resetWidth(c.id, c.width)}
-            title="Drag to resize · double-click to reset"
-          />
-        </span>
-      ))}
+      {columns.map((c) => {
+        const active = sort?.columnId === c.id;
+        const caret = active && sort ? (sort.dir === "asc" ? "▲" : "▼") : "↕";
+        return (
+          <span key={c.id} className={c.align === "right" ? "cell-right" : ""}>
+            {c.sortKey ? (
+              <button
+                type="button"
+                className={`col-sort${active ? " active" : ""}`}
+                onClick={() => onToggleSort(c.id)}
+                title={`Sort by ${c.label}`}
+              >
+                <span className="col-sort-label">{c.label}</span>
+                <span className="sort-caret" aria-hidden="true">
+                  {caret}
+                </span>
+              </button>
+            ) : (
+              c.label
+            )}
+            <span
+              className="col-resize right"
+              onPointerDown={(e) => startResize(e, c)}
+              onDoubleClick={() => resetWidth(c.id, c.width)}
+              title="Drag to resize · double-click to reset"
+            />
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -250,6 +281,16 @@ function AvailabilityBadge({ availability }: { availability: Availability | null
   );
 }
 
+function AvailabilityCell({ availability }: { availability: Availability | null }) {
+  if (!availability) return <span className="c-avail" />;
+  const { icon, text, tone, title } = availabilityLabel(availability);
+  return (
+    <span className={`c-avail avail-${tone}`} title={title}>
+      {icon} {text}
+    </span>
+  );
+}
+
 function FlowCell({ c, f, comments }: FlowCellProps) {
   if (c.special === "method") {
     return <span className={`c-method m-${f.method.toLowerCase()}`}>{f.method}</span>;
@@ -266,6 +307,9 @@ function FlowCell({ c, f, comments }: FlowCellProps) {
   }
   if (c.special === "kind") {
     return <span className="c-kind">{f.kind}</span>;
+  }
+  if (c.special === "availability") {
+    return <AvailabilityCell availability={f.availability} />;
   }
   if (c.special === "comment") {
     return <CommentCell f={f} comments={comments} />;
@@ -485,6 +529,7 @@ interface FlowScrollProps {
   flows: FlowSummary[];
   columns: ColumnDef[];
   headerRef: React.RefObject<HTMLDivElement | null>;
+  followEnabled: boolean;
   matchedIds: Set<string> | null;
   selectedId: string | null;
   selectedIds: Set<string>;
@@ -500,6 +545,7 @@ function FlowScroll({
   flows,
   columns,
   headerRef,
+  followEnabled,
   matchedIds,
   selectedId,
   selectedIds,
@@ -521,6 +567,7 @@ function FlowScroll({
     flows,
     parentRef,
     virtualizer,
+    followEnabled,
   );
 
   function handleDragStart(e: ReactDragEvent, f: FlowSummary) {
@@ -657,6 +704,8 @@ function FlowScroll({
 export function TrafficList({
   flows,
   columns,
+  sort,
+  onToggleSort,
   matchedIds,
   selectedId,
   selectedIds,
@@ -694,6 +743,8 @@ export function TrafficList({
         <HeaderRow
           columns={columns}
           headerRef={headerRef}
+          sort={sort}
+          onToggleSort={onToggleSort}
           startResize={startResize}
           resetWidth={resetWidth}
         />
@@ -703,6 +754,7 @@ export function TrafficList({
         flows={flows}
         columns={columns}
         headerRef={headerRef}
+        followEnabled={sort === null}
         matchedIds={matchedIds}
         selectedId={selectedId}
         selectedIds={selectedIds}

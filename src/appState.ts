@@ -13,7 +13,8 @@ import {
 import { announce } from "./announce";
 import { api, subscribeFlows } from "./ipc";
 import { parseFilter, statusClass, type BodyTerm, type ParsedFilter } from "./filter";
-import { resolveColumns, DEFAULT_COLUMNS } from "./columns";
+import { resolveColumns, DEFAULT_COLUMNS, type ColumnDef } from "./columns";
+import { nextSort, resolveSort, sortFlows, type SortState } from "./sort";
 import { useSplitRatio } from "./useResizable";
 import { useProxyIndicator } from "./useProxyIndicator";
 import { useSystemHotkeys } from "./useSystemHotkeys";
@@ -996,6 +997,42 @@ function usePersistentShortcuts() {
   return { shortcuts, setShortcuts };
 }
 
+function loadSort(): SortState | null {
+  try {
+    const saved = JSON.parse(localStorage.getItem("germi.sort") ?? "null");
+    if (
+      saved &&
+      typeof saved.columnId === "string" &&
+      (saved.dir === "asc" || saved.dir === "desc")
+    ) {
+      return { columnId: saved.columnId, dir: saved.dir };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function useFlowSort(flows: FlowSummary[], columns: ColumnDef[]) {
+  const [sort, setSort] = useState<SortState | null>(loadSort);
+
+  useEffect(() => {
+    localStorage.setItem("germi.sort", JSON.stringify(sort));
+  }, [sort]);
+
+  const toggleSort = useCallback((columnId: string) => {
+    setSort((prev) => nextSort(prev, columnId));
+  }, []);
+
+  const resolved = useMemo(() => resolveSort(sort, columns), [sort, columns]);
+  const sortedFlows = useMemo(
+    () => sortFlows(flows, resolved, columns),
+    [flows, resolved, columns],
+  );
+
+  return { sort: resolved, toggleSort, sortedFlows };
+}
+
 function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
@@ -1238,18 +1275,20 @@ export function useAppState() {
 
   const settings = useSettings();
   const flowStore = useFlowStore(settings.settings.maxFlows, setError);
-  const filtering = useTrafficFilter(flowStore.flows, setError);
-  const selection = useSelection(flowStore.flows);
+  const columns = usePersistentColumns(settings.settings.headerColumns);
+  const { sort, toggleSort, sortedFlows } = useFlowSort(flowStore.flows, columns.visibleColumns);
+  const filtering = useTrafficFilter(sortedFlows, setError);
+  const selection = useSelection(sortedFlows);
   const selectedSummary = selection.selectedId
     ? flowStore.flowsRef.current.get(selection.selectedId)
     : undefined;
   const selectedSummaries = useMemo(
-    () => flowStore.flows.filter((f) => selection.selectedIds.has(f.id)),
-    [flowStore.flows, selection.selectedIds],
+    () => sortedFlows.filter((f) => selection.selectedIds.has(f.id)),
+    [sortedFlows, selection.selectedIds],
   );
   const inspector = useFlowDetail(selection.selectedId, decode, fullBody, selectedSummary);
   const availability = useAvailabilityCheck(
-    flowStore.flows,
+    sortedFlows,
     selection.selectedIds,
     filtering.matchedIds,
     notify,
@@ -1277,7 +1316,7 @@ export function useAppState() {
   }, [flowStore.flows]);
 
   const captured = useCapturedDelete(
-    flowStore.flows,
+    sortedFlows,
     flowStore.orderRef,
     selection.selectedId,
     pendingSelectRef,
@@ -1296,7 +1335,6 @@ export function useAppState() {
   const autoresponderActive = rightTab === "autoresponder" || rightMode === "split";
   const ar = useAutoresponder(setError, setRightTab, notify, autoresponderActive);
   const history = useHistory(ar.refresh, setError);
-  const columns = usePersistentColumns(settings.settings.headerColumns);
   const shortcuts = usePersistentShortcuts();
   const session = useSession(
     setError,
@@ -1356,8 +1394,8 @@ export function useAppState() {
   function selectAllVisible() {
     const matched = filtering.matchedIds;
     const ids = matched
-      ? flowStore.flows.filter((f) => matched.has(f.id)).map((f) => f.id)
-      : flowStore.flows.map((f) => f.id);
+      ? sortedFlows.filter((f) => matched.has(f.id)).map((f) => f.id)
+      : sortedFlows.map((f) => f.id);
     selection.selectAll(ids);
     if (ids.length > 1 && rightMode === "single") setRightTab("inspector");
   }
@@ -1445,7 +1483,7 @@ export function useAppState() {
     const ids = [...selection.selectedIds];
     if (ids.length === 0) return;
     const nextId = nextIdAfterDelete(
-      flowStore.orderRef.current,
+      sortedFlows.map((f) => f.id),
       new Set(ids),
       selection.selectedId,
     );
@@ -1496,6 +1534,9 @@ export function useAppState() {
     confirmOpenCapture,
     settings,
     flowStore,
+    flows: sortedFlows,
+    sort,
+    toggleSort,
     filtering,
     selection,
     selectedSummary,

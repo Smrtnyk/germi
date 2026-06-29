@@ -1,11 +1,12 @@
-import type { FlowSummary } from "./types";
+import { availabilityLabel } from "./availability";
+import type { AvailabilityVerdict, FlowSummary } from "./types";
 
 // The traffic-list column model. Built-in columns plus user-pinned header
 // columns (id `hdr:<spec>`) are resolved into an ordered, visible list driven by
 // `columnOrder` (persisted UI state) + `settings.headerColumns` (backend-pinned).
 
 export type ColAlign = "left" | "right";
-export type SpecialCell = "method" | "status" | "kind" | "comment";
+export type SpecialCell = "method" | "status" | "kind" | "comment" | "availability";
 
 export interface ColumnDef {
   id: string;
@@ -16,6 +17,7 @@ export interface ColumnDef {
   special?: SpecialCell;
   /** Plain display value for ordinary cells. */
   text: (f: FlowSummary) => string;
+  sortKey?: (f: FlowSummary) => string | number | null;
 }
 
 function fmtSize(n: number): string {
@@ -38,51 +40,153 @@ function queryOf(path: string): string {
   const q = path.indexOf("?");
   return q === -1 ? "" : path.slice(q);
 }
+function urlOf(f: FlowSummary): string {
+  return `${f.scheme}://${f.host}${f.path}`;
+}
+function downloadMs(f: FlowSummary): number | null {
+  return f.durationMs != null && f.ttfbMs != null ? Math.max(0, f.durationMs - f.ttfbMs) : null;
+}
+
+const AVAILABILITY_RANK: Record<AvailabilityVerdict, number> = {
+  public: 0,
+  protected: 1,
+  notFound: 2,
+  error: 3,
+  unknown: 4,
+};
+function availabilityRank(f: FlowSummary): number | null {
+  return f.availability ? AVAILABILITY_RANK[f.availability.verdict] : null;
+}
 
 const BUILTIN_COLUMNS: ColumnDef[] = [
-  { id: "method", label: "Method", width: 62, special: "method", text: (f) => f.method },
-  { id: "host", label: "Host", width: 150, text: (f) => f.host },
-  { id: "path", label: "Path", width: 240, text: (f) => f.path },
+  {
+    id: "method",
+    label: "Method",
+    width: 62,
+    special: "method",
+    text: (f) => f.method,
+    sortKey: (f) => f.method,
+  },
+  { id: "host", label: "Host", width: 150, text: (f) => f.host, sortKey: (f) => f.host },
+  { id: "path", label: "Path", width: 240, text: (f) => f.path, sortKey: (f) => f.path },
   {
     id: "url",
     label: "URL",
     width: 320,
-    text: (f) => `${f.scheme}://${f.host}${f.path}`,
+    text: urlOf,
+    sortKey: urlOf,
   },
-  { id: "query", label: "Query", width: 150, text: (f) => queryOf(f.path) },
-  { id: "scheme", label: "Scheme", width: 64, text: (f) => f.scheme },
+  {
+    id: "query",
+    label: "Query",
+    width: 150,
+    text: (f) => queryOf(f.path),
+    sortKey: (f) => queryOf(f.path),
+  },
+  { id: "scheme", label: "Scheme", width: 64, text: (f) => f.scheme, sortKey: (f) => f.scheme },
   {
     id: "status",
     label: "Status",
     width: 64,
     special: "status",
     text: (f) => (f.status == null ? "···" : `${f.status}`),
+    sortKey: (f) => f.status,
   },
-  { id: "type", label: "Type", width: 116, text: (f) => f.mime ?? "" },
-  { id: "kind", label: "Kind", width: 78, special: "kind", text: (f) => f.kind },
-  { id: "reqSize", label: "Req size", width: 78, align: "right", text: (f) => fmtSize(f.reqSize) },
-  { id: "respSize", label: "Size", width: 78, align: "right", text: (f) => fmtSize(f.respSize) },
+  { id: "type", label: "Type", width: 116, text: (f) => f.mime ?? "", sortKey: (f) => f.mime },
+  {
+    id: "kind",
+    label: "Kind",
+    width: 78,
+    special: "kind",
+    text: (f) => f.kind,
+    sortKey: (f) => f.kind,
+  },
+  {
+    id: "reqSize",
+    label: "Req size",
+    width: 78,
+    align: "right",
+    text: (f) => fmtSize(f.reqSize),
+    sortKey: (f) => f.reqSize,
+  },
+  {
+    id: "respSize",
+    label: "Size",
+    width: 78,
+    align: "right",
+    text: (f) => fmtSize(f.respSize),
+    sortKey: (f) => f.respSize,
+  },
   {
     id: "totalSize",
     label: "Total",
     width: 80,
     align: "right",
     text: (f) => fmtSize(f.reqSize + f.respSize),
+    sortKey: (f) => f.reqSize + f.respSize,
   },
-  { id: "start", label: "Start", width: 96, align: "right", text: (f) => fmtClock(f.timestampMs) },
-  { id: "ttfb", label: "TTFB", width: 58, align: "right", text: (f) => fmtMs(f.ttfbMs) },
-  { id: "duration", label: "Time", width: 56, align: "right", text: (f) => fmtMs(f.durationMs) },
+  {
+    id: "start",
+    label: "Start",
+    width: 96,
+    align: "right",
+    text: (f) => fmtClock(f.timestampMs),
+    sortKey: (f) => f.timestampMs,
+  },
+  {
+    id: "ttfb",
+    label: "TTFB",
+    width: 58,
+    align: "right",
+    text: (f) => fmtMs(f.ttfbMs),
+    sortKey: (f) => f.ttfbMs,
+  },
+  {
+    id: "duration",
+    label: "Time",
+    width: 56,
+    align: "right",
+    text: (f) => fmtMs(f.durationMs),
+    sortKey: (f) => f.durationMs,
+  },
   {
     id: "download",
     label: "Download",
     width: 78,
     align: "right",
-    text: (f) =>
-      f.durationMs != null && f.ttfbMs != null ? `${Math.max(0, f.durationMs - f.ttfbMs)}` : "",
+    text: (f) => fmtMs(downloadMs(f)),
+    sortKey: downloadMs,
   },
-  { id: "rule", label: "Mocked by", width: 150, text: (f) => f.matchedRule ?? "" },
-  { id: "origin", label: "Origin", width: 78, text: (f) => (f.imported ? "imported" : "") },
-  { id: "comment", label: "Comment", width: 170, special: "comment", text: (f) => f.comment ?? "" },
+  {
+    id: "rule",
+    label: "Mocked by",
+    width: 150,
+    text: (f) => f.matchedRule ?? "",
+    sortKey: (f) => f.matchedRule,
+  },
+  {
+    id: "origin",
+    label: "Origin",
+    width: 78,
+    text: (f) => (f.imported ? "imported" : ""),
+    sortKey: (f) => (f.imported ? 1 : 0),
+  },
+  {
+    id: "availability",
+    label: "Available",
+    width: 104,
+    special: "availability",
+    text: (f) => (f.availability ? availabilityLabel(f.availability).text : ""),
+    sortKey: availabilityRank,
+  },
+  {
+    id: "comment",
+    label: "Comment",
+    width: 170,
+    special: "comment",
+    text: (f) => f.comment ?? "",
+    sortKey: (f) => f.comment,
+  },
 ];
 
 export const PRESETS: { name: string; columns: string[] }[] = [
@@ -115,6 +219,7 @@ function headerColumnDef(spec: string): ColumnDef {
     label: isReq ? `${name} (req)` : name,
     width: 130,
     text: (f) => f.extra?.[spec] ?? "",
+    sortKey: (f) => f.extra?.[spec] ?? "",
   };
 }
 
