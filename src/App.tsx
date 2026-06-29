@@ -191,8 +191,8 @@ function focusSearch(s: AppStateValue): void {
     return;
   }
   const find = s.inspectorFindRef.current;
-  if (find) {
-    const sel = region ? (window.getSelection()?.toString().trim() ?? "") : "";
+  if (find && region) {
+    const sel = window.getSelection()?.toString().trim() ?? "";
     find.openFind(sel || undefined, region === "headers" ? "headers" : "body");
     return;
   }
