@@ -54,6 +54,9 @@ Read `CLAUDE.md` and the pipeline artifacts so far (`01-architecture.md`,
 - **Exact-version pinning:** no `^`/`~`/`*` ranges anywhere; shared crates
   (serde/serde_json/tokio/tracing) pinned to the **same** exact version in both
   `Cargo.toml`s.
+- **Frontend helper reuse:** new `src/` code uses **es-toolkit** pure helpers
+  rather than re-implementing `clamp`/`debounce`/`groupBy`/`uniqBy`/deep-equality;
+  flag obvious hand-rolled reinventions (but not idiomatic `.map`/`.filter`).
 - **Documented gotchas respected:** IPC batching / lazy `get_flow` detail / 512 KB
   `DISPLAY_CAP`; no new background traffic persistence; HTTP/1.1-only; one-rule-
   per-request full-URL match with Content-Type in its own field (not duplicated

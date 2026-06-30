@@ -27,7 +27,8 @@ every decision:
   shared `AppState` in `state.rs`.
 - **`src/`** — React + Vite: `App.tsx`, `components/`, the typed IPC wrappers in
   `ipc.ts`, the DTO mirror in `types.ts`, filtering (`filter.ts`), columns
-  (`columns.ts`).
+  (`columns.ts`). Pure-utility needs (clamp, debounce, dedup, grouping, deep
+  equality) come from **es-toolkit** — plan to reuse it, not hand-roll helpers.
 
 **The golden rule:** new backend logic goes in `proxy-core` (testable, GUI-free),
 exposed through a `ProxyController` method. `src-tauri` stays a trivial

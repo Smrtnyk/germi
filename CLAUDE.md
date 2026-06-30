@@ -125,6 +125,14 @@ Engine (proxy-core — these work without the GUI system libs):
   `AutoresponderPanel.tsx` so it doesn't bloat startup. Autoresponder IPC carries
   lightweight rule summaries; full headers/bodies are fetched only for the
   selected rule. Keep those boundaries intact.
+- **Frontend utilities — reuse es-toolkit:** the frontend depends on
+  **es-toolkit** (`package.json`, exact-pinned, zero transitive deps). Reach for
+  its pure helpers instead of hand-rolling them — `clamp`, `debounce`/`throttle`,
+  `compact`, `countBy`/`sumBy`, `difference`/`intersection`, `uniqBy`, `groupBy`,
+  `isEqual`, `isPlainObject`, `inRange`, etc. Import from the main entry
+  (`import { clamp } from "es-toolkit"`); don't reinvent the wheel or add lodash.
+  Keep it to **genuine** reuse — don't wrap a plain `.map`/`.filter` in a helper
+  just to use the library.
 - **Mock rules are one-per-request, full-URL match** (Fiddler-style, no
   collapsing) — see `respond_rule_from_flow` in `rules.rs`. The `respond` action's
   `headers` field is honored by the engine; Content-Type has its own dedicated
