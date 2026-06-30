@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { clamp } from "es-toolkit";
 
 import { api } from "../ipc";
 import { accelFromKeyboardEvent, prettyAccel } from "../hotkey";
@@ -66,7 +67,7 @@ function NumberField({
   const commit = () => {
     const parsed = Math.trunc(Number(draft));
     let n = draft.trim() !== "" && Number.isFinite(parsed) ? parsed : fallback;
-    n = Math.max(min, Math.min(max ?? n, n));
+    n = clamp(n, min, max ?? Infinity);
     onCommit(n);
     setDraft(String(n));
   };

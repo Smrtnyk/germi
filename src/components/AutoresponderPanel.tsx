@@ -11,6 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { debounce } from "es-toolkit";
 
 import { api } from "../ipc";
 import { decodeFlowIds, FLOW_DRAG_MIME, hasFlowDrag, RULE_DRAG_MIME } from "../dnd";
@@ -816,44 +817,33 @@ function useScenarioName(
 ) {
   const [name, setName] = useState(scenario.name);
   const [saveState, setSaveState] = useState<SaveState>("idle");
-  const timer = useRef<number | null>(null);
-  const pendingName = useRef<string | null>(null);
   const renameRef = useRef(onRenameScenario);
   renameRef.current = onRenameScenario;
+
+  const save = useMemo(
+    () =>
+      debounce((id: string, next: string) => {
+        renameRef.current(id, next);
+        setSaveState("saved");
+      }, 300),
+    [],
+  );
 
   useEffect(() => {
     setName(scenario.name);
     setSaveState("idle");
   }, [scenario.id, scenario.name]);
 
-  useEffect(
-    () => () => {
-      if (timer.current) clearTimeout(timer.current);
-      const pending = pendingName.current;
-      if (pending !== null) renameRef.current(scenario.id, pending);
-    },
-    [scenario.id],
-  );
+  useEffect(() => () => save.flush(), [scenario.id, save]);
 
   function change(next: string) {
     setName(next);
-    pendingName.current = next;
     setSaveState("saving");
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => {
-      timer.current = null;
-      pendingName.current = null;
-      renameRef.current(scenario.id, next);
-      setSaveState("saved");
-    }, 300);
+    save(scenario.id, next);
   }
 
   function flush() {
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = null;
-    const pending = pendingName.current;
-    pendingName.current = null;
-    if (pending !== null) renameRef.current(scenario.id, pending);
+    save.flush();
   }
 
   return { name, change, saveState, flush };

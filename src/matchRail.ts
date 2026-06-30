@@ -1,3 +1,5 @@
+import { clamp } from "es-toolkit";
+
 const RAIL_RGB = "45, 212, 191";
 const FLOOR = 0.35;
 const SATURATED = 0.95;
@@ -36,8 +38,8 @@ export function bandsToGradient(bands: number[]): string {
 
 export function indexForFraction(fraction: number, total: number): number {
   if (total <= 0) return 0;
-  const f = Math.min(1, Math.max(0, fraction));
-  return Math.min(total - 1, Math.max(0, Math.round(f * (total - 1))));
+  const f = clamp(fraction, 0, 1);
+  return clamp(Math.round(f * (total - 1)), 0, total - 1);
 }
 
 export function railVisible(matchCount: number, total: number): boolean {
