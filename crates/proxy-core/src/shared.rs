@@ -172,3 +172,207 @@ impl Shared {
             .and_then(|store| store.get(id).map(|f| f.request.clone()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flow::{Availability, AvailabilityVerdict, CapturedRequest, CapturedResponse, Flow};
+
+    fn req(id: &str) -> CapturedRequest {
+        CapturedRequest {
+            method: "GET".into(),
+            uri: format!("https://h/{id}"),
+            scheme: "https".into(),
+            host: "h".into(),
+            path: format!("/{id}"),
+            version: "HTTP/1.1".into(),
+            headers: vec![],
+            body: vec![],
+            timestamp_ms: 0,
+        }
+    }
+
+    fn flow(id: &str) -> Flow {
+        Flow {
+            id: id.to_string(),
+            request: req(id),
+            response: None,
+            matched_rule: None,
+            duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
+            availability: None,
+            imported: false,
+        }
+    }
+
+    fn resp() -> CapturedResponse {
+        CapturedResponse {
+            status: 200,
+            version: "HTTP/1.1".into(),
+            headers: vec![],
+            body: b"hi".to_vec(),
+            timestamp_ms: 0,
+        }
+    }
+
+    fn shared_with(settings: ProxySettings) -> Arc<Shared> {
+        Shared::new(100, AutoResponder::example(), settings)
+    }
+
+    #[test]
+    fn next_id_increments_with_an_f_prefix() {
+        let s = shared_with(ProxySettings::default());
+        assert_eq!(s.next_id(), "f1");
+        assert_eq!(s.next_id(), "f2");
+        assert_eq!(s.next_id(), "f3");
+    }
+
+    #[test]
+    fn nothing_is_bypassed_by_default() {
+        let s = shared_with(ProxySettings::default());
+        assert!(!s.should_bypass("example.com"));
+    }
+
+    #[test]
+    fn excluded_hosts_and_their_subdomains_are_bypassed() {
+        let s = shared_with(ProxySettings {
+            excluded_hosts: vec!["blocked.com".into()],
+            ..Default::default()
+        });
+        assert!(s.should_bypass("blocked.com"));
+        assert!(s.should_bypass("api.blocked.com"));
+        assert!(!s.should_bypass("allowed.com"));
+    }
+
+    #[test]
+    fn a_capture_filter_bypasses_everything_outside_it() {
+        let s = shared_with(ProxySettings {
+            capture_filter: vec!["keep.com".into()],
+            ..Default::default()
+        });
+        assert!(!s.should_bypass("keep.com"));
+        assert!(!s.should_bypass("sub.keep.com"));
+        assert!(s.should_bypass("other.com"));
+    }
+
+    #[test]
+    fn response_delay_reflects_settings() {
+        let s = shared_with(ProxySettings { response_delay_ms: 250, ..Default::default() });
+        assert_eq!(s.response_delay_ms(), 250);
+    }
+
+    #[test]
+    fn record_new_stores_the_flow_and_emits_new() {
+        let s = shared_with(ProxySettings::default());
+        let mut rx = s.events.subscribe();
+        s.record_new(flow("a"));
+        match rx.try_recv() {
+            Ok(FlowEvent::New { summary }) => {
+                assert_eq!(summary.id, "a");
+                assert_eq!(summary.status, None);
+            }
+            other => panic!("expected New, got {other:?}"),
+        }
+        assert!(s.store.lock().unwrap().get("a").is_some());
+    }
+
+    #[test]
+    fn record_complete_attaches_the_response_and_emits_completed() {
+        let s = shared_with(ProxySettings::default());
+        s.record_new(flow("a"));
+        let mut rx = s.events.subscribe();
+        s.record_complete("a", resp(), 7, Some(3), Some("mock".into()));
+        match rx.try_recv() {
+            Ok(FlowEvent::Completed { summary }) => {
+                assert_eq!(summary.id, "a");
+                assert_eq!(summary.status, Some(200));
+                assert_eq!(summary.duration_ms, Some(7));
+                assert_eq!(summary.ttfb_ms, Some(3));
+                assert_eq!(summary.matched_rule.as_deref(), Some("mock"));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completing_an_unknown_flow_emits_nothing() {
+        let s = shared_with(ProxySettings::default());
+        let mut rx = s.events.subscribe();
+        s.record_complete("ghost", resp(), 1, None, None);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn record_imported_marks_the_flow_and_emits_completed() {
+        let s = shared_with(ProxySettings::default());
+        let mut rx = s.events.subscribe();
+        let mut f = flow("imp");
+        f.imported = true;
+        f.response = Some(resp());
+        s.record_imported(f);
+        match rx.try_recv() {
+            Ok(FlowEvent::Completed { summary }) => assert!(summary.imported),
+            other => panic!("expected Completed, got {other:?}"),
+        }
+        assert!(s.store.lock().unwrap().get("imp").unwrap().imported);
+    }
+
+    #[test]
+    fn set_comment_updates_the_flow_and_emits_completed() {
+        let s = shared_with(ProxySettings::default());
+        s.record_new(flow("a"));
+        let mut rx = s.events.subscribe();
+        s.set_comment("a", Some("look here".into()));
+        match rx.try_recv() {
+            Ok(FlowEvent::Completed { summary }) => {
+                assert_eq!(summary.comment.as_deref(), Some("look here"));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn commenting_on_an_unknown_flow_emits_nothing() {
+        let s = shared_with(ProxySettings::default());
+        let mut rx = s.events.subscribe();
+        s.set_comment("ghost", Some("x".into()));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn set_availability_records_the_verdict_and_emits_completed() {
+        let s = shared_with(ProxySettings::default());
+        s.record_new(flow("a"));
+        let mut rx = s.events.subscribe();
+        let avail = Availability {
+            verdict: AvailabilityVerdict::Public,
+            status: Some(200),
+            location: None,
+        };
+        s.set_availability("a", avail.clone());
+        match rx.try_recv() {
+            Ok(FlowEvent::Completed { summary }) => assert_eq!(summary.availability, Some(avail)),
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setting_availability_on_an_unknown_flow_emits_nothing() {
+        let s = shared_with(ProxySettings::default());
+        let mut rx = s.events.subscribe();
+        let avail =
+            Availability { verdict: AvailabilityVerdict::Error, status: None, location: None };
+        s.set_availability("ghost", avail);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn get_request_returns_a_clone_for_known_ids_only() {
+        let s = shared_with(ProxySettings::default());
+        s.record_new(flow("a"));
+        let got = s.get_request("a").expect("known id");
+        assert_eq!(got.path, "/a");
+        assert!(s.get_request("ghost").is_none());
+    }
+}

@@ -19,6 +19,10 @@ dist-ssr
 # Fallow cache
 .fallow/
 
+# Vitest browser-mode artifacts (failure screenshots + attachments)
+.vitest-attachments/
+**/__screenshots__/
+
 # Logs / OS
 *.log
 .DS_Store
