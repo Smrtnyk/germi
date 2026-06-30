@@ -10,6 +10,7 @@ import {
   type ReactElement,
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { isPlainObject, sumBy } from "es-toolkit";
 
 import type { Availability, FlowSummary } from "../types";
 import type { ColumnDef } from "../columns";
@@ -50,7 +51,7 @@ const BOTTOM_SLACK = 40;
 function loadWidths(): Record<string, number> {
   try {
     const v = JSON.parse(localStorage.getItem(STORE_KEY) ?? "{}");
-    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, number>) : {};
+    return isPlainObject(v) ? (v as Record<string, number>) : {};
   } catch {
     return {};
   }
@@ -449,7 +450,7 @@ interface ColumnLayout {
 
 function useColumnLayout(columns: ColumnDef[], widthOf: (c: ColumnDef) => number): ColumnLayout {
   const cols = `${columns.map((c) => `${widthOf(c)}px`).join(" ")} minmax(0, 1fr)`;
-  const rowWidth = columns.reduce((acc, c) => acc + widthOf(c), 0) + GAP * columns.length + ROW_PAD;
+  const rowWidth = sumBy(columns, widthOf) + GAP * columns.length + ROW_PAD;
   return { cols, rowWidth };
 }
 

@@ -10,6 +10,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { countBy, sumBy } from "es-toolkit";
 
 import type { Availability, FlowDetail, FlowSummary, MessageDetail } from "../types";
 import { availabilityLabel } from "../availability";
@@ -1124,15 +1125,9 @@ const STATUS_ORDER: { cls: string; label: string }[] = [
 ];
 
 function summarize(flows: FlowSummary[]) {
-  const hosts = new Set<string>();
-  const byStatus = new Map<string, number>();
-  let totalSize = 0;
-  for (const f of flows) {
-    hosts.add(f.host);
-    totalSize += f.reqSize + f.respSize;
-    const c = statusCls(f.status);
-    byStatus.set(c, (byStatus.get(c) ?? 0) + 1);
-  }
+  const hosts = new Set(flows.map((f) => f.host));
+  const byStatus = countBy(flows, (f) => statusCls(f.status));
+  const totalSize = sumBy(flows, (f) => f.reqSize + f.respSize);
   return { hostCount: hosts.size, totalSize, byStatus };
 }
 
@@ -1190,9 +1185,9 @@ function MultiSelectView({
           <span className="muted">·</span>
           <span className="muted">{fmtSize(stats.totalSize)}</span>
           {STATUS_ORDER.map(({ cls, label }) =>
-            stats.byStatus.get(cls) ? (
+            stats.byStatus[cls] ? (
               <span key={cls} className={`multi-tag ${cls}`}>
-                {label} · {stats.byStatus.get(cls)}
+                {label} · {stats.byStatus[cls]}
               </span>
             ) : null,
           )}

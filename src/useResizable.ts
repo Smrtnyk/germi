@@ -5,6 +5,7 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { clamp } from "es-toolkit";
 
 interface Options {
   /** Initial size in px (used when nothing is persisted). */
@@ -36,14 +37,10 @@ export function useResizable({ initial, min, getMax, storageKey, axis = "x" }: O
   const getMaxRef = useRef(getMax);
   getMaxRef.current = getMax;
   useEffect(() => {
-    const clamp = () =>
-      setSize((s) => {
-        const max = Math.max(min, getMaxRef.current());
-        return Math.min(max, Math.max(min, s));
-      });
-    clamp();
-    window.addEventListener("resize", clamp);
-    return () => window.removeEventListener("resize", clamp);
+    const clampSize = () => setSize((s) => clamp(s, min, Math.max(min, getMaxRef.current())));
+    clampSize();
+    window.addEventListener("resize", clampSize);
+    return () => window.removeEventListener("resize", clampSize);
   }, [min]);
 
   const onPointerDown = useCallback(
@@ -59,7 +56,7 @@ export function useResizable({ initial, min, getMax, storageKey, axis = "x" }: O
       const move = (ev: PointerEvent) => {
         const max = Math.max(min, getMax());
         const pos = vertical ? ev.clientY : ev.clientX;
-        finalSize = Math.min(max, Math.max(min, startSize + (pos - startPos)));
+        finalSize = clamp(startSize + (pos - startPos), min, max);
         setSize(finalSize);
       };
       const up = () => {
@@ -120,7 +117,7 @@ export function useSplitRatio({ initial, min, max, storageKey }: SplitOptions) {
       document.body.classList.add("resizing");
 
       const move = (ev: PointerEvent) => {
-        final = Math.min(max, Math.max(min, (ev.clientX - rect.left) / rect.width));
+        final = clamp((ev.clientX - rect.left) / rect.width, min, max);
         setFrac(final);
       };
       const up = () => {

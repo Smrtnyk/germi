@@ -1,7 +1,8 @@
 import { useState } from "react";
+import { compact } from "es-toolkit";
 
 import type { ProxySettings } from "../types";
-import { allColumns, PRESETS, type ColumnDef } from "../columns";
+import { allColumns, PRESETS } from "../columns";
 
 interface Props {
   order: string[];
@@ -16,7 +17,7 @@ export function ColumnsSettings({ order, onOrderChange, settings, onSettingsChan
 
   const all = allColumns(settings.headerColumns);
   const byId = new Map(all.map((c) => [c.id, c]));
-  const visible = order.map((id) => byId.get(id)).filter((c): c is ColumnDef => Boolean(c));
+  const visible = compact(order.map((id) => byId.get(id)));
   const hidden = all.filter((c) => !order.includes(c.id));
 
   function move(i: number, dir: -1 | 1) {

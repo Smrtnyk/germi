@@ -1,3 +1,5 @@
+import { inRange } from "es-toolkit";
+
 import type { Availability } from "./types";
 
 // Turn a raw availability verdict into the worded label, color tone, and tooltip
@@ -28,7 +30,7 @@ const TONE_ICON: Record<AvailabilityTone, string> = {
 };
 
 function isRedirect(status: number | null): boolean {
-  return status != null && status >= 300 && status < 400;
+  return status != null && inRange(status, 300, 400);
 }
 
 function label(text: string, tone: AvailabilityTone, title: string): AvailabilityLabel {

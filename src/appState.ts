@@ -10,6 +10,8 @@ import {
   type MutableRefObject,
 } from "react";
 
+import { compact, difference, intersection, isEqual } from "es-toolkit";
+
 import { announce } from "./announce";
 import { api, subscribeFlows } from "./ipc";
 import { parseFilter, statusClass, type ContentTerm, type ParsedFilter } from "./filter";
@@ -150,12 +152,7 @@ async function reconcileFlows(
 }
 
 function collectFlows(order: string[], map: Map<string, FlowSummary>): FlowSummary[] {
-  const arr: FlowSummary[] = [];
-  for (const id of order) {
-    const s = map.get(id);
-    if (s) arr.push(s);
-  }
-  return arr;
+  return compact(order.map((id) => map.get(id)));
 }
 
 function mergeFlows(order: string[], map: Map<string, FlowSummary>, list: FlowSummary[]): void {
@@ -214,8 +211,7 @@ async function runContentSearch(
     const search = ct.field === "headers" ? api.searchHeaders : api.searchBodies;
     const result = await search(ct.value, ct.side, ct.regex, ids);
     if (isCancelled()) return null;
-    const hit = new Set(result);
-    ids = ids.filter((id) => (ct.neg ? !hit.has(id) : hit.has(id)));
+    ids = ct.neg ? difference(ids, result) : intersection(ids, result);
   }
   return ids;
 }
@@ -264,7 +260,7 @@ function persistSettings(
   refresh: () => Promise<void>,
   setError: SetError,
 ): void {
-  const headersChanged = JSON.stringify(next.headerColumns) !== JSON.stringify(prevHeaderColumns);
+  const headersChanged = !isEqual(next.headerColumns, prevHeaderColumns);
   void api
     .setSettings(next)
     .then(async () => {
@@ -1379,8 +1375,7 @@ export function useAppState() {
   }
 
   function applyImportedSettings(next: ProxySettings) {
-    const headersChanged =
-      JSON.stringify(next.headerColumns) !== JSON.stringify(settings.settings.headerColumns);
+    const headersChanged = !isEqual(next.headerColumns, settings.settings.headerColumns);
     settings.setSettings(next);
     if (headersChanged) void flowStore.refresh().catch((e) => setError(String(e)));
   }

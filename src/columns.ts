@@ -1,3 +1,5 @@
+import { compact } from "es-toolkit";
+
 import { availabilityLabel } from "./availability";
 import type { AvailabilityVerdict, FlowSummary } from "./types";
 
@@ -231,5 +233,5 @@ export function allColumns(headerSpecs: string[]): ColumnDef[] {
 /** Resolve an ordered list of column ids into definitions (dropping unknowns). */
 export function resolveColumns(order: string[], headerSpecs: string[]): ColumnDef[] {
   const byId = new Map(allColumns(headerSpecs).map((c) => [c.id, c]));
-  return order.map((id) => byId.get(id)).filter((c): c is ColumnDef => Boolean(c));
+  return compact(order.map((id) => byId.get(id)));
 }
