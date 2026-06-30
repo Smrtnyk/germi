@@ -17,6 +17,7 @@ import { useToast } from "../toast";
 import { useCopy } from "../useCopy";
 import { useResizable } from "../useResizable";
 import { headersToText, parseCookies, parseQuery, toCurl, type KV } from "../curl";
+import { rawMessage, requestLine, statusLine } from "../rawHttp";
 import { MaximizedOverlay } from "./MaximizedOverlay";
 import {
   bodyOccurrences,
@@ -209,7 +210,7 @@ function ScopeChips({ scope, setScope }: { scope: FindScope; setScope: (s: FindS
   );
 }
 
-function FindBar({ find }: { find: InspectorFind }) {
+function FindBar({ find, rawMode }: { find: InspectorFind; rawMode: boolean }) {
   const { query, total, activeIndex } = find;
   return (
     <div className="vfind">
@@ -223,7 +224,7 @@ function FindBar({ find }: { find: InspectorFind }) {
           else if (e.key === "Escape") find.close();
         }}
       />
-      <ScopeChips scope={find.scope} setScope={find.setScope} />
+      {!rawMode && <ScopeChips scope={find.scope} setScope={find.setScope} />}
       <button
         className={find.caseSensitive ? "btn find-case on" : "btn ghost find-case"}
         title="Match case"
@@ -378,6 +379,7 @@ interface Props extends SingleProps {
 }
 
 type BodyView = "pretty" | "raw";
+type MsgView = "parsed" | "raw";
 
 function contentType(headers: [string, string][]): string {
   return (headers.find(([k]) => k.toLowerCase() === "content-type")?.[1] ?? "")
@@ -855,6 +857,89 @@ function BodyRegion({
   );
 }
 
+function RawView({
+  side,
+  startLine,
+  msg,
+  find,
+  onLoadFull,
+}: {
+  side: Side;
+  startLine: string;
+  msg: MessageDetail;
+  find: InspectorFind;
+  onLoadFull: () => void;
+}) {
+  const copy = useCopy();
+  const [wrap, setWrap] = useState(false);
+  const [maximized, setMaximized] = useState(false);
+  const rawText = useMemo(
+    () => rawMessage(startLine, msg.headers, msg.bodyText),
+    [startLine, msg.headers, msg.bodyText],
+  );
+
+  const region = (inMaximize: boolean) => (
+    <>
+      <div className="body-bar">
+        <span className="body-meta">
+          <span className="muted">Raw {side}</span>
+        </span>
+        <div className="body-actions">
+          <TextActions wrap={wrap} setWrap={setWrap} />
+          <button
+            className="btn ghost small"
+            title="Copy raw message"
+            onClick={() => copy(side === "request" ? "Raw request" : "Raw response", rawText)}
+          >
+            Copy
+          </button>
+          {!inMaximize && (
+            <button
+              className="btn ghost small"
+              title="Maximize (full view)"
+              onClick={() => setMaximized(true)}
+            >
+              ⤢
+            </button>
+          )}
+        </div>
+      </div>
+
+      {msg.truncated && (
+        <div className="trunc-banner">
+          Showing first 512&nbsp;KB of {fmtSize(msg.size)}.{" "}
+          <button className="link" onClick={onLoadFull}>
+            Load full body
+          </button>
+        </div>
+      )}
+
+      {msg.decodeTruncated && (
+        <div className="trunc-banner">
+          Decoded body truncated at 64&nbsp;MiB — too large to fully decode.
+        </div>
+      )}
+
+      <VirtualText text={rawText} wrap={wrap} find={find} />
+    </>
+  );
+
+  return (
+    <div className="message">
+      {maximized ? (
+        <MaximizedOverlay
+          title={side === "request" ? "Raw request" : "Raw response"}
+          onClose={() => setMaximized(false)}
+        >
+          {region(true)}
+        </MaximizedOverlay>
+      ) : (
+        region(false)
+      )}
+    </div>
+  );
+}
+
 function MessageView({
   msg,
   side,
@@ -1154,6 +1239,7 @@ function useFindCoordinator(
   side: Side,
   activeMsg: MessageDetail | null,
   url: string,
+  rawMode: boolean,
 ): InspectorFind {
   const {
     query: rawQuery,
@@ -1166,15 +1252,20 @@ function useFindCoordinator(
   const [bodyCount, setBodyCount] = useState(0);
   const onBodyMatchCount = useCallback((n: number) => setBodyCount(n), []);
 
+  const effScope: FindScope = rawMode ? "body" : scope;
   const query = rest.open ? rawQuery : "";
-  const headerPairs = useMemo(() => activeMsg?.headers ?? [], [activeMsg]);
+  const headerPairs = useMemo(
+    () => (rawMode ? [] : (activeMsg?.headers ?? [])),
+    [rawMode, activeMsg],
+  );
+  const effUrl = rawMode ? "" : url;
   const combined = useMemo(
-    () => combineMatches(url, headerPairs, bodyCount, query, scope, caseSensitive),
-    [url, headerPairs, bodyCount, query, scope, caseSensitive],
+    () => combineMatches(effUrl, headerPairs, bodyCount, query, effScope, caseSensitive),
+    [effUrl, headerPairs, bodyCount, query, effScope, caseSensitive],
   );
 
   const { total, regionForIndex } = combined;
-  useEffect(() => setActiveIndex(0), [detail?.id, side, setActiveIndex]);
+  useEffect(() => setActiveIndex(0), [detail?.id, side, rawMode, setActiveIndex]);
 
   const activeIndex = total ? Math.min(rawIndex, total - 1) : 0;
   const loc = regionForIndex(activeIndex);
@@ -1188,7 +1279,7 @@ function useFindCoordinator(
 
   return {
     query,
-    scope,
+    scope: effScope,
     caseSensitive,
     open: rest.open,
     setQuery: rest.setQuery,
@@ -1231,7 +1322,7 @@ function SideToggle({
   hasResponse: boolean;
 }) {
   return (
-    <div className="seg sides">
+    <div className="seg">
       <button className={side === "request" ? "on" : ""} onClick={() => setSide("request")}>
         Request
       </button>
@@ -1254,6 +1345,68 @@ function resolveActive(detail: FlowDetail | null, side: Side) {
   return { activeSide, activeMsg, url };
 }
 
+function ViewToggle({
+  msgView,
+  setMsgView,
+}: {
+  msgView: MsgView;
+  setMsgView: (v: MsgView) => void;
+}) {
+  return (
+    <div className="seg">
+      <button className={msgView === "parsed" ? "on" : ""} onClick={() => setMsgView("parsed")}>
+        Parsed
+      </button>
+      <button className={msgView === "raw" ? "on" : ""} onClick={() => setMsgView("raw")}>
+        Raw
+      </button>
+    </div>
+  );
+}
+
+function FlowMessage({
+  detail,
+  activeMsg,
+  activeSide,
+  msgView,
+  decode,
+  find,
+  onLoadFull,
+}: {
+  detail: FlowDetail;
+  activeMsg: MessageDetail;
+  activeSide: Side;
+  msgView: MsgView;
+  decode: boolean;
+  find: InspectorFind;
+  onLoadFull: () => void;
+}) {
+  if (msgView === "raw") {
+    const startLine = activeSide === "request" ? requestLine(detail) : statusLine(detail);
+    return (
+      <RawView
+        key={`${detail.id}-${activeSide}-raw`}
+        side={activeSide}
+        startLine={startLine}
+        msg={activeMsg}
+        find={find}
+        onLoadFull={onLoadFull}
+      />
+    );
+  }
+  return (
+    <MessageView
+      key={`${detail.id}-${activeSide}`}
+      msg={activeMsg}
+      side={activeSide}
+      path={detail.path}
+      decode={decode}
+      find={find}
+      onLoadFull={onLoadFull}
+    />
+  );
+}
+
 function SingleFlowView({
   detail,
   summary,
@@ -1265,9 +1418,11 @@ function SingleFlowView({
 }: SingleProps) {
   const copy = useCopy();
   const [side, setSide] = useState<Side>("response");
+  const [msgView, setMsgView] = useState<MsgView>("parsed");
+  const rawMode = msgView === "raw";
 
   const { activeSide, activeMsg, url } = resolveActive(detail, side);
-  const find = useFindCoordinator(detail, activeSide, activeMsg, url);
+  const find = useFindCoordinator(detail, activeSide, activeMsg, url, rawMode);
   useRegisterFind(detail, inspectorFindRef, find);
 
   if (!detail || !activeMsg) {
@@ -1280,7 +1435,7 @@ function SingleFlowView({
 
   return (
     <div className="inspector">
-      {find.open && <FindBar find={find} />}
+      {find.open && <FindBar find={find} rawMode={rawMode} />}
       <RequestHead
         detail={detail}
         ttfb={summary?.ttfbMs ?? null}
@@ -1290,12 +1445,15 @@ function SingleFlowView({
         copy={copy}
       />
       {summary?.availability && <AvailabilityPanel availability={summary.availability} url={url} />}
-      <SideToggle side={side} setSide={setSide} hasResponse={!!detail.response} />
-      <MessageView
-        key={`${detail.id}-${activeSide}`}
-        msg={activeMsg}
-        side={activeSide}
-        path={detail.path}
+      <div className="inspect-modes">
+        <SideToggle side={side} setSide={setSide} hasResponse={!!detail.response} />
+        <ViewToggle msgView={msgView} setMsgView={setMsgView} />
+      </div>
+      <FlowMessage
+        detail={detail}
+        activeMsg={activeMsg}
+        activeSide={activeSide}
+        msgView={msgView}
         decode={decode}
         find={find}
         onLoadFull={onLoadFull}

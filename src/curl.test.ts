@@ -1,40 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { headersToText, parseCookies, parseQuery, toCurl } from "./curl";
-import type { FlowDetail, MessageDetail } from "./types";
-
-function message(overrides: Partial<MessageDetail> = {}): MessageDetail {
-  return {
-    headers: [],
-    bodyText: "",
-    bodyBase64: "",
-    size: 0,
-    encoding: null,
-    decoded: false,
-    truncated: false,
-    decodeTruncated: false,
-    ...overrides,
-  };
-}
-
-function detail(overrides: Partial<FlowDetail> = {}): FlowDetail {
-  return {
-    id: "1",
-    method: "GET",
-    uri: "https://example.com/",
-    host: "example.com",
-    path: "/",
-    scheme: "https",
-    reqVersion: "HTTP/1.1",
-    request: message(),
-    status: 200,
-    respVersion: "HTTP/1.1",
-    response: null,
-    matchedRule: null,
-    durationMs: null,
-    timestampMs: 0,
-    ...overrides,
-  };
-}
+import { detail, message } from "./flowFixtures";
 
 describe("toCurl", () => {
   it("renders a bare GET without -X or a body", () => {
