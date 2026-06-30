@@ -364,6 +364,9 @@ textarea {
 .seg button:disabled {
   opacity: 0.4;
 }
+.seg.sides {
+  align-self: flex-start;
+}
 
 .error-bar {
   background: #3a1d1d;
@@ -722,12 +725,29 @@ textarea {
   opacity: 1;
 }
 
+.flow-scroll-area {
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
 .flow-scroll {
   position: relative;
   overflow: auto;
   overscroll-behavior: contain;
   min-height: 0;
   min-width: 0;
+}
+.match-rail {
+  width: 9px;
+  cursor: pointer;
+  border-left: 1px solid var(--line);
+  background-color: var(--bg-1);
+  background-repeat: no-repeat;
+}
+.match-rail:hover {
+  background-color: var(--bg-2);
 }
 .flow-canvas {
   position: relative;

@@ -19,6 +19,7 @@ import { flowUrl } from "../flowUrl";
 import { dragFlowIds, encodeFlowIds, FLOW_DRAG_MIME } from "../dnd";
 import { useToast } from "../toast";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
+import { MatchRail } from "./MatchRail";
 
 interface Props {
   flows: FlowSummary[];
@@ -645,8 +646,13 @@ function FlowScroll({
     }
   }
 
+  function jumpTo(index: number) {
+    stopFollowing();
+    virtualizer.scrollToIndex(index, { align: "center" });
+  }
+
   return (
-    <>
+    <div className="flow-scroll-area">
       <div
         className="flow-scroll"
         ref={parentRef}
@@ -688,6 +694,8 @@ function FlowScroll({
         )}
       </div>
 
+      {matchedIds !== null && <MatchRail flows={flows} matchedIds={matchedIds} onJump={jumpTo} />}
+
       {!follow && newCount > 0 && (
         <button
           className="follow-pill"
@@ -697,7 +705,7 @@ function FlowScroll({
           {newCount} new ↓
         </button>
       )}
-    </>
+    </div>
   );
 }
 
