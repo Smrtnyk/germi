@@ -42,8 +42,10 @@ secrets)
 
 **Reuse & simplification**
 - Duplicated logic that should reuse `body.rs`, `rules.rs`, the existing
-  `ProxyController` methods, or shared frontend helpers (`filter.ts`,
-  `columns.ts`).
+  `ProxyController` methods, shared frontend helpers (`filter.ts`, `columns.ts`),
+  or **es-toolkit** pure helpers — a hand-rolled `clamp`/`debounce`/`groupBy`/
+  `uniqBy`/deep-equality in `src/` should use `es-toolkit` instead of reinventing
+  it (but don't flag a plain `.map`/`.filter` that's already idiomatic).
 - Over-engineering, dead code, needless allocations on hot paths (capture/IPC).
 - Frontend perf regressions: un-virtualized lists, eagerly-imported CodeMirror,
   un-batched/un-debounced IPC.

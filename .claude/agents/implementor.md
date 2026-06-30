@@ -55,6 +55,11 @@ existing files you're about to touch and the precedent the architect named —
   batch events, lazy-load detail via `get_flow`, cap large bodies (512 KB
   `DISPLAY_CAP`), keep lists virtualized (`@tanstack/react-virtual`), keep
   CodeMirror lazy-loaded (`React.lazy`), debounce persistence.
+- **Reuse es-toolkit in the frontend** — the project depends on **es-toolkit**
+  (exact-pinned). Use its pure helpers (`clamp`, `debounce`, `compact`,
+  `countBy`/`sumBy`, `difference`/`intersection`, `isEqual`, `isPlainObject`,
+  `inRange`, …) instead of hand-rolling them; import from `"es-toolkit"`. Only
+  when it's a genuine simplification — don't wrap a plain `.map`/`.filter`.
 - **No background traffic persistence** — captured bodies/tokens stay in memory;
   only explicit `.germi` save writes them to disk. Don't add silent flow
   persistence.
