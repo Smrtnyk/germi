@@ -1094,7 +1094,10 @@ textarea {
   color: var(--accent);
   background: var(--chip-on-bg);
 }
-.sides {
+.inspect-modes {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
   margin: 10px;
 }
 
