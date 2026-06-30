@@ -87,5 +87,10 @@ jobs:
       - name: Build frontend (tsc + vite)
         run: pnpm build
 
+      # Vitest browser-mode (component tests, `src/**/*.test.tsx`) drives a real
+      # headless Chromium via Playwright; the node project needs no browser.
+      - name: Install Playwright Chromium (vitest browser mode)
+        run: pnpm exec playwright install --with-deps chromium
+
       - name: Test frontend (vitest)
         run: pnpm test

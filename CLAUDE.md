@@ -63,8 +63,13 @@ Frontend / app (from repo root):
 - `pnpm tauri build` — produce installers (.msi/.exe, .deb/.AppImage/.rpm).
 - `pnpm build` — `tsc --noEmit && vite build`; **use this to type-check the
   frontend**.
-- `pnpm test` — run the frontend unit tests with Vitest (`src/**/*.test.ts`,
-  node env); `pnpm test:watch` for watch mode.
+- `pnpm test` — run the frontend unit tests with Vitest. **Two projects share
+  one run** (`vitest.config.ts`): a **node** project for pure DOM-free logic
+  (`src/**/*.test.ts`) and a **browser** project that renders React components and
+  DOM hooks (`src/**/*.test.tsx`) in a real headless Chromium via Playwright
+  (`@vitest/browser-playwright`). The `.ts`/`.tsx` extension is the routing key.
+  `pnpm test:watch` for watch mode. CI runs `npx playwright install chromium`
+  before `pnpm test` for the browser project (browsers are not bundled).
 
 Engine (proxy-core — these work without the GUI system libs):
 - `cargo test -p proxy-core` — run all engine tests.
@@ -125,6 +130,20 @@ Engine (proxy-core — these work without the GUI system libs):
   `AutoresponderPanel.tsx` so it doesn't bloat startup. Autoresponder IPC carries
   lightweight rule summaries; full headers/bodies are fetched only for the
   selected rule. Keep those boundaries intact.
+- **Frontend tests — `.ts` is node, `.tsx` is browser:** pure DOM-free helpers
+  are tested on the fast node project as `src/<module>.test.ts` (build inputs with
+  small factories — see `flowFixtures.ts` — and assert through the public API).
+  Anything that **renders a component or drives a DOM hook** is a `src/**/*.test.tsx`
+  file on the **browser** project (real Chromium), using **`vitest-browser-react`**:
+  `const screen = await render(<Comp .../>)` (render is async!), query with
+  `screen.getByRole(...)`, assert with `await expect.element(loc).toBeVisible()`,
+  interact with `await loc.click()` / `userEvent` from `"vitest/browser"`, and use
+  `vi.fn()` for callbacks. Prefer the browser project for components precisely
+  because `<dialog>.showModal()`, the top layer, focus and pointer geometry behave
+  like production (jsdom fakes them). See `ConfirmDialog.test.tsx` for the idiom and
+  `.claude/skills/browser-testing/SKILL.md` for the full reference. Components that
+  pull in Tauri IPC are not directly renderable — keep presentational pieces
+  prop-driven so they stay testable.
 - **Frontend utilities — reuse es-toolkit:** the frontend depends on
   **es-toolkit** (`package.json`, exact-pinned, zero transitive deps). Reach for
   its pure helpers instead of hand-rolling them — `clamp`, `debounce`/`throttle`,
