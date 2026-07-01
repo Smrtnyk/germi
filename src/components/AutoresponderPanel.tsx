@@ -11,7 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { debounce } from "es-toolkit";
+import { debounce, isEqual } from "es-toolkit";
 
 import { api } from "../ipc";
 import { ruleLabel } from "../autoresponderState";
@@ -170,8 +170,18 @@ function ruleWarnings(rule: Rule): string[] {
   if (!rule.matcher.url.trim()) {
     w.push("URL pattern is empty — this rule matches every request.");
   } else if (rule.matcher.urlMatch === "regex") {
+    // The engine compiles with the Rust `regex` crate, whose dialect differs from
+    // JS. Normalize Rust-style named groups ((?P<n>…)) before the JS validity
+    // check so they don't false-warn, and flag lookaround/backreferences — valid
+    // JS but unsupported by Rust, so the rule would look fine here yet never match.
+    const pat = rule.matcher.url;
     try {
-      RegExp(rule.matcher.url);
+      RegExp(pat.replace(/\(\?P</g, "(?<"));
+      if (/\(\?<?[=!]|\\[1-9]/.test(pat)) {
+        w.push(
+          "URL regex uses lookaround/backreferences, which the engine doesn't support — this rule will never match.",
+        );
+      }
     } catch {
       w.push("URL regex is invalid — this rule will never match.");
     }
@@ -391,8 +401,18 @@ export function useSelectedRule(
   const updateRuleRef = useRef(onUpdateRule);
   loadRuleRef.current = onLoadRule;
   updateRuleRef.current = onUpdateRule;
+  const prevDeps = useRef({ scenarioId, selectedRuleId, reloadToken });
 
   useEffect(() => {
+    const prev = prevDeps.current;
+    // An external reload = same rule/scenario but a bumped reloadToken (undo/redo,
+    // a cross-window edit). It supersedes any un-flushed pending edit, so we must
+    // NOT re-commit that edit over the reverted state (which made undo a no-op).
+    const externalReload =
+      prev.scenarioId === scenarioId &&
+      prev.selectedRuleId === selectedRuleId &&
+      prev.reloadToken !== reloadToken;
+    prevDeps.current = { scenarioId, selectedRuleId, reloadToken };
     const generation = ++loadGeneration.current;
     if (!selectedRuleId) {
       setRule(null);
@@ -405,7 +425,7 @@ export function useSelectedRule(
       saveTimer.current = null;
       const pending = pendingRule.current;
       pendingRule.current = null;
-      if (pending) await updateRuleRef.current(scenarioId, pending);
+      if (pending && !externalReload) await updateRuleRef.current(scenarioId, pending);
       return loadRuleRef.current(selectedRuleId);
     };
     void load().then((loaded) => {
@@ -1105,7 +1125,10 @@ function useScenarioWorkspace(
   }
 
   async function toggleRule(id: string, enabled: boolean) {
-    if (editor.rule?.id === id) {
+    // If the rule is open in a detached window its inline copy here is locked and
+    // stale; toggling via editor.patch would save that stale body and clobber the
+    // window's edits. Apply the toggle to a fresh backend copy in that case.
+    if (editor.rule?.id === id && !openWindowRuleIds.has(id)) {
       editor.patch({ enabled });
       return;
     }
@@ -1954,17 +1977,27 @@ function HeadersTable({
 }) {
   // Keep stable per-row ids so removing a middle row doesn't rebind input DOM
   // state (focus / selection / IME) to the wrong logical row (the index-as-key
-  // anti-pattern). The DTO stays [name, value][]; ids are local-only. This
-  // component remounts per rule (RuleEditor is keyed by rule id) and per action
-  // kind, so the prop is the source of truth only at mount.
+  // anti-pattern). The DTO stays [name, value][]; ids are local-only.
   const nextId = useRef(0);
-  const [rows, setRows] = useState(() =>
-    headers.map(([name, value]) => ({ id: nextId.current++, name, value })),
-  );
+  const seed = () => headers.map(([name, value]) => ({ id: nextId.current++, name, value }));
+  const [rows, setRows] = useState(seed);
+
+  // RuleEditor is keyed by rule id, so it does NOT remount when the rule is
+  // replaced externally (undo, a cross-window reload) — only its `headers` prop
+  // changes. Re-seed the rows on such a change so the table can't show and
+  // re-commit stale headers. Our own edits echo back with equal content, so this
+  // compares content (not reference) to avoid stomping in-progress typing.
+  const committed = useRef(headers);
+  if (!isEqual(committed.current, headers)) {
+    committed.current = headers;
+    setRows(seed());
+  }
 
   const emit = (next: { id: number; name: string; value: string }[]) => {
     setRows(next);
-    onChange(next.map((r) => [r.name, r.value] as [string, string]));
+    const pairs = next.map((r) => [r.name, r.value] as [string, string]);
+    committed.current = pairs;
+    onChange(pairs);
   };
 
   return (

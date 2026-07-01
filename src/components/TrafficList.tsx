@@ -633,6 +633,10 @@ function FlowScroll({
     ) {
       return;
     }
+    // A Ctrl/Meta/Alt chord (e.g. Ctrl+K palette) belongs to the global shortcut
+    // handler, not list navigation — otherwise it would both move the selection
+    // and fire the shortcut. Shift is allowed through (range-extend selection).
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     const n = flows.length;
     if (n === 0) return;
     const cur = selectedId ? flows.findIndex((f) => f.id === selectedId) : -1;

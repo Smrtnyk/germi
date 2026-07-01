@@ -69,6 +69,30 @@ function useExternalReloadToken(label: string, ruleId: string): number {
   return reloadToken;
 }
 
+/** Live fire-count for this rule so the detached editor's "n/N fired" badge is
+ *  accurate (the main list polls the same source). Re-polls on a modest interval
+ *  and whenever the rule reloads. */
+function useRuleHitCount(ruleId: string, reloadToken: number): number {
+  const [hits, setHits] = useState(0);
+  useEffect(() => {
+    let active = true;
+    const poll = () =>
+      void api
+        .ruleHits()
+        .then((all) => {
+          if (active) setHits(all[ruleId] ?? 0);
+        })
+        .catch(() => {});
+    poll();
+    const timer = window.setInterval(poll, 1500);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [ruleId, reloadToken]);
+  return hits;
+}
+
 /** Window lifecycle: Esc and the OS close button both flush the pending save,
  *  tell the main window this rule is gone (unlocking its inline editor), then
  *  destroy the window. Returns the Delete handler, which does the same. */
@@ -174,6 +198,7 @@ export function RuleDetailWindow({ ruleId, scenarioId }: { ruleId: string; scena
 
   const editor = useSelectedRule(scenarioId, ruleId, load, update, reloadToken);
   const handleDelete = useDetailWindowClose(ruleId, scenarioId, editor, setError);
+  const hits = useRuleHitCount(ruleId, reloadToken);
   useRememberWindowSize();
 
   // Keep the OS window title in step with the rule's URL (rules have no name).
@@ -189,7 +214,7 @@ export function RuleDetailWindow({ ruleId, scenarioId }: { ruleId: string; scena
         {editor.rule ? (
           <RuleEditor
             rule={editor.rule}
-            hits={0}
+            hits={hits}
             onPatch={editor.patch}
             onDelete={() => void handleDelete()}
           />
