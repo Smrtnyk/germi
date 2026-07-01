@@ -42,6 +42,8 @@ describe("StatusBar", () => {
     await expect.element(stat).toHaveClass("viewer");
     expect(screen.container.textContent).not.toContain("Stopped");
     expect(screen.container.textContent).not.toContain("Listening");
+    // The autoresponder is disabled in viewer mode, so its segment is hidden.
+    expect(screen.container.textContent).not.toContain("Autoresponder");
   });
 
   it("displays the captured flow count", async () => {

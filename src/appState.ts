@@ -1593,7 +1593,7 @@ export function useAppState() {
     !viewer,
   );
   useProxyIndicator(proxy.systemProxy);
-  const autoresponderActive = rightTab === "autoresponder" || rightMode === "split";
+  const autoresponderActive = !viewer && (rightTab === "autoresponder" || rightMode === "split");
   const ar = useAutoresponder(setError, setRightTab, notify, autoresponderActive);
   const ruleWindows = useRuleWindows(ar.autoresponder, ar.refresh, setError);
   const history = useHistory(ar.refresh, setError);
