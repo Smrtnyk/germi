@@ -72,6 +72,11 @@ jobs:
       - name: Clippy Tauri shell
         run: cargo clippy -p germi --all-targets -- -D warnings
 
+      # The shell's unit tests (rule_store SQLite + --viewer arg parsing) are
+      # compiled by the clippy step above but must also be run.
+      - name: Test Tauri shell
+        run: cargo test -p germi
+
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
