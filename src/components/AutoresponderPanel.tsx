@@ -19,7 +19,6 @@ import { decodeFlowIds, FLOW_DRAG_MIME, hasFlowDrag, RULE_DRAG_MIME } from "../d
 import type {
   Action,
   ActionKind,
-  ActionSummary,
   AutoResponderSummary,
   BulkMockEvent,
   HistoryTag,
@@ -29,6 +28,8 @@ import type {
   ScenarioSummary,
 } from "../types";
 import { isShallowScope, ruleMatchesScopeClient } from "../ruleScope";
+import { ruleRowParts, type RuleRowParts } from "../ruleRow";
+import type { AutoLayout } from "../appState";
 import { useResizable } from "../useResizable";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
@@ -37,9 +38,12 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconClose,
+  IconExternal,
   IconGrip,
   IconMaximize,
   IconMock,
+  IconPanelCollapse,
+  IconPanelExpand,
   IconPower,
   IconWarn,
 } from "./icons";
@@ -50,6 +54,30 @@ import { Tooltip } from "./Tooltip";
 // Lazy-loaded so CodeMirror (and its language packs) is a separate chunk fetched
 // only when a mock body is actually edited — keeps app startup light.
 const BodyEditor = lazy(() => import("./BodyEditor").then((m) => ({ default: m.BodyEditor })));
+
+const COLLAPSE_KEY = "germi.ruleDetailCollapsed";
+
+/** Persisted "is the rule detail pane collapsed" toggle (issue #72, feature D). */
+function useDetailCollapsed(): [boolean, (fn: (c: boolean) => boolean) => void] {
+  const [collapsed, setCollapsedState] = useState(() => {
+    try {
+      return localStorage.getItem(COLLAPSE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const setCollapsed = (fn: (c: boolean) => boolean) =>
+    setCollapsedState((prev) => {
+      const next = fn(prev);
+      try {
+        localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0");
+      } catch {
+        /* ignore quota / privacy-mode errors */
+      }
+      return next;
+    });
+  return [collapsed, setCollapsed];
+}
 
 interface ScenarioActions {
   activate: (scenarioId: string | null) => void;
@@ -85,6 +113,12 @@ export interface AutoresponderPanelProps {
   bulkMockProgress: BulkMockEvent | null;
   /** Bumped on every undo/redo so the open rule re-fetches its reverted value. */
   reloadToken?: number;
+  /** Where the rule detail sits relative to the list (Settings → Autoresponder). */
+  layout: AutoLayout;
+  /** Rule ids currently open in a detached editor window. */
+  openWindowRuleIds: Set<string>;
+  /** Open (or focus) a rule's detached editor window. */
+  onOpenRuleWindow: (ruleId: string) => void;
 }
 
 const ACTION_KINDS: { value: ActionKind; label: string }[] = [
@@ -121,37 +155,6 @@ function defaultAction(kind: ActionKind): Action {
     case "rewriteResponseBody":
       return { kind: "rewriteResponseBody", find: "", replace: "", regex: false };
   }
-}
-
-/** Keep the unique tail of long URL-ish names visible (CSS can't middle-ellipsis). */
-function middleTruncate(s: string, max = 46): string {
-  if (s.length <= max) return s;
-  const head = Math.ceil((max - 1) * 0.62);
-  const tail = max - 1 - head;
-  return `${s.slice(0, head)}…${s.slice(s.length - tail)}`;
-}
-
-function actionSummary(a: ActionSummary): string {
-  switch (a.kind) {
-    case "respond":
-      return `${a.status}${a.contentType ? " " + a.contentType.split(";")[0] : ""}${a.contentEncoding ? ` · ${a.contentEncoding}` : ""}`;
-    case "mapLocal":
-      return `file → ${a.status}`;
-    case "block":
-      return "block 403";
-    case "setStatus":
-      return `status ${a.status}`;
-    case "setResponseHeader":
-      return `resp ${a.name || "header"}`;
-    case "setRequestHeader":
-      return `req ${a.name || "header"}`;
-    case "rewriteResponseBody":
-      return "rewrite body";
-  }
-}
-
-function ruleSummary(r: RuleSummary): string {
-  return `${r.matcher.method || "ANY"} → ${actionSummary(r.action)}`;
 }
 
 function fireBadge(rule: RuleSummary): string | null {
@@ -215,13 +218,90 @@ function Section({
   );
 }
 
-function RuleListItem({
+interface RuleDragCallbacks {
+  onDragStart: () => void;
+  onDragOver: () => void;
+  onDrop: () => void;
+  onDragEnd: () => void;
+}
+
+/** The native drag/drop handlers for a rule row — extracted so the guards don't
+ *  inflate the row component's complexity; flow drags (drop-to-mock) are ignored
+ *  here so only rule-reorder drags are handled. */
+function ruleDragProps(rule: RuleSummary, draggable: boolean, cb: RuleDragCallbacks) {
+  return {
+    draggable,
+    onDragStart: (e: ReactDragEvent) => {
+      e.dataTransfer.setData(RULE_DRAG_MIME, rule.id);
+      e.dataTransfer.effectAllowed = "move";
+      cb.onDragStart();
+    },
+    onDragOver: (e: ReactDragEvent) => {
+      if (!draggable || hasFlowDrag(e.dataTransfer.types)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      cb.onDragOver();
+    },
+    onDrop: (e: ReactDragEvent) => {
+      if (hasFlowDrag(e.dataTransfer.types)) return;
+      e.preventDefault();
+      cb.onDrop();
+    },
+    onDragEnd: cb.onDragEnd,
+  };
+}
+
+/** The two text lines of a compact row: host/path on top (the rule's identity,
+ *  since rules have no name — issue #74), the action summary below. A disabled
+ *  rule strikes through the URL, matching the old name treatment. */
+function ruleRowLines(
+  parts: RuleRowParts,
+  enabled: boolean,
+): { primary: ReactNode; secondary: ReactNode } {
+  return {
+    primary: <RulePattern host={parts.host} path={parts.path} off={enabled ? "" : "off"} />,
+    secondary: <span className="raction">{parts.action}</span>,
+  };
+}
+
+function RuleRowMarkers({
+  rule,
+  hits,
+  poppedOut,
+}: {
+  rule: RuleSummary;
+  hits: number;
+  poppedOut: boolean;
+}) {
+  const badge = fireBadge(rule);
+  return (
+    <>
+      {poppedOut && (
+        <span className="rpop" title="Open in a separate window">
+          <IconExternal />
+        </span>
+      )}
+      {badge && (
+        <span className="rfire">
+          {badge}
+          {rule.fireLimit !== null && ` ${hits}/${rule.fireLimit}`}
+        </span>
+      )}
+    </>
+  );
+}
+
+/** A compact traffic-list-style row: method badge + host/path (never the URL
+ *  twice), a small action line, and the fire/popped-out markers (issue #72). */
+export function RuleListItem({
   rule,
   selected,
+  poppedOut,
   hits,
   draggable,
   dragOver,
   onSelect,
+  onOpen,
   onToggle,
   onContextMenu,
   onDragStart,
@@ -231,10 +311,12 @@ function RuleListItem({
 }: {
   rule: RuleSummary;
   selected: boolean;
+  poppedOut: boolean;
   hits: number;
   draggable: boolean;
   dragOver: boolean;
   onSelect: () => void;
+  onOpen: () => void;
   onToggle: (enabled: boolean) => void;
   onContextMenu: (event: ReactMouseEvent) => void;
   onDragStart: () => void;
@@ -242,32 +324,20 @@ function RuleListItem({
   onDrop: () => void;
   onDragEnd: () => void;
 }) {
-  const badge = fireBadge(rule);
+  const parts = ruleRowParts(rule);
+  const { primary, secondary } = ruleRowLines(parts, rule.enabled);
   const label = ruleLabel(rule.matcher.url);
+  const cls = `rule-item ${selected ? "selected" : ""} ${dragOver ? "dragover" : ""} ${
+    poppedOut ? "poppedout" : ""
+  }`;
   return (
     <div
-      className={`rule-item ${selected ? "selected" : ""} ${dragOver ? "dragover" : ""}`}
+      className={cls}
       onClick={onSelect}
+      onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
-      title={label}
-      draggable={draggable}
-      onDragStart={(e) => {
-        e.dataTransfer.setData(RULE_DRAG_MIME, rule.id);
-        e.dataTransfer.effectAllowed = "move";
-        onDragStart();
-      }}
-      onDragOver={(e) => {
-        if (!draggable || hasFlowDrag(e.dataTransfer.types)) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-        onDragOver();
-      }}
-      onDrop={(e) => {
-        if (hasFlowDrag(e.dataTransfer.types)) return;
-        e.preventDefault();
-        onDrop();
-      }}
-      onDragEnd={onDragEnd}
+      title={`${label}\nDouble-click to open in a separate window`}
+      {...ruleDragProps(rule, draggable, { onDragStart, onDragOver, onDrop, onDragEnd })}
     >
       {draggable && (
         <span className="rgrip" title="Drag to reorder (evaluation order matters)">
@@ -282,26 +352,29 @@ function RuleListItem({
       />
       <div className="rmeta">
         <div className="rtop">
-          <span className={`rname ${rule.enabled ? "" : "off"}`}>{middleTruncate(label)}</span>
-          {rule.action.kind !== "respond" && <span className="rkind">{rule.action.kind}</span>}
+          <span className={`rmethod ${parts.methodClass ?? ""}`}>{parts.method}</span>
+          {primary}
+          <div className="spacer" />
+          <RuleRowMarkers rule={rule} hits={hits} poppedOut={poppedOut} />
         </div>
-        <div className="rsub">
-          {ruleSummary(rule)}
-          {badge && (
-            <span className="rfire">
-              {badge}
-              {rule.fireLimit !== null && ` ${hits}/${rule.fireLimit}`}
-            </span>
-          )}
-        </div>
+        <div className="rsub">{secondary}</div>
       </div>
     </div>
   );
 }
 
+function RulePattern({ host, path, off }: { host: string; path: string; off: string }) {
+  return (
+    <span className={`rurl ${off}`}>
+      {host && <span className="rhost">{host}</span>}
+      <span className="rpath">{path || (host ? "/" : "*")}</span>
+    </span>
+  );
+}
+
 type SaveState = "idle" | "saving" | "saved";
 
-function useSelectedRule(
+export function useSelectedRule(
   scenarioId: string,
   selectedRuleId: string | null,
   onLoadRule: (ruleId: string) => Promise<Rule | null>,
@@ -581,6 +654,8 @@ function useRuleMenu(
 interface RuleListBehavior {
   selectedRuleId: string | null;
   setSelectedRuleId: (id: string | null) => void;
+  openWindowRuleIds: Set<string>;
+  onOpen: (id: string) => void;
   canReorder: boolean;
   dragId: string | null;
   setDragId: (id: string | null) => void;
@@ -706,6 +781,8 @@ function VirtualRuleList({
   const {
     selectedRuleId,
     setSelectedRuleId,
+    openWindowRuleIds,
+    onOpen,
     canReorder,
     dragId,
     setDragId,
@@ -732,7 +809,7 @@ function VirtualRuleList({
     count: rules.length,
     getScrollElement: () => scrollRef.current,
     getItemKey: (index) => rules[index].id,
-    estimateSize: () => 52,
+    estimateSize: () => 44,
     overscan: 8,
   });
 
@@ -756,10 +833,12 @@ function VirtualRuleList({
               <RuleListItem
                 rule={rule}
                 selected={rule.id === selectedRuleId}
+                poppedOut={openWindowRuleIds.has(rule.id)}
                 hits={ruleHits[rule.id] ?? 0}
                 draggable={canReorder}
                 dragOver={overId === rule.id && dragId !== rule.id}
                 onSelect={() => setSelectedRuleId(rule.id)}
+                onOpen={() => onOpen(rule.id)}
                 onToggle={(enabled) => onToggle(rule.id, enabled)}
                 onContextMenu={(event) => openMenu(event, rule)}
                 onDragStart={() => setDragId(rule.id)}
@@ -783,28 +862,81 @@ function VirtualRuleList({
   );
 }
 
-function RuleEditorPane({
-  scenarioId,
-  selectedRule,
-  loading,
-  ruleHits,
-  onPatchRule,
-  onDeleteRule,
-}: {
+interface RuleEditorPaneProps {
   scenarioId: string;
   selectedRule: Rule | null;
   loading: boolean;
   ruleHits: Record<string, number>;
+  poppedOut: boolean;
+  layout: AutoLayout;
+  onOpen: (id: string) => void;
+  onCollapse: () => void;
   onPatchRule: (p: Partial<Rule>, tag?: HistoryTag) => void;
   onDeleteRule: (id: string) => void;
-}) {
+}
+
+function RuleDetailHead({
+  selectedRule,
+  layout,
+  onOpen,
+  onCollapse,
+}: Pick<RuleEditorPaneProps, "selectedRule" | "layout" | "onOpen" | "onCollapse">) {
+  const collapseTitle =
+    layout === "stacked" ? "Collapse details (hide below)" : "Collapse details (hide on the right)";
   return (
-    <section className="rule-editor">
-      {!selectedRule ? (
-        <div className="muted pad">
-          {loading ? "Loading rule…" : "Select a rule to edit it, or add one."}
-        </div>
-      ) : (
+    <div className="rule-detail-head">
+      <span className="rule-detail-title">
+        {selectedRule ? ruleLabel(selectedRule.matcher.url) : "Details"}
+      </span>
+      <div className="spacer" />
+      {selectedRule && (
+        <button
+          className="btn ghost small"
+          title="Open this rule in a separate window"
+          onClick={() => onOpen(selectedRule.id)}
+        >
+          <IconExternal />
+        </button>
+      )}
+      <button className="btn ghost small" title={collapseTitle} onClick={onCollapse}>
+        <IconPanelCollapse />
+      </button>
+    </div>
+  );
+}
+
+function RuleLockedNotice({ ruleId, onOpen }: { ruleId: string; onOpen: (id: string) => void }) {
+  return (
+    <div className="rule-locked muted pad">
+      <IconExternal />
+      <p>This rule is open in a separate window. Close that window to edit it here.</p>
+      <button className="btn small" onClick={() => onOpen(ruleId)}>
+        Focus window
+      </button>
+    </div>
+  );
+}
+
+function RuleDetailBody({
+  scenarioId,
+  selectedRule,
+  loading,
+  ruleHits,
+  locked,
+  onOpen,
+  onPatchRule,
+  onDeleteRule,
+}: Omit<RuleEditorPaneProps, "layout" | "onCollapse" | "poppedOut"> & { locked: boolean }) {
+  if (locked && selectedRule) {
+    return (
+      <div className="rule-detail-body">
+        <RuleLockedNotice ruleId={selectedRule.id} onOpen={onOpen} />
+      </div>
+    );
+  }
+  return (
+    <div className="rule-detail-body">
+      {selectedRule ? (
         <RuleEditor
           key={selectedRule.id}
           rule={selectedRule}
@@ -812,14 +944,55 @@ function RuleEditorPane({
           onPatch={onPatchRule}
           onDelete={() => onDeleteRule(selectedRule.id)}
         />
+      ) : (
+        <div className="muted pad">
+          {loading ? "Loading rule…" : "Select a rule to edit it, or add one."}
+        </div>
       )}
-
       <RuleTester
         scenarioId={scenarioId}
         seedMethod={selectedRule?.matcher.method ?? undefined}
         seedUrl={selectedRule?.matcher.url || undefined}
       />
+    </div>
+  );
+}
+
+function RuleEditorPane(props: RuleEditorPaneProps) {
+  const { selectedRule, layout, poppedOut, onOpen, onCollapse } = props;
+  const locked = !!selectedRule && poppedOut;
+  return (
+    <section className="rule-editor">
+      <RuleDetailHead
+        selectedRule={selectedRule}
+        layout={layout}
+        onOpen={onOpen}
+        onCollapse={onCollapse}
+      />
+      <RuleDetailBody
+        scenarioId={props.scenarioId}
+        selectedRule={selectedRule}
+        loading={props.loading}
+        ruleHits={props.ruleHits}
+        locked={locked}
+        onOpen={onOpen}
+        onPatchRule={props.onPatchRule}
+        onDeleteRule={props.onDeleteRule}
+      />
     </section>
+  );
+}
+
+/** The collapsed detail pane: a thin rail with an expand affordance, mirroring
+ *  the app-level PanelRail but scoped to the autoresponder list/detail split. */
+function RuleDetailRail({ layout, onExpand }: { layout: AutoLayout; onExpand: () => void }) {
+  return (
+    <div className={`rule-detail-rail ${layout}`}>
+      <button className="rail-btn" onClick={onExpand} title="Show rule details">
+        <IconPanelExpand />
+        <span className="rail-label">Details</span>
+      </button>
+    </div>
   );
 }
 
@@ -865,22 +1038,59 @@ function useScenarioWorkspace(
   active: ScenarioSummary,
   selectRuleId: string | null | undefined,
   ruleActions: RuleActions,
+  openWindowRuleIds: Set<string>,
   reloadToken?: number,
 ) {
   const selection = useRuleSelection(selectRuleId);
+  const selectedId = selection.selectedRuleId;
+  const selectedPopped = selectedId ? openWindowRuleIds.has(selectedId) : false;
+
+  // When the selected rule's detached window closes, the inline copy loaded here
+  // is stale (the window saved a newer version). Bump a reload nonce on that
+  // pop→unpop transition so the inline editor re-fetches instead of showing —
+  // and then letting a follow-up edit overwrite — the old body.
+  const [externalReload, setExternalReload] = useState(0);
+  const prevPoppedRef = useRef(selectedPopped);
+  useEffect(() => {
+    if (prevPoppedRef.current && !selectedPopped) setExternalReload((n) => n + 1);
+    prevPoppedRef.current = selectedPopped;
+  }, [selectedPopped]);
+
   const editor = useSelectedRule(
     active.id,
-    selection.selectedRuleId,
+    selectedId,
     ruleActions.load,
     ruleActions.update,
-    reloadToken,
+    (reloadToken ?? 0) + externalReload,
   );
+
+  // The selected rule vanished (deleted here, or from its detached window) — drop
+  // the selection so the inline editor doesn't keep a phantom, editable copy that
+  // would save against a non-existent rule id.
+  useEffect(() => {
+    if (selectedId && !active.rules.some((r) => r.id === selectedId)) {
+      editor.clearPending();
+      selection.setSelectedRuleId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active.rules, selectedId]);
+
   const rulesRef = useRef<HTMLDivElement>(null);
+  // Side (left/right) sizes the list WIDTH; stacked (top/bottom) sizes the list
+  // HEIGHT. Two independent resizers so a persisted width isn't reused as a
+  // height (or vice-versa) when the orientation is switched.
   const listResize = useResizable({
     initial: 240,
     min: 170,
     getMax: () => (rulesRef.current?.clientWidth ?? 700) - 280,
     storageKey: "germi.ruleListWidth",
+  });
+  const listResizeV = useResizable({
+    initial: 220,
+    min: 120,
+    getMax: () => (rulesRef.current?.clientHeight ?? 600) - 200,
+    storageKey: "germi.ruleListHeight",
+    axis: "y",
   });
 
   const deepIds = useDeepRuleSearch(active.id, selection.query, selection.scope);
@@ -922,6 +1132,7 @@ function useScenarioWorkspace(
     editor,
     rulesRef,
     listResize,
+    listResizeV,
     shownRules,
     addRule,
     toggleRule,
@@ -986,21 +1197,60 @@ function ScenarioHeader({
   );
 }
 
+function workspaceGrid(
+  layout: AutoLayout,
+  collapsed: boolean,
+  widthPx: number,
+  heightPx: number,
+): { gridTemplateColumns?: string; gridTemplateRows?: string } {
+  if (layout === "stacked") {
+    return {
+      gridTemplateColumns: "1fr",
+      gridTemplateRows: collapsed
+        ? "minmax(0, 1fr) 34px"
+        : `minmax(0, ${heightPx}px) 6px minmax(160px, 1fr)`,
+    };
+  }
+  return {
+    gridTemplateColumns: collapsed
+      ? "minmax(0, 1fr) 34px"
+      : `minmax(0, ${widthPx}px) 6px minmax(280px, 1fr)`,
+  };
+}
+
 function ScenarioRuleWorkspace({
   active,
   workspace,
   ruleHits,
   ruleActions,
+  layout,
+  collapsed,
+  onToggleCollapse,
+  openWindowRuleIds,
+  onOpenRuleWindow,
 }: {
   active: ScenarioSummary;
   workspace: ScenarioWorkspace;
   ruleHits: Record<string, number>;
   ruleActions: RuleActions;
+  layout: AutoLayout;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+  openWindowRuleIds: Set<string>;
+  onOpenRuleWindow: (ruleId: string) => void;
 }) {
-  const { selection, editor, listResize } = workspace;
+  const { selection, editor, listResize, listResizeV } = workspace;
+  // Flush the inline editor's pending debounced edit before popping a rule out,
+  // so the detached window loads the just-typed value rather than a stale one.
+  const openWindow = (ruleId: string) => {
+    if (editor.rule?.id === ruleId) void editor.flush().then(() => onOpenRuleWindow(ruleId));
+    else onOpenRuleWindow(ruleId);
+  };
   const behavior: RuleListBehavior = {
     selectedRuleId: selection.selectedRuleId,
     setSelectedRuleId: selection.setSelectedRuleId,
+    openWindowRuleIds,
+    onOpen: openWindow,
     canReorder: !selection.query.trim(),
     dragId: selection.dragId,
     setDragId: selection.setDragId,
@@ -1022,14 +1272,13 @@ function ScenarioRuleWorkspace({
       if (selection.dragId) ruleActions.reorder(active.id, selection.dragId, toId);
     },
   };
+  const resize = layout === "stacked" ? listResizeV : listResize;
 
   return (
     <div
-      className="rules"
+      className={`rules ${layout} ${collapsed ? "collapsed" : ""}`}
       ref={workspace.rulesRef}
-      style={{
-        gridTemplateColumns: `minmax(0, ${listResize.size}px) 6px minmax(280px, 1fr)`,
-      }}
+      style={workspaceGrid(layout, collapsed, listResize.size, listResizeV.size)}
     >
       <RuleList
         rules={active.rules}
@@ -1042,16 +1291,30 @@ function ScenarioRuleWorkspace({
         behavior={behavior}
       />
 
-      <div className="resizer" onPointerDown={listResize.onPointerDown} title="Drag to resize" />
+      {collapsed ? (
+        <RuleDetailRail layout={layout} onExpand={onToggleCollapse} />
+      ) : (
+        <>
+          <div
+            className={layout === "stacked" ? "resizer-v" : "resizer"}
+            onPointerDown={resize.onPointerDown}
+            title="Drag to resize"
+          />
 
-      <RuleEditorPane
-        scenarioId={active.id}
-        selectedRule={editor.rule}
-        loading={editor.loading}
-        ruleHits={ruleHits}
-        onPatchRule={editor.patch}
-        onDeleteRule={workspace.deleteRule}
-      />
+          <RuleEditorPane
+            scenarioId={active.id}
+            selectedRule={editor.rule}
+            loading={editor.loading}
+            ruleHits={ruleHits}
+            poppedOut={editor.rule ? openWindowRuleIds.has(editor.rule.id) : false}
+            layout={layout}
+            onOpen={openWindow}
+            onCollapse={onToggleCollapse}
+            onPatchRule={editor.patch}
+            onDeleteRule={workspace.deleteRule}
+          />
+        </>
+      )}
     </div>
   );
 }
@@ -1066,6 +1329,11 @@ function ScenarioView({
   scenarioActions,
   ruleActions,
   onExport,
+  layout,
+  collapsed,
+  onToggleCollapse,
+  openWindowRuleIds,
+  onOpenRuleWindow,
 }: {
   active: ScenarioSummary;
   onRequestDelete: () => void;
@@ -1076,8 +1344,19 @@ function ScenarioView({
   scenarioActions: ScenarioActions;
   ruleActions: RuleActions;
   onExport: () => void;
+  layout: AutoLayout;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+  openWindowRuleIds: Set<string>;
+  onOpenRuleWindow: (ruleId: string) => void;
 }) {
-  const workspace = useScenarioWorkspace(active, selectRuleId, ruleActions, reloadToken);
+  const workspace = useScenarioWorkspace(
+    active,
+    selectRuleId,
+    ruleActions,
+    openWindowRuleIds,
+    reloadToken,
+  );
   const nameEditor = useScenarioName(active, scenarioActions.rename);
   const exportScenario = () => {
     nameEditor.flush();
@@ -1101,6 +1380,11 @@ function ScenarioView({
         workspace={workspace}
         ruleHits={ruleHits}
         ruleActions={ruleActions}
+        layout={layout}
+        collapsed={collapsed}
+        onToggleCollapse={onToggleCollapse}
+        openWindowRuleIds={openWindowRuleIds}
+        onOpenRuleWindow={onOpenRuleWindow}
       />
     </div>
   );
@@ -1191,9 +1475,13 @@ export function AutoresponderPanel({
   ruleHits,
   bulkMockProgress,
   reloadToken,
+  layout,
+  openWindowRuleIds,
+  onOpenRuleWindow,
 }: AutoresponderPanelProps) {
   const [pendingDelete, setPendingDelete] = useState<ScenarioSummary | null>(null);
   const [pendingReplace, setPendingReplace] = useState(false);
+  const [collapsed, setCollapsed] = useDetailCollapsed();
   const { zone, zoneProps } = useFlowDrop(transferActions.dropMock);
 
   const active = ar.scenarios.find((s) => s.id === ar.activeScenarioId) ?? null;
@@ -1225,6 +1513,11 @@ export function AutoresponderPanel({
           scenarioActions={scenarioActions}
           ruleActions={ruleActions}
           onExport={() => transferActions.exportRules(active.id)}
+          layout={layout}
+          collapsed={collapsed}
+          onToggleCollapse={() => setCollapsed((c) => !c)}
+          openWindowRuleIds={openWindowRuleIds}
+          onOpenRuleWindow={onOpenRuleWindow}
         />
       ) : (
         <AutoresponderOffState
@@ -1432,7 +1725,7 @@ function FireLimitFields({
   );
 }
 
-function RuleEditor({
+export function RuleEditor({
   rule,
   hits,
   onPatch,

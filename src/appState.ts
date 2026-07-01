@@ -14,6 +14,16 @@ import { compact, difference, intersection, isEqual } from "es-toolkit";
 
 import { announce } from "./announce";
 import { api, subscribeFlows } from "./ipc";
+import {
+  currentWindowLabel,
+  emitRulesChanged,
+  listOpenRuleIds,
+  onRuleWindowClosed,
+  onRuleWindowResized,
+  onRulesChanged,
+  openOrFocusRuleWindow,
+  saveRuleWindowSize,
+} from "./ruleWindows";
 import { parseFilter, statusClass, type ContentTerm, type ParsedFilter } from "./filter";
 import { backfillSeqColumn, resolveColumns, DEFAULT_COLUMNS, type ColumnDef } from "./columns";
 import { nextSort, resolveSort, sortFlows, type SortState } from "./sort";
@@ -53,6 +63,8 @@ import type {
 
 export type RightTab = "inspector" | "autoresponder";
 export type RightMode = "single" | "split";
+/** Where the autoresponder rule detail sits relative to the list (issue #72). */
+export type AutoLayout = "side" | "stacked";
 
 type SetError = (value: string | null) => void;
 
@@ -954,6 +966,9 @@ function useHistory(refreshAutoresponder: () => Promise<void>, setError: SetErro
         await action();
         setVersion((v) => v + 1);
         await refreshAutoresponder();
+        // Nudge any open detached rule windows to re-fetch their (reverted) rule.
+        // Undo/redo can touch any rule, so signal a reload-all (ruleId = null).
+        emitRulesChanged(currentWindowLabel(), null);
       } catch (e) {
         setError(String(e));
       }
@@ -1157,6 +1172,13 @@ function useViewState() {
     setRightModeState(mode);
     persist("germi.rightMode", mode);
   }, []);
+  const [autoLayout, setAutoLayoutState] = useState<AutoLayout>(() =>
+    loadString("germi.autoLayout", ["side", "stacked"] as const, "side"),
+  );
+  const setAutoLayout = useCallback((layout: AutoLayout) => {
+    setAutoLayoutState(layout);
+    persist("germi.autoLayout", layout);
+  }, []);
 
   const [decode, setDecode] = useState(true);
   const [fullBody, setFullBody] = useState(false);
@@ -1182,6 +1204,8 @@ function useViewState() {
     setRightTab,
     rightMode,
     setRightMode,
+    autoLayout,
+    setAutoLayout,
     decode,
     setDecode,
     fullBody,
@@ -1249,6 +1273,76 @@ function useAvailabilityCheck(
   return { checkAvailability, availabilityCheck };
 }
 
+/**
+ * Detached rule-editor windows (issue #72). Tracks which rules currently have an
+ * open OS window (so the inline editor can lock those rules) and coordinates
+ * cross-window freshness: a save in any window re-fetches the summary here, and a
+ * closing window drops out of the set. `activeScenarioId` is the only place a
+ * rule id maps to its scenario for the save path.
+ */
+function useRuleWindows(
+  ar: AutoResponderSummary,
+  refresh: () => Promise<void>,
+  setError: SetError,
+) {
+  const [openRuleWindows, setOpenRuleWindows] = useState<Set<string>>(() => new Set());
+  const arRef = useRef(ar);
+  arRef.current = ar;
+
+  useEffect(() => {
+    let active = true;
+    // Recover windows that outlived a main-window reload.
+    void listOpenRuleIds()
+      .then((ids) => {
+        if (active && ids.length) setOpenRuleWindows(new Set(ids));
+      })
+      .catch(() => {});
+    const listeners = [
+      onRulesChanged((p) => {
+        if (p.source === currentWindowLabel()) return;
+        void refresh();
+      }),
+      onRuleWindowClosed((p) => {
+        setOpenRuleWindows((prev) => {
+          if (!prev.has(p.ruleId)) return prev;
+          const next = new Set(prev);
+          next.delete(p.ruleId);
+          return next;
+        });
+        void refresh();
+      }),
+      onRuleWindowResized((size) => saveRuleWindowSize(size)),
+    ];
+    return () => {
+      active = false;
+      for (const l of listeners) void l.then((un) => un());
+    };
+  }, [refresh]);
+
+  const openRuleWindow = useCallback(
+    (ruleId: string) => {
+      const scenarioId = arRef.current.activeScenarioId;
+      if (!scenarioId) return;
+      const rule = arRef.current.scenarios
+        .find((s) => s.id === scenarioId)
+        ?.rules.find((r) => r.id === ruleId);
+      const title = rule ? ruleLabel(rule.matcher.url) : "Rule";
+      setOpenRuleWindows((prev) => (prev.has(ruleId) ? prev : new Set(prev).add(ruleId)));
+      void openOrFocusRuleWindow(ruleId, scenarioId, title).catch((e) => {
+        setOpenRuleWindows((prev) => {
+          const next = new Set(prev);
+          next.delete(ruleId);
+          return next;
+        });
+        setError(String(e));
+      });
+    },
+    [setError],
+  );
+
+  return { openRuleWindows, openRuleWindow };
+}
+
 export function useAppState() {
   const toasts = useToasts();
   const notify = toasts.notify;
@@ -1264,6 +1358,8 @@ export function useAppState() {
     setRightTab,
     rightMode,
     setRightMode,
+    autoLayout,
+    setAutoLayout,
     decode,
     setDecode,
     fullBody,
@@ -1342,6 +1438,7 @@ export function useAppState() {
   useProxyIndicator(proxy.systemProxy);
   const autoresponderActive = rightTab === "autoresponder" || rightMode === "split";
   const ar = useAutoresponder(setError, setRightTab, notify, autoresponderActive);
+  const ruleWindows = useRuleWindows(ar.autoresponder, ar.refresh, setError);
   const history = useHistory(ar.refresh, setError);
   const shortcuts = usePersistentShortcuts();
   const session = useSession(
@@ -1522,6 +1619,10 @@ export function useAppState() {
     setRightTab,
     rightMode,
     setRightMode,
+    autoLayout,
+    setAutoLayout,
+    openRuleWindows: ruleWindows.openRuleWindows,
+    openRuleWindow: ruleWindows.openRuleWindow,
     decode,
     setDecode,
     setFullBody,
