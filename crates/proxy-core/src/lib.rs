@@ -937,8 +937,12 @@ impl ProxyController {
         if let Ok(mut guard) = self.shared.settings.write() {
             *guard = settings;
         }
-        if let Ok(mut store) = self.shared.store.lock() {
-            store.set_max(max);
+        let evicted = match self.shared.store.lock() {
+            Ok(mut store) => store.set_max(max),
+            Err(_) => Vec::new(),
+        };
+        if !evicted.is_empty() {
+            let _ = self.shared.events.send(FlowEvent::Removed { ids: evicted });
         }
     }
 
@@ -1516,6 +1520,35 @@ mod tests {
             "with nothing captured, the prune must not emit an event"
         );
         assert_eq!(c.shared.store.lock().expect("lock store").len(), 1);
+    }
+
+    #[test]
+    fn lowering_max_flows_evicts_captures_emits_removed_and_keeps_imported() {
+        let c = controller();
+        let mut imp = flow("imp");
+        imp.imported = true;
+        c.shared.record_imported(imp);
+        c.shared.record_new(completed_flow("a"));
+        c.shared.record_new(completed_flow("b"));
+        c.shared.record_new(completed_flow("cc"));
+
+        // Subscribe after the inserts so the only event seen is the cap shrink.
+        let mut rx = c.subscribe();
+        c.set_settings(ProxySettings { max_flows: 2, ..Default::default() });
+
+        {
+            let store = c.shared.store.lock().expect("lock store");
+            assert!(store.get("imp").is_some(), "imported reference survives a cap shrink");
+            assert_eq!(store.ids(), vec!["imp".to_string(), "cc".to_string()]);
+        }
+        // The evicted ids are announced so the UI drops exactly those rows instead of
+        // silently diverging from the store (issue #80).
+        match rx.try_recv() {
+            Ok(FlowEvent::Removed { ids }) => {
+                assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+            }
+            other => panic!("expected a Removed event for the evicted captures, got {other:?}"),
+        }
     }
 
     #[test]

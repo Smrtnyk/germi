@@ -26,39 +26,67 @@ impl FlowStore {
         }
     }
 
-    /// Change the retention cap, evicting the oldest flows if it shrank.
-    pub fn set_max(&mut self, max: usize) {
+    /// Change the retention cap, evicting the oldest captured flows if it shrank.
+    /// Returns the evicted ids so the caller can emit a matching `Removed` and keep
+    /// the UI's flow list in sync (imported flows are never evicted).
+    pub fn set_max(&mut self, max: usize) -> Vec<String> {
         self.max = max.max(1);
+        let mut evicted = Vec::new();
         while self.order.len() > self.max {
-            self.evict_oldest();
+            match self.evict_oldest() {
+                Some(id) => evicted.push(id),
+                None => break,
+            }
         }
+        evicted
     }
 
-    /// Insert a freshly-captured flow (response may still be pending).
-    pub fn insert(&mut self, flow: Flow) {
+    /// Insert a freshly-captured flow (response may still be pending). Returns the
+    /// ids evicted to honor the cap (usually none) so the caller can emit a
+    /// matching `Removed` and keep the UI's flow list in sync with the store.
+    pub fn insert(&mut self, flow: Flow) -> Vec<String> {
+        let mut evicted = Vec::new();
         if self.flows.insert(flow.id.clone(), flow.clone()).is_none() {
             self.order.push_back(flow.id);
             while self.order.len() > self.max {
-                self.evict_oldest();
+                match self.evict_oldest() {
+                    Some(id) => evicted.push(id),
+                    None => break,
+                }
             }
         }
+        evicted
     }
 
-    /// Evict one flow to honor the cap. Prefer the oldest *completed* flow so an
-    /// in-flight flow isn't dropped before its response is recorded (which would
-    /// strand a forever-"pending" row and silently lose the response). Fall back
-    /// to the absolute oldest only when every retained flow is still in-flight.
-    fn evict_oldest(&mut self) {
+    /// Evict one flow to honor the cap, returning its id (or `None` when nothing is
+    /// evictable). **Imported flows are never evicted** — they are the file-loaded
+    /// reference the user replays against (issue #49), so the cap only ever trims
+    /// live-captured traffic. Among captured flows, prefer the oldest *completed*
+    /// one so an in-flight flow isn't dropped before its response is recorded (which
+    /// would strand a forever-"pending" row and silently lose the response); fall
+    /// back to the oldest captured flow only when every captured flow is still
+    /// in-flight. `None` when only imported flows remain (a large import is kept
+    /// whole), which also lets the `insert` / `set_max` loops terminate.
+    fn evict_oldest(&mut self) -> Option<String> {
         let victim = self
             .order
             .iter()
-            .find(|id| self.flows.get(*id).is_some_and(|f| f.response.is_some()))
-            .or_else(|| self.order.front())
+            .find(|id| {
+                self.flows
+                    .get(*id)
+                    .is_some_and(|f| !f.imported && f.response.is_some())
+            })
+            .or_else(|| {
+                self.order
+                    .iter()
+                    .find(|id| self.flows.get(*id).is_some_and(|f| !f.imported))
+            })
             .cloned();
-        if let Some(id) = victim {
-            self.flows.remove(&id);
-            self.order.retain(|x| x != &id);
+        if let Some(id) = &victim {
+            self.flows.remove(id);
+            self.order.retain(|x| x != id);
         }
+        victim
     }
 
     /// Attach the response (and timing / matched rule) to an existing flow.
@@ -349,5 +377,64 @@ mod tests {
         // "a" is still present — restoring a stale capture of it must not dup the row.
         store.restore(vec![(0, flow("a"))]);
         assert_eq!(store.ids(), vec!["a".to_string(), "b".to_string()]);
+    }
+
+    fn completed(id: &str) -> Flow {
+        let mut f = flow(id);
+        f.response = Some(response());
+        f
+    }
+
+    fn imported(id: &str) -> Flow {
+        let mut f = completed(id);
+        f.imported = true;
+        f
+    }
+
+    #[test]
+    fn insert_returns_the_ids_it_evicted() {
+        let mut store = FlowStore::new(2);
+        assert!(store.insert(completed("a")).is_empty(), "under cap: nothing evicted");
+        assert!(store.insert(completed("b")).is_empty());
+        // At cap 2, inserting "c" evicts the oldest completed flow and reports it.
+        assert_eq!(store.insert(completed("c")), vec!["a".to_string()]);
+        assert_eq!(store.ids(), vec!["b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn eviction_never_drops_imported_flows() {
+        let mut store = FlowStore::new(2);
+        store.insert(imported("imp")); // the file-loaded reference (issue #49)
+        store.insert(completed("a"));
+        // At cap, further captures evict the captured flows, never the imported one.
+        assert_eq!(store.insert(completed("b")), vec!["a".to_string()]);
+        assert_eq!(store.insert(completed("c")), vec!["b".to_string()]);
+        assert!(store.get("imp").is_some(), "imported flow is protected from cap eviction");
+        assert_eq!(store.ids(), vec!["imp".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn imported_flows_beyond_cap_are_all_kept() {
+        // A large import can exceed the cap; imported flows are never evicted, so the
+        // store keeps them all and the eviction loop must still terminate (no spin).
+        let mut store = FlowStore::new(1);
+        for id in ["a", "b", "c"] {
+            assert!(store.insert(imported(id)).is_empty(), "imported inserts evict nothing");
+        }
+        assert_eq!(store.len(), 3, "all imported flows are retained despite cap 1");
+    }
+
+    #[test]
+    fn set_max_evicts_captured_reports_ids_and_keeps_imported() {
+        let mut store = FlowStore::new(10);
+        store.insert(imported("imp"));
+        for id in ["a", "b", "c"] {
+            store.insert(completed(id));
+        }
+        // Shrinking the cap evicts only captured flows (oldest first) and reports the
+        // ids so the caller can emit a matching `Removed`.
+        assert_eq!(store.set_max(2), vec!["a".to_string(), "b".to_string()]);
+        assert!(store.get("imp").is_some(), "imported reference survives a cap shrink");
+        assert_eq!(store.ids(), vec!["imp".to_string(), "c".to_string()]);
     }
 }
