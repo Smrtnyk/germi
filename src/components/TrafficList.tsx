@@ -348,7 +348,7 @@ interface CommentCellProps {
   comments: CommentDraft;
 }
 
-function CommentCell({ f, comments }: CommentCellProps) {
+export function CommentCell({ f, comments }: CommentCellProps) {
   const { editingId, draft, cancelEdit, setDraft, setEditingId, beginEdit, commitComment } =
     comments;
   const editing = editingId === f.id;
@@ -369,7 +369,6 @@ function CommentCell({ f, comments }: CommentCellProps) {
           onClick={(e) => e.stopPropagation()}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
-            e.stopPropagation();
             if (e.key === "Enter") {
               cancelEdit.current = true;
               commitComment(f.id);
