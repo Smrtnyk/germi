@@ -170,6 +170,7 @@ pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
 
         flows.push(Flow {
             id: String::new(),
+            seq: 0,
             request,
             response,
             matched_rule: None,
@@ -263,6 +264,7 @@ pub fn parse_saz(bytes: &[u8]) -> Result<Vec<Flow>> {
         let response = raw.server.as_deref().and_then(|s| parse_response(s).ok());
         flows.push(Flow {
             id: String::new(),
+            seq: 0,
             request,
             response,
             matched_rule: None,

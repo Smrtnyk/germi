@@ -8,6 +8,7 @@ import type { FlowSummary } from "../types";
 function flowSummary(overrides: Partial<FlowSummary> = {}): FlowSummary {
   return {
     id: "1",
+    seq: 1,
     method: "GET",
     host: "example.com",
     path: "/",

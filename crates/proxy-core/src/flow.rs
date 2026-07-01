@@ -49,6 +49,9 @@ pub struct CapturedResponse {
 #[derive(Clone, Debug)]
 pub struct Flow {
     pub id: String,
+    /// Request number for the leading `#` column, assigned in arrival order on
+    /// capture/import. Unlike the opaque `id`, it renumbers from 1 per import.
+    pub seq: u64,
     pub request: CapturedRequest,
     pub response: Option<CapturedResponse>,
     /// Name of the rule that fired on this flow, if any.
@@ -79,6 +82,7 @@ impl Flow {
         };
         FlowSummary {
             id: self.id.clone(),
+            seq: self.seq,
             method: self.request.method.clone(),
             host: self.request.host.clone(),
             path: self.request.path.clone(),
@@ -129,6 +133,8 @@ impl Flow {
 #[serde(rename_all = "camelCase")]
 pub struct FlowSummary {
     pub id: String,
+    /// Request number for the leading `#` column.
+    pub seq: u64,
     pub method: String,
     pub host: String,
     pub path: String,

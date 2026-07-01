@@ -121,6 +121,7 @@ impl HttpHandler for CaptureHandler {
         // Emit the request immediately (response pending).
         self.shared.record_new(Flow {
             id: id.clone(),
+            seq: self.shared.next_seq(),
             request: captured,
             response: None,
             matched_rule: None,

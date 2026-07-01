@@ -25,6 +25,9 @@ pub struct Shared {
     pub history: Mutex<History>,
     pub events: broadcast::Sender<FlowEvent>,
     counter: AtomicU64,
+    /// Separate from `counter` so request numbers can reset on import without ever
+    /// reusing a flow id (ids must stay globally unique; seq need not).
+    seq_counter: AtomicU64,
 }
 
 impl Shared {
@@ -44,6 +47,7 @@ impl Shared {
             history: Mutex::new(History::default()),
             events,
             counter: AtomicU64::new(1),
+            seq_counter: AtomicU64::new(1),
         })
     }
 
@@ -64,6 +68,17 @@ impl Shared {
 
     pub fn next_id(&self) -> String {
         format!("f{}", self.counter.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// The next request number (`Flow::seq`), starting at 1.
+    pub fn next_seq(&self) -> u64 {
+        self.seq_counter.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Restart request numbering from 1, so an opened capture is numbered 1..N
+    /// rather than continuing the prior session's count.
+    pub fn reset_seq(&self) {
+        self.seq_counter.store(1, Ordering::Relaxed);
     }
 
     /// The header-column specs the user has pinned (for `extract_header_columns`).
@@ -195,6 +210,7 @@ mod tests {
     fn flow(id: &str) -> Flow {
         Flow {
             id: id.to_string(),
+            seq: 0,
             request: req(id),
             response: None,
             matched_rule: None,
@@ -226,6 +242,18 @@ mod tests {
         assert_eq!(s.next_id(), "f1");
         assert_eq!(s.next_id(), "f2");
         assert_eq!(s.next_id(), "f3");
+    }
+
+    #[test]
+    fn next_seq_increments_from_one_and_resets() {
+        let s = shared_with(ProxySettings::default());
+        assert_eq!(s.next_seq(), 1);
+        assert_eq!(s.next_seq(), 2);
+        assert_eq!(s.next_seq(), 3);
+        // A fresh import restarts numbering at 1 (opening a capture file).
+        s.reset_seq();
+        assert_eq!(s.next_seq(), 1);
+        assert_eq!(s.next_seq(), 2);
     }
 
     #[test]

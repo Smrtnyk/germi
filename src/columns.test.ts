@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { allColumns, DEFAULT_COLUMNS, PRESETS, resolveColumns, type ColumnDef } from "./columns";
+import {
+  allColumns,
+  backfillSeqColumn,
+  DEFAULT_COLUMNS,
+  PRESETS,
+  resolveColumns,
+  type ColumnDef,
+} from "./columns";
 import type { FlowSummary } from "./types";
 
 function summary(overrides: Partial<FlowSummary> = {}): FlowSummary {
   return {
     id: "1",
+    seq: 1,
     method: "GET",
     host: "example.com",
     path: "/api/users?page=2",
@@ -70,6 +78,11 @@ describe("column text rendering", () => {
     expect(textOf("url", s)).toBe("https://example.com/api/users?page=2");
     expect(textOf("query", s)).toBe("?page=2");
     expect(textOf("method", s)).toBe("GET");
+  });
+
+  it("renders the request number and sorts by it numerically", () => {
+    expect(textOf("seq", summary({ seq: 42 }))).toBe("42");
+    expect(sortKeyOf("seq", summary({ seq: 42 }))).toBe(42);
   });
 
   it("shows a non-numeric placeholder for an in-flight status", () => {
@@ -152,10 +165,31 @@ describe("resolveColumns", () => {
   });
 });
 
+describe("backfillSeqColumn", () => {
+  it("prepends the request-number column to an order saved before it existed", () => {
+    expect(backfillSeqColumn(["method", "status"], false)).toEqual(["seq", "method", "status"]);
+  });
+
+  it("leaves an order that already has the column untouched", () => {
+    expect(backfillSeqColumn(["seq", "method"], false)).toEqual(["seq", "method"]);
+  });
+
+  it("does not re-add the column once the one-time backfill has run", () => {
+    // A user who deliberately removed "#" must keep it removed across reloads.
+    expect(backfillSeqColumn(["method", "status"], true)).toEqual(["method", "status"]);
+  });
+});
+
 describe("presets", () => {
   it("defaults to the Default preset's columns", () => {
     expect(PRESETS[1].name).toBe("Default");
     expect(DEFAULT_COLUMNS).toBe(PRESETS[1].columns);
     expect(DEFAULT_COLUMNS).toContain("method");
+  });
+
+  it("leads every preset with the request-number column", () => {
+    for (const preset of PRESETS) {
+      expect(preset.columns[0]).toBe("seq");
+    }
   });
 });

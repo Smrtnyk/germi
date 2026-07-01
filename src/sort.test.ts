@@ -6,6 +6,7 @@ import type { AvailabilityVerdict, FlowSummary } from "./types";
 function summary(id: string, overrides: Partial<FlowSummary> = {}): FlowSummary {
   return {
     id,
+    seq: 0,
     method: "GET",
     host: "example.com",
     path: "/",
@@ -86,6 +87,13 @@ describe("sortFlows", () => {
     const before = ids(flows);
     sortFlows(flows, { columnId: "respSize", dir: "asc" }, COLUMNS);
     expect(ids(flows)).toEqual(before);
+  });
+
+  it("restores capture order when sorting by the request number", () => {
+    // Shuffled rows (as if sorted by another column) recover arrival order via "#".
+    const flows = [summary("c", { seq: 3 }), summary("a", { seq: 1 }), summary("b", { seq: 2 })];
+    expect(sortBy(flows, "seq", "asc")).toEqual(["a", "b", "c"]);
+    expect(sortBy(flows, "seq", "desc")).toEqual(["c", "b", "a"]);
   });
 
   it("orders numbers ascending and descending", () => {
