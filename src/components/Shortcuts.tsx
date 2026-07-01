@@ -1,4 +1,5 @@
 import { prettyShortcut, type Bindings } from "../shortcuts";
+import { IconClose } from "./icons";
 import { useModalDialog } from "./useModalDialog";
 
 /** The configurable rows pull their keys from `bindings`; the rest (list
@@ -53,7 +54,7 @@ export function Shortcuts({ bindings, onClose }: { bindings: Bindings; onClose: 
       <div className="modal-head">
         <h3 id="shortcuts-title">Keyboard shortcuts</h3>
         <button className="btn ghost" onClick={() => ref.current?.close()} aria-label="Close">
-          ✕
+          <IconClose />
         </button>
       </div>
       <div className="shortcuts-grid">

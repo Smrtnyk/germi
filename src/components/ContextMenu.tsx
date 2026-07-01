@@ -1,7 +1,8 @@
+import type { ReactNode } from "react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export interface MenuItem {
-  label: string;
+  label: ReactNode;
   onClick: () => void;
   danger?: boolean;
   disabled?: boolean;

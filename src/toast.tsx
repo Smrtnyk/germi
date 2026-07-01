@@ -1,4 +1,7 @@
 import { createContext, useCallback, useContext, useRef, useState } from "react";
+import type { ReactNode } from "react";
+
+import { IconCheck, IconClose, IconInfo, IconWarn } from "./components/icons";
 
 export type ToastKind = "success" | "error" | "info";
 
@@ -72,7 +75,17 @@ export function useToast(): Notify {
   return useContext(ToastContext);
 }
 
-const ICON: Record<ToastKind, string> = { success: "✓", error: "⚠", info: "ℹ" };
+const ICON: Record<ToastKind, ReactNode> = {
+  success: <IconCheck />,
+  error: <IconWarn />,
+  info: <IconInfo />,
+};
+
+const ICON_LABEL: Record<ToastKind, string> = {
+  success: "Success",
+  error: "Warning",
+  info: "Info",
+};
 
 export function ToastHost({
   toasts,
@@ -86,14 +99,16 @@ export function ToastHost({
     <div className="toast-host" role="region" aria-label="Notifications">
       {toasts.map((t) => (
         <div key={t.id} className={`toast ${t.kind}`} role="status">
-          <span className="toast-icon">{ICON[t.kind]}</span>
+          <span className="toast-icon" title={ICON_LABEL[t.kind]}>
+            {ICON[t.kind]}
+          </span>
           <span className="toast-msg">{t.message}</span>
           <button
             className="toast-x"
             aria-label="Dismiss notification"
             onClick={() => onDismiss(t.id)}
           >
-            ✕
+            <IconClose />
           </button>
         </div>
       ))}

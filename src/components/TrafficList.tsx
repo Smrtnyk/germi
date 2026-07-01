@@ -20,6 +20,14 @@ import { flowUrl } from "../flowUrl";
 import { dragFlowIds, encodeFlowIds, FLOW_DRAG_MIME } from "../dnd";
 import { useToast } from "../toast";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
+import {
+  availabilityToneIcon,
+  IconArrowDown,
+  IconMock,
+  IconSortAsc,
+  IconSortDesc,
+  IconSortNone,
+} from "./icons";
 import { MatchRail } from "./MatchRail";
 
 interface Props {
@@ -232,7 +240,16 @@ function HeaderRow({
     <div className="flow-row flow-head" ref={headerRef}>
       {columns.map((c) => {
         const active = sort?.columnId === c.id;
-        const caret = active && sort ? (sort.dir === "asc" ? "▲" : "▼") : "↕";
+        const caret =
+          active && sort ? (
+            sort.dir === "asc" ? (
+              <IconSortAsc />
+            ) : (
+              <IconSortDesc />
+            )
+          ) : (
+            <IconSortNone />
+          );
         return (
           <span key={c.id} className={c.align === "right" ? "cell-right" : ""}>
             {c.sortKey ? (
@@ -275,20 +292,22 @@ interface FlowCellProps {
  *  lives in the Inspector's "Public availability" panel.) */
 function AvailabilityBadge({ availability }: { availability: Availability | null }) {
   if (!availability) return null;
-  const { icon, tone, title } = availabilityLabel(availability);
+  const { tone, title } = availabilityLabel(availability);
+  const AvailIcon = availabilityToneIcon[tone];
   return (
     <span className={`avail-icon avail-${tone}`} title={title} aria-label={title}>
-      {icon}
+      <AvailIcon />
     </span>
   );
 }
 
 function AvailabilityCell({ availability }: { availability: Availability | null }) {
   if (!availability) return <span className="c-avail" />;
-  const { icon, text, tone, title } = availabilityLabel(availability);
+  const { text, tone, title } = availabilityLabel(availability);
+  const AvailIcon = availabilityToneIcon[tone];
   return (
     <span className={`c-avail avail-${tone}`} title={title}>
-      {icon} {text}
+      <AvailIcon /> {text}
     </span>
   );
 }
@@ -471,7 +490,14 @@ function menuItemsFor(
   selectedCount: number,
 ): MenuItem[] {
   return [
-    { label: "⚡ Mock this", onClick: () => a.onMockFlow(f.id) },
+    {
+      label: (
+        <>
+          <IconMock /> Mock this
+        </>
+      ),
+      onClick: () => a.onMockFlow(f.id),
+    },
     { label: "Add note", onClick: () => a.beginEdit(f) },
     { label: "", sep: true, onClick: () => {} },
     {
@@ -703,7 +729,7 @@ function FlowScroll({
           onClick={jumpToLatest}
           title="Jump to newest and resume tailing"
         >
-          {newCount} new ↓
+          {newCount} new <IconArrowDown />
         </button>
       )}
     </div>

@@ -3,6 +3,7 @@ import { compact } from "es-toolkit";
 
 import type { ProxySettings } from "../types";
 import { allColumns, PRESETS } from "../columns";
+import { IconArrowDown, IconArrowUp, IconClose } from "./icons";
 
 interface Props {
   order: string[];
@@ -86,7 +87,7 @@ export function ColumnsSettings({ order, onOrderChange, settings, onSettingsChan
             <span className="col-name">{c.label}</span>
             <span className="col-actions">
               <button className="x" title="Move up" disabled={i === 0} onClick={() => move(i, -1)}>
-                ↑
+                <IconArrowUp />
               </button>
               <button
                 className="x"
@@ -94,14 +95,14 @@ export function ColumnsSettings({ order, onOrderChange, settings, onSettingsChan
                 disabled={i === visible.length - 1}
                 onClick={() => move(i, 1)}
               >
-                ↓
+                <IconArrowDown />
               </button>
               <button
                 className="x"
                 title="Hide"
                 onClick={() => onOrderChange(order.filter((x) => x !== c.id))}
               >
-                ✕
+                <IconClose />
               </button>
             </span>
           </li>
@@ -159,7 +160,7 @@ export function ColumnsSettings({ order, onOrderChange, settings, onSettingsChan
                 title={`Remove ${spec}`}
                 onClick={() => removeHeaderColumn(spec)}
               >
-                ✕
+                <IconClose />
               </button>
             </li>
           ))}

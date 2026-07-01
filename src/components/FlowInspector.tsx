@@ -21,6 +21,15 @@ import { headersToText, parseCookies, parseQuery, toCurl, type KV } from "../cur
 import { rawMessage, requestLine, statusLine } from "../rawHttp";
 import { MaximizedOverlay } from "./MaximizedOverlay";
 import {
+  IconArrowDown,
+  IconArrowUp,
+  IconClose,
+  IconCopy,
+  IconExternal,
+  IconMaximize,
+  IconMock,
+} from "./icons";
+import {
   bodyOccurrences,
   combineMatches,
   fold,
@@ -243,7 +252,7 @@ function FindBar({ find, rawMode }: { find: InspectorFind; rawMode: boolean }) {
         onClick={() => find.step(-1)}
         disabled={!total}
       >
-        ↑
+        <IconArrowUp />
       </button>
       <button
         className="btn ghost"
@@ -251,10 +260,10 @@ function FindBar({ find, rawMode }: { find: InspectorFind; rawMode: boolean }) {
         onClick={() => find.step(1)}
         disabled={!total}
       >
-        ↓
+        <IconArrowDown />
       </button>
       <button className="btn ghost" title="Close (Esc)" onClick={find.close}>
-        ✕
+        <IconClose />
       </button>
     </div>
   );
@@ -644,7 +653,7 @@ function MetaPanel({
             title="Copy headers"
             onClick={() => copy("Headers", headersToText(msg.headers))}
           >
-            ⧉
+            <IconCopy />
           </button>
         </div>
         <MessageHeaders headers={msg.headers} find={find} />
@@ -746,7 +755,7 @@ function BodyBar({
         </button>
         {onMaximize && (
           <button className="btn ghost small" title="Maximize (full view)" onClick={onMaximize}>
-            ⤢
+            <IconMaximize />
           </button>
         )}
       </div>
@@ -900,7 +909,7 @@ function RawView({
               title="Maximize (full view)"
               onClick={() => setMaximized(true)}
             >
-              ⤢
+              <IconMaximize />
             </button>
           )}
         </div>
@@ -1049,7 +1058,11 @@ function RequestHead({
       <div className="req-line">
         <span className={`badge m-${detail.method.toLowerCase()}`}>{detail.method}</span>
         {detail.status !== null && <span className="badge status">{detail.status}</span>}
-        {detail.matchedRule && <span className="badge rule">⚡ {detail.matchedRule}</span>}
+        {detail.matchedRule && (
+          <span className="badge rule">
+            <IconMock /> {detail.matchedRule}
+          </span>
+        )}
         {ttfb !== null && <span className="muted timing">TTFB {ttfb} ms</span>}
         {detail.durationMs !== null && <span className="muted timing">{detail.durationMs} ms</span>}
         <button
@@ -1057,7 +1070,7 @@ function RequestHead({
           onClick={() => onMock(detail)}
           title="Create an autoresponder rule seeded from this response"
         >
-          ⚡ Mock this →
+          <IconMock /> Mock this →
         </button>
       </div>
       <div className="req-url">
@@ -1066,7 +1079,7 @@ function RequestHead({
         </span>
         <div className="url-actions">
           <button className="btn ghost url-copy" title="Copy URL" onClick={() => copy("URL", url)}>
-            ⧉ URL
+            <IconCopy /> URL
           </button>
           <button
             className="btn ghost url-copy"
@@ -1102,7 +1115,7 @@ function AvailabilityPanel({ availability, url }: { availability: Availability; 
         title="Open this URL in your default browser (without the captured session's cookies)"
         onClick={() => void openUrl(url)}
       >
-        ↗ Open in browser
+        <IconExternal /> Open in browser
       </button>
     </div>
   );
@@ -1168,7 +1181,7 @@ function MultiSelectView({
           </span>
           <div className="multi-actions">
             <button className="btn primary" onClick={() => onMockMany(flows.map((f) => f.id))}>
-              ⚡ Mock all
+              <IconMock /> Mock all
             </button>
             <button className="btn ghost" onClick={copyUrls}>
               Copy URLs

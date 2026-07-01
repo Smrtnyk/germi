@@ -41,9 +41,9 @@ describe("ToastHost", () => {
     await expect.element(screen.getByText("Saved it")).toBeVisible();
     await expect.element(screen.getByText("It broke")).toBeVisible();
     await expect.element(screen.getByText("Heads up")).toBeVisible();
-    await expect.element(screen.getByText("✓")).toBeVisible();
-    await expect.element(screen.getByText("⚠")).toBeVisible();
-    await expect.element(screen.getByText("ℹ")).toBeVisible();
+    await expect.element(screen.getByTitle("Success")).toBeVisible();
+    await expect.element(screen.getByTitle("Warning")).toBeVisible();
+    await expect.element(screen.getByTitle("Info")).toBeVisible();
     expect(document.querySelectorAll(".toast[role='status']")).toHaveLength(3);
   });
 

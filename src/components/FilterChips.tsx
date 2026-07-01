@@ -1,5 +1,6 @@
 import type { AvailabilityProgress, ResourceKind } from "../types";
 import { KIND_CHIPS, rawSegments, STATUS_CHIPS } from "../filter";
+import { IconClose } from "./icons";
 
 interface Props {
   typeChips: Set<ResourceKind>;
@@ -136,7 +137,9 @@ export function FilterChips({
               onClick={() => removeSegment(i)}
             >
               <span className="pill-text">{seg}</span>
-              <span className="pill-x">✕</span>
+              <span className="pill-x">
+                <IconClose />
+              </span>
             </button>
           ))}
         </div>

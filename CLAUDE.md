@@ -152,6 +152,14 @@ Engine (proxy-core — these work without the GUI system libs):
   (`import { clamp } from "es-toolkit"`); don't reinvent the wheel or add lodash.
   Keep it to **genuine** reuse — don't wrap a plain `.map`/`.filter` in a helper
   just to use the library.
+- **Frontend icons — use the central `src/components/icons.tsx`:** every UI icon
+  is a named export from this module (backed by **react-icons**, exact-pinned).
+  Prominent/branded actions use vivid Flat-Color (`fc`) icons; status/markers use
+  semantically-tinted lucide (`lu`) icons (colors are `var(--*)` tokens); dense
+  repeated controls use `currentColor` lucide so they inherit hover/active color.
+  Don't hand-place raw Unicode glyphs as icons or import `react-icons` directly in
+  a component — add/reuse an export here. Keyboard-hint typography (`⌘`, the arrow
+  keys, `→` inside a sentence/label) is NOT an icon — leave it as text.
 - **Mock rules are one-per-request, full-URL match** (Fiddler-style, no
   collapsing) — see `respond_rule_from_flow` in `rules.rs`. The `respond` action's
   `headers` field is honored by the engine; Content-Type has its own dedicated

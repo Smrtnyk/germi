@@ -21,6 +21,7 @@ import { SettingsDialog } from "./components/SettingsDialog";
 import { StatusBar } from "./components/StatusBar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
+import { IconPanelCollapse, IconPanelExpand, IconSearch, IconSplit } from "./components/icons";
 import { Shortcuts } from "./components/Shortcuts";
 import { ToastHost, ToastProvider } from "./toast";
 
@@ -307,7 +308,7 @@ function RightPanelHeader({
           title="Search the inspected request & response (Ctrl/⌘ F)"
           onClick={onOpenFind}
         >
-          🔎 Search
+          <IconSearch /> Search
         </button>
       )}
       <button
@@ -315,14 +316,14 @@ function RightPanelHeader({
         title={split ? "Show one panel at a time" : "Show Inspector and Autoresponder together"}
         onClick={() => setRightMode(split ? "single" : "split")}
       >
-        ⊟ Split
+        <IconSplit /> Split
       </button>
       <button
         className="btn ghost small"
         title="Hide panel — widen the traffic list"
         onClick={onCollapse}
       >
-        ⟩
+        <IconPanelCollapse />
       </button>
     </div>
   );
@@ -397,7 +398,8 @@ function PanelRail({
   return (
     <div className="panel-rail">
       <button className="rail-btn" onClick={onExpand} title="Show Inspector / Autoresponder panel">
-        ⟨{activeScenario && <span className="live-dot" />}
+        <IconPanelExpand />
+        {activeScenario && <span className="live-dot" />}
         <span className="rail-label">Panel</span>
       </button>
     </div>
