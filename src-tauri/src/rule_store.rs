@@ -15,13 +15,21 @@ const SORT_STEP: f64 = 1024.0;
 
 pub struct RuleStore {
     path: PathBuf,
+    /// Viewer instances (`--viewer`) share this file with the capturing one, so
+    /// they load + display scenarios but never persist edits — otherwise a
+    /// viewer's writes would race the capturing instance's full-rewrite
+    /// `replace`, silently clobbering rules (issue #71). Every mutating method
+    /// is a no-op when set; the in-memory `AutoResponder` still updates so the
+    /// viewer's own UI stays consistent for the session.
+    read_only: bool,
 }
 
 impl RuleStore {
-    pub fn open(dir: &Path) -> Result<(Self, AutoResponder), String> {
+    pub fn open(dir: &Path, read_only: bool) -> Result<(Self, AutoResponder), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let store = Self {
             path: dir.join(DB_FILE),
+            read_only,
         };
         let connection = store.connect()?;
         Self::create_schema(&connection)?;
@@ -123,6 +131,9 @@ impl RuleStore {
     }
 
     pub fn replace(&self, autoresponder: &AutoResponder) -> Result<(), String> {
+        if self.read_only {
+            return Ok(());
+        }
         let mut connection = self.connect()?;
         Self::replace_with_connection(&mut connection, autoresponder)
     }
@@ -156,6 +167,9 @@ impl RuleStore {
     }
 
     pub fn set_active_scenario(&self, scenario_id: Option<&str>) -> Result<(), String> {
+        if self.read_only {
+            return Ok(());
+        }
         let mut connection = self.connect()?;
         let transaction = connection.transaction().map_err(|e| e.to_string())?;
         set_active_metadata(&transaction, scenario_id)?;
@@ -163,6 +177,9 @@ impl RuleStore {
     }
 
     pub fn insert_scenario(&self, scenario: &Scenario) -> Result<(), String> {
+        if self.read_only {
+            return Ok(());
+        }
         let connection = self.connect()?;
         let last = connection
             .query_row("SELECT MAX(sort_key) FROM scenarios", [], |row| {
@@ -180,6 +197,9 @@ impl RuleStore {
     }
 
     pub fn rename_scenario(&self, scenario_id: &str, name: &str) -> Result<(), String> {
+        if self.read_only {
+            return Ok(());
+        }
         self.connect()?
             .execute(
                 "UPDATE scenarios SET name = ?2 WHERE id = ?1",
@@ -190,6 +210,9 @@ impl RuleStore {
     }
 
     pub fn delete_scenario(&self, scenario_id: &str) -> Result<(), String> {
+        if self.read_only {
+            return Ok(());
+        }
         let mut connection = self.connect()?;
         let transaction = connection.transaction().map_err(|e| e.to_string())?;
         transaction
@@ -211,12 +234,18 @@ impl RuleStore {
         rule: &Rule,
         after_rule_id: Option<&str>,
     ) -> Result<(), String> {
+        if self.read_only {
+            return Ok(());
+        }
         let connection = self.connect()?;
         let key = insertion_key(&connection, scenario_id, after_rule_id)?;
         insert_rule_connection(&connection, scenario_id, key, rule)
     }
 
     pub fn update_rule(&self, scenario_id: &str, rule: &Rule) -> Result<(), String> {
+        if self.read_only {
+            return Ok(());
+        }
         let connection = self.connect()?;
         let (kind, status, content_type, action_name) = action_columns(&rule.action);
         let json = serde_json::to_string(rule).map_err(|e| e.to_string())?;
@@ -249,6 +278,9 @@ impl RuleStore {
     }
 
     pub fn delete_rule(&self, scenario_id: &str, rule_id: &str) -> Result<(), String> {
+        if self.read_only {
+            return Ok(());
+        }
         self.connect()?
             .execute(
                 "DELETE FROM rules WHERE scenario_id = ?1 AND id = ?2",
@@ -265,6 +297,9 @@ impl RuleStore {
         previous_id: Option<&str>,
         next_id: Option<&str>,
     ) -> Result<(), String> {
+        if self.read_only {
+            return Ok(());
+        }
         let connection = self.connect()?;
         let previous = rule_sort_key(&connection, scenario_id, previous_id)?;
         let next = rule_sort_key(&connection, scenario_id, next_id)?;
@@ -290,6 +325,9 @@ impl RuleStore {
         create_scenario: bool,
         rules: &[Rule],
     ) -> Result<(), String> {
+        if self.read_only {
+            return Ok(());
+        }
         let mut connection = self.connect()?;
         let transaction = connection.transaction().map_err(|e| e.to_string())?;
         if create_scenario {
@@ -538,7 +576,7 @@ mod tests {
     #[test]
     fn new_store_starts_empty() {
         let dir = test_dir("empty");
-        let (store, loaded) = RuleStore::open(&dir).expect("open store");
+        let (store, loaded) = RuleStore::open(&dir, false).expect("open store");
 
         assert!(dir.join(DB_FILE).exists());
         assert!(loaded.scenarios.is_empty());
@@ -551,7 +589,7 @@ mod tests {
     #[test]
     fn granular_update_and_reorder_preserve_other_rules() {
         let dir = test_dir("granular");
-        let (store, _) = RuleStore::open(&dir).expect("open store");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
         store.replace(&autoresponder()).expect("seed store");
 
         let updated = rule("two", "updated");
@@ -585,7 +623,7 @@ mod tests {
         // Issue #74: rules are keyed by id, not URL, so a scenario may hold
         // several rules with the same matcher URL. All must round-trip.
         let dir = test_dir("shared-url");
-        let (store, _) = RuleStore::open(&dir).expect("open store");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
 
         let mut a = rule("a", "first");
         a.matcher.url = "https://example.com/dup".to_string();
@@ -609,6 +647,47 @@ mod tests {
         );
         assert_eq!(rules[0].matcher.url, rules[1].matcher.url);
         assert_eq!(rules[0].matcher.url, "https://example.com/dup");
+
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn read_only_store_never_persists_writes() {
+        let dir = test_dir("read_only");
+        // Seed via a writable handle (simulating the capturing instance).
+        let (writer, _) = RuleStore::open(&dir, false).expect("open writer");
+        writer.replace(&autoresponder()).expect("seed store");
+        drop(writer);
+
+        // A viewer (read_only) handle can load the seeded data...
+        let (viewer, loaded) = RuleStore::open(&dir, true).expect("open viewer");
+        assert_eq!(loaded.scenarios[0].rules.len(), 3);
+
+        // ...but every mutation is a silent no-op that never touches disk.
+        viewer
+            .insert_scenario(&Scenario {
+                id: "ghost".to_string(),
+                name: "Ghost".to_string(),
+                rules: Vec::new(),
+            })
+            .expect("insert is a no-op");
+        viewer.delete_rule("scenario", "one").expect("delete is a no-op");
+        viewer
+            .update_rule("scenario", &rule("two", "hacked"))
+            .expect("update is a no-op");
+        viewer
+            .replace(&AutoResponder {
+                scenarios: Vec::new(),
+                active_scenario_id: None,
+            })
+            .expect("replace is a no-op");
+
+        // Reopen writable: the on-disk data is exactly what the writer seeded.
+        let (_, after) = RuleStore::open(&dir, false).expect("reopen writer");
+        assert_eq!(after.scenarios.len(), 1);
+        assert_eq!(after.scenarios[0].id, "scenario");
+        let ids: Vec<_> = after.scenarios[0].rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["one", "two", "three"]);
 
         std::fs::remove_dir_all(dir).expect("remove temp dir");
     }

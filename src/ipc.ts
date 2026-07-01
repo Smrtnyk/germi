@@ -24,6 +24,8 @@ import type {
 export const api = {
   proxyStatus: () => invoke<boolean>("proxy_status"),
   boundAddr: () => invoke<BoundAddr | null>("bound_addr"),
+  isViewerMode: () => invoke<boolean>("is_viewer_mode"),
+  launchViewer: () => invoke<void>("launch_viewer"),
   startProxy: (port: number, allowRemote: boolean) =>
     invoke<number>("start_proxy", { port, allowRemote }),
   restartProxy: (port: number, allowRemote: boolean) =>

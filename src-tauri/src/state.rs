@@ -19,4 +19,8 @@ pub struct AppState {
     pub prior_system_proxy: Mutex<Option<sysproxy::Sysproxy>>,
     /// Live XDG `GlobalShortcuts` portal binding (Wayland global hotkey).
     pub portal_hotkey: crate::portal_hotkey::PortalHotkey,
+    /// Launched with `--viewer`: the proxy engine is disabled (this instance
+    /// only inspects saved captures), so a second Germi can run alongside the
+    /// capturing one without fighting over the proxy port / system proxy.
+    pub viewer: bool,
 }

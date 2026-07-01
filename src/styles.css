@@ -2327,6 +2327,13 @@ code {
 .statusbar .stat.off .led {
   background: var(--danger);
 }
+.statusbar .stat.viewer {
+  color: var(--s3);
+}
+.statusbar .stat.viewer .led {
+  background: var(--s3);
+  box-shadow: 0 0 6px var(--s3);
+}
 .statusbar .sep {
   opacity: 0.4;
 }
@@ -2391,6 +2398,17 @@ body.resizing.resizing-v * {
   align-self: stretch;
   margin: 2px 4px;
   background: var(--line);
+}
+.viewer-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 5px 10px;
+  border: 1px solid var(--s3);
+  border-radius: var(--radius);
+  color: var(--s3);
+  font-size: var(--fs-sm);
+  font-weight: 600;
 }
 
 /* ---- interactive filter help ---- */

@@ -14,8 +14,56 @@ use tauri::Manager;
 
 use state::AppState;
 
+/// Whether the process was started in viewer mode (`--viewer`) — a proxy-less
+/// inspector instance that can run alongside the capturing one. Kept as a free
+/// function over an iterator so the flag parsing is unit-testable without a
+/// running Tauri app.
+fn viewer_mode_from_args(args: impl IntoIterator<Item = String>) -> bool {
+    args.into_iter().any(|arg| arg == "--viewer")
+}
+
+/// Build the shared [`AppState`] (CA, rule store, persisted settings) and stash
+/// it on the app. Split out of the builder chain in `run` so the latter stays a
+/// readable wiring list.
+fn init_app_state(app: &mut tauri::App, viewer: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // Global hotkeys are registered/handled from the webview (see
+    // `useGlobalHotkey`); the shell only needs to initialize the plugin.
+    // Desktop-only — the lib keeps a mobile entry point.
+    #[cfg(desktop)]
+    app.handle()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
+    // One persistent CA per install, under the OS app-data dir. Treat an
+    // unresolvable app-data dir as fatal rather than writing the root CA
+    // private key to a predictable, world-traversable temp path.
+    let ca_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("could not resolve app data dir: {e}"))?;
+    let ca = ProxyController::load_or_generate_ca(&ca_dir)
+        .map_err(|e| format!("failed to initialize CA: {e}"))?;
+    let controller = Arc::new(ProxyController::new(ca));
+    let (rule_store, autoresponder) = rule_store::RuleStore::open(&ca_dir, viewer)
+        .map_err(|e| format!("failed to initialize autoresponder database: {e}"))?;
+    controller.set_autoresponder(autoresponder);
+    // Restore persisted proxy settings (host exclusions).
+    if let Some(settings) = persist::load_settings(&ca_dir) {
+        controller.set_settings(settings);
+    }
+    app.manage(AppState {
+        controller,
+        rule_store: Arc::new(rule_store),
+        ca_dir,
+        flow_forwarder: std::sync::Mutex::new(None),
+        prior_system_proxy: std::sync::Mutex::new(None),
+        portal_hotkey: portal_hotkey::PortalHotkey::default(),
+        viewer,
+    });
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let viewer = viewer_mode_from_args(std::env::args());
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -26,43 +74,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .setup(|app| {
-            // Global hotkeys are registered/handled from the webview (see
-            // `useGlobalHotkey`); the shell only needs to initialize the plugin.
-            // Desktop-only — the lib keeps a mobile entry point.
-            #[cfg(desktop)]
-            app.handle()
-                .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
-            // One persistent CA per install, under the OS app-data dir. Treat an
-            // unresolvable app-data dir as fatal rather than writing the root CA
-            // private key to a predictable, world-traversable temp path.
-            let ca_dir = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("could not resolve app data dir: {e}"))?;
-            let ca = ProxyController::load_or_generate_ca(&ca_dir)
-                .map_err(|e| format!("failed to initialize CA: {e}"))?;
-            let controller = Arc::new(ProxyController::new(ca));
-            let (rule_store, autoresponder) = rule_store::RuleStore::open(&ca_dir)
-                .map_err(|e| format!("failed to initialize autoresponder database: {e}"))?;
-            controller.set_autoresponder(autoresponder);
-            // Restore persisted proxy settings (host exclusions).
-            if let Some(settings) = persist::load_settings(&ca_dir) {
-                controller.set_settings(settings);
-            }
-            app.manage(AppState {
-                controller,
-                rule_store: Arc::new(rule_store),
-                ca_dir,
-                flow_forwarder: std::sync::Mutex::new(None),
-                prior_system_proxy: std::sync::Mutex::new(None),
-                portal_hotkey: portal_hotkey::PortalHotkey::default(),
-            });
-            Ok(())
-        })
+        .setup(move |app| init_app_state(app, viewer))
         .invoke_handler(tauri::generate_handler![
             commands::proxy_status,
             commands::bound_addr,
+            commands::is_viewer_mode,
+            commands::launch_viewer,
             commands::start_proxy,
             commands::restart_proxy,
             commands::stop_proxy,
@@ -124,4 +141,25 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::viewer_mode_from_args;
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn viewer_flag_detected_anywhere_in_args() {
+        assert!(viewer_mode_from_args(args(&["germi", "--viewer"])));
+        assert!(viewer_mode_from_args(args(&["germi", "--viewer", "extra"])));
+    }
+
+    #[test]
+    fn absent_viewer_flag_is_normal_mode() {
+        assert!(!viewer_mode_from_args(args(&["germi"])));
+        assert!(!viewer_mode_from_args(args(&["germi", "--view", "viewer"])));
+    }
 }

@@ -3,6 +3,8 @@ interface Props {
   port: number;
   /** When the proxy is bound to 0.0.0.0 (LAN-reachable) rather than loopback. */
   allowRemote: boolean;
+  /** Viewer mode (`--viewer`): no proxy, so show a viewer state instead. */
+  viewer: boolean;
   flowCount: number;
   activeScenario: string | null;
   onOpenPalette: () => void;
@@ -15,6 +17,7 @@ export function StatusBar({
   running,
   port,
   allowRemote,
+  viewer,
   flowCount,
   activeScenario,
   onOpenPalette,
@@ -24,10 +27,17 @@ export function StatusBar({
   const host = allowRemote ? "0.0.0.0" : "127.0.0.1";
   return (
     <footer className="statusbar">
-      <span className={`stat ${running ? "on" : "off"}`}>
-        <span className="led" />
-        {running ? `Listening on ${host}:${port}` : "Stopped"}
-      </span>
+      {viewer ? (
+        <span className="stat viewer" title="Proxy disabled — inspecting saved captures only">
+          <span className="led" />
+          Viewer mode
+        </span>
+      ) : (
+        <span className={`stat ${running ? "on" : "off"}`}>
+          <span className="led" />
+          {running ? `Listening on ${host}:${port}` : "Stopped"}
+        </span>
+      )}
       <span className="sep">·</span>
       <span>{flowCount} flows</span>
       <span className="spacer" />

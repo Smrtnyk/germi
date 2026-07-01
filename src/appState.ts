@@ -289,6 +289,7 @@ async function loadInitialState(opts: {
   setRunning: (running: boolean) => void;
   setBoundPort: (port: number) => void;
   setBoundAllowRemote: (allowRemote: boolean) => void;
+  setViewer: (viewer: boolean) => void;
   setAutoresponder: (ar: AutoResponderSummary) => void;
   setSettings: (s: ProxySettings) => void;
   setCaInfo: (ca: CaInfo) => void;
@@ -296,6 +297,8 @@ async function loadInitialState(opts: {
   setError: SetError;
 }): Promise<void> {
   try {
+    const viewer = await api.isViewerMode();
+    opts.setViewer(viewer);
     const isRunning = await api.proxyStatus();
     opts.setRunning(isRunning);
     // If the proxy is already up (e.g. the webview reloaded while the Rust proxy
@@ -313,7 +316,8 @@ async function loadInitialState(opts: {
     opts.setSettings(loaded);
     opts.setCaInfo(await api.caInfo());
     await opts.loadInitialFlows();
-    if (loaded.autoStartOnLaunch && !isRunning) {
+    // Never auto-start the proxy in a viewer instance — it has no proxy to run.
+    if (loaded.autoStartOnLaunch && !isRunning && !viewer) {
       // Best-effort: a taken port is reported but must not abort the rest of init.
       try {
         const boundPort = await api.startProxy(loaded.port, loaded.allowRemote);
@@ -1230,6 +1234,15 @@ async function copyFlowBodyAction(id: string, decode: boolean, notify: Notify, s
   }
 }
 
+/** Spawn a second, proxy-less Germi (`--viewer`) for inspecting saved captures.
+ *  Works from a normal or a viewer instance (issue #71). */
+function launchViewerAction(notify: Notify, setError: SetError) {
+  void api
+    .launchViewer()
+    .then(() => notify("info", "Opening a viewer window…"))
+    .catch((e) => setError(String(e)));
+}
+
 type PendingSelect = { nextId: string | null; deleted: Set<string> } | null;
 
 /** Imported vs live-captured split, for the contextual "Delete captured" button. */
@@ -1472,6 +1485,15 @@ function useRuleWindows(
   return { openRuleWindows, openRuleWindow };
 }
 
+// Viewer mode (`--viewer`, issue #71): a proxy-less inspector instance. Held as
+// a feature hook so the composition root just wires `viewer` into the proxy-
+// dependent bits (Toolbar controls, capture-on-start, the system-proxy hotkey).
+function useViewerMode(notify: Notify, setError: SetError) {
+  const [viewer, setViewer] = useState(false);
+  const launchViewer = () => launchViewerAction(notify, setError);
+  return { viewer, setViewer, launchViewer };
+}
+
 export function useAppState() {
   const toasts = useToasts();
   const notify = toasts.notify;
@@ -1505,6 +1527,7 @@ export function useAppState() {
     inspectorFindRef,
   } = useViewState();
   const [caInfo, setCaInfo] = useState<CaInfo | null>(null);
+  const { viewer, setViewer, launchViewer } = useViewerMode(notify, setError);
 
   const settings = useSettings();
   const flowStore = useFlowStore(settings.settings.maxFlows, setError);
@@ -1563,7 +1586,12 @@ export function useAppState() {
     (port) => saveSettings({ ...settings.settings, port }),
     notify,
   );
-  useSystemHotkeys(settings.settings.systemProxyHotkey, proxy.toggleSystemProxyHotkey, setError);
+  useSystemHotkeys(
+    settings.settings.systemProxyHotkey,
+    proxy.toggleSystemProxyHotkey,
+    setError,
+    !viewer,
+  );
   useProxyIndicator(proxy.systemProxy);
   const autoresponderActive = rightTab === "autoresponder" || rightMode === "split";
   const ar = useAutoresponder(setError, setRightTab, notify, autoresponderActive);
@@ -1590,6 +1618,7 @@ export function useAppState() {
       setRunning: proxy.setRunning,
       setBoundPort: proxy.setBoundPort,
       setBoundAllowRemote: proxy.setBoundAllowRemote,
+      setViewer,
       setAutoresponder: ar.setAutoresponder,
       setSettings: settings.setSettings,
       setCaInfo,
@@ -1813,5 +1842,7 @@ export function useAppState() {
     refreshCa,
     activeScenario,
     matchCount,
+    viewer,
+    launchViewer,
   };
 }

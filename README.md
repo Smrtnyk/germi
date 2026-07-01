@@ -89,6 +89,10 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
 - **Sessions** — traffic is **not** auto-persisted (privacy). **Save** a lossless
   `.germi` file; one **Open** loads any supported capture — `.germi`, HAR, or SAZ —
   replacing the current traffic (it confirms first when traffic is present).
+- **Viewer mode** — **New viewer** (or launching with `--viewer`) opens a second,
+  proxy-less window for inspecting saved `.germi`/HAR/SAZ captures *alongside* a
+  capturing instance, without the two fighting over the proxy port or system proxy.
+  The proxy controls are hidden and a **Viewer mode** badge makes the state obvious.
 
 ## Limitations
 
