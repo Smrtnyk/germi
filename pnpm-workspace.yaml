@@ -1,0 +1,20 @@
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - react-icons
+  - es-toolkit
+  - vite
+  - rolldown
+  - "@rolldown/*"
+  - "@vitejs/plugin-react"
+  - postcss
+  - "@tanstack/*"
+  - oxlint
+  - "@oxlint/*"
+  - oxfmt
+  - "@oxfmt/*"
+  - fallow
+  - "@fallow-cli/*"
+  - "@tauri-apps/cli"
+  - "@tauri-apps/cli-*"
+  - playwright
+  - playwright-core
