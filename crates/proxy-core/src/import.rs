@@ -36,24 +36,24 @@ struct HarLog {
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct HarEntry {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     request: HarRequest,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     response: HarResponse,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     time: f64,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct HarRequest {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     method: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     url: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     http_version: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     headers: Vec<NameValue>,
     #[serde(default)]
     post_data: Option<PostData>,
@@ -66,18 +66,18 @@ struct HarResponse {
     // becomes 0 instead of failing serde and aborting the WHOLE import.
     #[serde(default, deserialize_with = "lenient_status")]
     status: u16,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     http_version: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     headers: Vec<NameValue>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     content: Content,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct Content {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     text: String,
     #[serde(default)]
     encoding: Option<String>,
@@ -86,16 +86,28 @@ struct Content {
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct PostData {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     text: String,
 }
 
 #[derive(Deserialize, Default)]
 struct NameValue {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     value: String,
+}
+
+/// Deserialize a value, treating an explicit JSON `null` as the type's default.
+/// serde's `#[serde(default)]` only fills in a *missing* field, not one present
+/// as `null` — some exporters emit `null` for absent values (`"time": null`,
+/// `"headers": null`), which would otherwise abort the entire import.
+fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 fn pairs(headers: Vec<NameValue>) -> Vec<(String, String)> {
@@ -286,6 +298,13 @@ fn parse_request(raw: &[u8]) -> Result<CapturedRequest> {
         anyhow::bail!("incomplete request head");
     }
     let method = req.method.unwrap_or("GET").to_string();
+    // A Fiddler SAZ stores the outer HTTPS CONNECT tunnel as its own session. Its
+    // authority-form target (`host:443`) isn't a real URL, so reconstructing one
+    // yields a mangled `https://hosthost:443` row — skip it (the decrypted
+    // requests inside the tunnel are separate sessions of their own).
+    if method.eq_ignore_ascii_case("CONNECT") {
+        anyhow::bail!("skip CONNECT tunnel session");
+    }
     let target = req.path.unwrap_or("/").to_string();
     let version = format!("HTTP/1.{}", req.version.unwrap_or(1));
     let headers = collect_headers(req.headers);
@@ -375,7 +394,15 @@ fn decode_body(headers: &[(String, String)], body: &[u8]) -> Vec<u8> {
         .unwrap_or_default()
         .to_ascii_lowercase();
     let stage1 = if te.contains("chunked") {
-        dechunk(body)
+        let unchunked = dechunk(body);
+        // A non-empty body that de-chunks to nothing wasn't really chunked (some
+        // exporters store the de-chunked body but keep the header) or used LF-only
+        // delimiters — fall back to the raw bytes instead of dropping it.
+        if unchunked.is_empty() && !body.is_empty() {
+            body.to_vec()
+        } else {
+            unchunked
+        }
     } else {
         body.to_vec()
     };

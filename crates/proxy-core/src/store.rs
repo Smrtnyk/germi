@@ -33,7 +33,7 @@ impl FlowStore {
         self.max = max.max(1);
         let mut evicted = Vec::new();
         while self.order.len() > self.max {
-            match self.evict_oldest() {
+            match self.evict_oldest("") {
                 Some(id) => evicted.push(id),
                 None => break,
             }
@@ -46,10 +46,15 @@ impl FlowStore {
     /// matching `Removed` and keep the UI's flow list in sync with the store.
     pub fn insert(&mut self, flow: Flow) -> Vec<String> {
         let mut evicted = Vec::new();
-        if self.flows.insert(flow.id.clone(), flow.clone()).is_none() {
-            self.order.push_back(flow.id);
+        let id = flow.id.clone();
+        if self.flows.insert(id.clone(), flow).is_none() {
+            self.order.push_back(id.clone());
             while self.order.len() > self.max {
-                match self.evict_oldest() {
+                // Never evict the flow we just inserted (and just told the UI
+                // about): when the store is otherwise full of un-evictable
+                // imported flows, the fallback would pick this new flow itself,
+                // emitting Removed+New for a row the store no longer holds.
+                match self.evict_oldest(&id) {
                     Some(id) => evicted.push(id),
                     None => break,
                 }
@@ -67,19 +72,22 @@ impl FlowStore {
     /// back to the oldest captured flow only when every captured flow is still
     /// in-flight. `None` when only imported flows remain (a large import is kept
     /// whole), which also lets the `insert` / `set_max` loops terminate.
-    fn evict_oldest(&mut self) -> Option<String> {
+    fn evict_oldest(&mut self, protect: &str) -> Option<String> {
         let victim = self
             .order
             .iter()
             .find(|id| {
-                self.flows
-                    .get(*id)
-                    .is_some_and(|f| !f.imported && f.response.is_some())
+                id.as_str() != protect
+                    && self
+                        .flows
+                        .get(*id)
+                        .is_some_and(|f| !f.imported && f.response.is_some())
             })
             .or_else(|| {
-                self.order
-                    .iter()
-                    .find(|id| self.flows.get(*id).is_some_and(|f| !f.imported))
+                self.order.iter().find(|id| {
+                    id.as_str() != protect
+                        && self.flows.get(*id).is_some_and(|f| !f.imported)
+                })
             })
             .cloned();
         if let Some(id) = &victim {
@@ -422,6 +430,28 @@ mod tests {
             assert!(store.insert(imported(id)).is_empty(), "imported inserts evict nothing");
         }
         assert_eq!(store.len(), 3, "all imported flows are retained despite cap 1");
+    }
+
+    #[test]
+    fn insert_never_evicts_the_just_inserted_live_flow() {
+        // Store full of un-evictable imported flows (e.g. a capture opened at/over
+        // the cap), then live traffic arrives. The just-inserted pending flow must
+        // NOT be the eviction victim — the old bug picked it, emitting Removed+New
+        // for a row the store no longer held (a permanent pending ghost row).
+        let mut store = FlowStore::new(2);
+        store.insert(imported("i1"));
+        store.insert(imported("i2"));
+
+        let evicted = store.insert(flow("live")); // pending, non-imported
+        assert!(evicted.is_empty(), "the just-inserted flow must never evict itself");
+        assert!(store.get("live").is_some(), "the new live flow is retained");
+        assert_eq!(store.len(), 3, "over cap by the un-evictable imports plus the new flow");
+
+        // Eviction still works: the NOW-older live flow is evictable on the next
+        // insert (only the freshly-inserted one is ever protected).
+        let evicted2 = store.insert(flow("live2"));
+        assert_eq!(evicted2, vec!["live".to_string()], "the previous live flow is evicted");
+        assert!(store.get("live2").is_some());
     }
 
     #[test]

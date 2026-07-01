@@ -326,10 +326,13 @@ impl MessageDetail {
 
         // Skip base64 for text bodies (the UI renders those from `body_text`);
         // raw-compressed bytes — and binary bytes mislabeled with a text
-        // content-type — still need it for the hex view.
+        // content-type — still need it for the hex view. A NUL byte is a strong
+        // binary signal (e.g. BOM-less UTF-16, which is valid UTF-8 and would
+        // otherwise render as NUL-interleaved garbage with no hex fallback).
         let needs_base64 = !is_textual(headers)
             || (!decoded && encoding.is_some())
-            || std::str::from_utf8(display).is_err();
+            || std::str::from_utf8(display).is_err()
+            || display.contains(&0);
 
         Self {
             headers: headers.to_vec(),

@@ -101,10 +101,7 @@ fn build_request(target: &ReissueTarget) -> Option<Request<Empty<Bytes>>> {
 /// conditional/range headers (so we don't get a misleading 304/206), and
 /// framing/hop-by-hop headers (rebuilt by the client for an empty-body request).
 fn is_stripped(name: &str) -> bool {
-    const STRIP: &[&str] = &[
-        "cookie",
-        "authorization",
-        "proxy-authorization",
+    const STRIP_EXACT: &[&str] = &[
         "if-none-match",
         "if-modified-since",
         "if-match",
@@ -121,7 +118,23 @@ fn is_stripped(name: &str) -> bool {
         "te",
         "trailer",
     ];
-    STRIP.iter().any(|s| name.eq_ignore_ascii_case(s))
+    // Strip anything credential-bearing so the re-fetch genuinely tests anonymous
+    // access — not just Cookie/Authorization but arbitrary API-key, auth-token,
+    // session and secret headers (incl. vendor-specific ones like x-api-key or
+    // x-amz-security-token). Over-stripping only makes the probe stricter, which
+    // is the safe direction for a "is this public?" check.
+    const CREDENTIAL_MARKERS: &[&str] = &[
+        "cookie",
+        "auth",
+        "token",
+        "key",
+        "secret",
+        "session",
+        "credential",
+        "password",
+    ];
+    let lower = name.to_ascii_lowercase();
+    STRIP_EXACT.contains(&lower.as_str()) || CREDENTIAL_MARKERS.iter().any(|m| lower.contains(m))
 }
 
 fn classify(status: u16) -> AvailabilityVerdict {
@@ -264,6 +277,8 @@ mod tests {
             vec![
                 ("Cookie".into(), "session=secret".into()),
                 ("Authorization".into(), "Bearer token".into()),
+                ("X-Api-Key".into(), "live-api-key-value".into()),
+                ("X-Amz-Security-Token".into(), "sts-token-value".into()),
                 ("If-None-Match".into(), "\"etag\"".into()),
                 ("User-Agent".into(), "germi-test".into()),
             ],
@@ -275,6 +290,11 @@ mod tests {
         let text = String::from_utf8_lossy(&sent).to_lowercase();
         assert!(!text.contains("cookie"), "Cookie must be stripped: {text}");
         assert!(!text.contains("authorization"), "Authorization must be stripped");
+        // Vendor/API credential headers must be stripped too, not just Cookie/Auth.
+        assert!(!text.contains("x-api-key"), "X-Api-Key must be stripped");
+        assert!(!text.contains("live-api-key-value"), "the API key value must not leak");
+        assert!(!text.contains("x-amz-security-token"), "STS token header must be stripped");
+        assert!(!text.contains("sts-token-value"), "the STS token value must not leak");
         assert!(!text.contains("if-none-match"), "conditional headers must be stripped");
         assert!(text.contains("user-agent"), "benign headers are preserved");
         assert!(text.contains("germi-test"));

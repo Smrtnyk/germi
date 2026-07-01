@@ -68,28 +68,48 @@ impl CertAuthority {
             // world-readable build is repaired in place on this upgraded load
             // (not only when the key is freshly written).
             repair_key_perms(&key_path);
-            return Ok(Self {
+            let candidate = Self {
                 cert_pem: fs::read_to_string(&cert_path).context("read CA cert")?,
                 key_pem: fs::read_to_string(&key_path).context("read CA key")?,
                 cert_der: fs::read(&der_path).context("read CA der")?,
-            });
+            };
+            // Only reuse material that actually parses into a usable authority.
+            // A corrupt/mismatched set (e.g. a pre-atomic-write crash left a mixed
+            // pem/key pair) would otherwise load "successfully" and then fail every
+            // TLS handshake at runtime with no error surfaced — regenerate instead.
+            if candidate.to_authority().is_ok() {
+                return Ok(candidate);
+            }
         }
 
-        create_ca_dir(dir).context("create CA dir")?;
         let ca = Self::generate()?;
-        fs::write(&cert_path, &ca.cert_pem).context("write CA cert")?;
-        write_key_private(&key_path, &ca.key_pem).context("write CA key")?;
-        fs::write(&der_path, &ca.cert_der).context("write CA der")?;
+        ca.save(dir)?;
         Ok(ca)
     }
 
-    /// Persist the CA material (cert PEM, key PEM, cert DER) under `dir`. The
-    /// private key is written owner-only (see [`write_key_private`]).
+    /// Persist the CA material (cert PEM, key PEM, cert DER) under `dir`. Each file
+    /// is staged to a temp path and renamed into place, so a crash mid-write can't
+    /// leave a truncated file or a half-updated set. The private key is written
+    /// owner-only (see [`write_key_private`]).
     pub fn save(&self, dir: &Path) -> Result<()> {
         create_ca_dir(dir).context("create CA dir")?;
-        fs::write(dir.join("germi-ca.pem"), &self.cert_pem).context("write CA cert")?;
-        write_key_private(&dir.join("germi-ca.key"), &self.key_pem).context("write CA key")?;
-        fs::write(dir.join("germi-ca.der"), &self.cert_der).context("write CA der")?;
+
+        let cert = dir.join("germi-ca.pem");
+        let key = dir.join("germi-ca.key");
+        let der = dir.join("germi-ca.der");
+        let cert_tmp = dir.join("germi-ca.pem.tmp");
+        let key_tmp = dir.join("germi-ca.key.tmp");
+        let der_tmp = dir.join("germi-ca.der.tmp");
+
+        fs::write(&cert_tmp, &self.cert_pem).context("write CA cert")?;
+        write_key_private(&key_tmp, &self.key_pem).context("write CA key")?;
+        fs::write(&der_tmp, &self.cert_der).context("write CA der")?;
+
+        // Renames are fast metadata ops, so the window where the three files could
+        // disagree is far narrower than writing full contents between each.
+        fs::rename(&cert_tmp, &cert).context("commit CA cert")?;
+        fs::rename(&key_tmp, &key).context("commit CA key")?;
+        fs::rename(&der_tmp, &der).context("commit CA der")?;
         Ok(())
     }
 

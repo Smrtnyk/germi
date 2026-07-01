@@ -14,7 +14,7 @@ use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
 use hudsucker::hyper::body::{Body as HttpBody, Bytes, Frame, SizeHint};
 use hudsucker::hyper::header::{HeaderName, HeaderValue, CONTENT_LENGTH, HOST, UPGRADE};
-use hudsucker::hyper::{HeaderMap, Request, Response, Uri};
+use hudsucker::hyper::{HeaderMap, Method, Request, Response, Uri};
 use hudsucker::tokio_tungstenite::tungstenite::Message;
 use hudsucker::{
     Body, Error, HttpContext, HttpHandler, RequestOrResponse, WebSocketContext, WebSocketHandler,
@@ -61,6 +61,17 @@ impl HttpHandler for CaptureHandler {
         req: Request<Body>,
     ) -> RequestOrResponse {
         let (mut parts, body) = req.into_parts();
+
+        // hudsucker routes the CONNECT itself through `handle_request` before it
+        // establishes the tunnel. A CONNECT carries no HTTP exchange (its bytes
+        // are the encrypted tunnel), `handle_response` never fires for it, and
+        // running it through the autoresponder could return a mock as the tunnel
+        // response and break TLS. Pass it through untouched — the decrypted
+        // requests inside the tunnel are captured on their own `handle_request`.
+        if parts.method == Method::CONNECT {
+            self.inflight = None;
+            return Request::from_parts(parts, body).into();
+        }
 
         let host = request_host(&parts.uri, &parts.headers);
 
@@ -246,18 +257,31 @@ impl HttpHandler for CaptureHandler {
             timestamp_ms: now_ms(),
         };
 
+        let req = self.shared.get_request(&inflight.id);
         let mut matched = None;
-        if let Some(req) = self.shared.get_request(&inflight.id) {
+        if let Some(req) = &req {
             // Lock order autoresponder→cursors matches handle_request, so the two
             // never deadlock; held only for this synchronous rewrite (no .await).
             if let (Ok(ar), Ok(mut cursors)) =
                 (self.shared.autoresponder.read(), self.shared.cursors.lock())
             {
-                matched = ar.apply_response_stateful(&req, &mut captured, &mut cursors);
+                matched = ar.apply_response_stateful(req, &mut captured, &mut cursors);
             }
         }
 
-        let out = build_captured_response(&captured);
+        let mut out = build_captured_response(&captured);
+
+        // A HEAD response (and a 304) legitimately declares a Content-Length that
+        // describes the resource, not the (absent) body. `build_parts` drops it so
+        // hyper recomputes the length from the body — which is empty here, giving a
+        // wrong `content-length: 0`. Restore the upstream value for these.
+        let bodyless = parts.status.as_u16() == 304
+            || req.as_ref().is_some_and(|r| r.method.eq_ignore_ascii_case("HEAD"));
+        if bodyless {
+            if let Some(cl) = parts.headers.get(CONTENT_LENGTH) {
+                out.headers_mut().insert(CONTENT_LENGTH, cl.clone());
+            }
+        }
 
         let duration = inflight.start.elapsed().as_millis() as u64;
         self.shared
@@ -272,6 +296,33 @@ impl HttpHandler for CaptureHandler {
     async fn should_intercept(&mut self, _ctx: &HttpContext, req: &Request<Body>) -> bool {
         let host = req.uri().host().unwrap_or_default();
         !self.shared.should_bypass(host)
+    }
+
+    /// The upstream request failed (connection refused, DNS failure, upstream
+    /// TLS error). `handle_response` never fires, so complete the pending row
+    /// with a 502 instead of stranding it forever-"pending", then return the
+    /// same bare 502 the client would otherwise get.
+    async fn handle_error(
+        &mut self,
+        _ctx: &HttpContext,
+        err: hudsucker::hyper_util::client::legacy::Error,
+    ) -> Response<Body> {
+        if let Some(inflight) = self.inflight.take() {
+            let duration = inflight.start.elapsed().as_millis() as u64;
+            let captured = CapturedResponse {
+                status: 502,
+                version: "HTTP/1.1".to_string(),
+                headers: vec![("content-type".to_string(), "text/plain".to_string())],
+                body: format!("Upstream request failed: {err}").into_bytes(),
+                timestamp_ms: now_ms(),
+            };
+            self.shared
+                .record_complete(&inflight.id, captured, duration, None, None);
+        }
+        Response::builder()
+            .status(502)
+            .body(Body::empty())
+            .unwrap_or_else(|_| Response::new(Body::empty()))
     }
 }
 
