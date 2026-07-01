@@ -8,12 +8,20 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   # Fast feedback: build + test the standalone engine on Linux only.
   proxy-core:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -21,25 +29,25 @@ jobs:
         with:
           workspaces: "."
       - name: Clippy proxy-core (no GUI deps)
-        run: cargo clippy -p proxy-core --all-targets -- -D warnings
+        run: cargo clippy -p proxy-core --all-targets --locked -- -D warnings
       - name: Test proxy-core (no GUI deps)
-        run: cargo test -p proxy-core
+        run: cargo test -p proxy-core --locked
 
-  # Verify the Tauri shell compiles and the frontend builds (Linux). Native
+  # Verify the Tauri shell compiles and its unit tests pass (Linux). Native
   # installer builds for Windows + Linux are skipped for now — to restore them,
   # re-add a `tauri-apps/tauri-action@v0` step across an OS matrix (with the
   # Windows NASM step) to bundle the .msi/.exe + .deb/.AppImage/.rpm.
-  app:
-    runs-on: ubuntu-22.04
+  tauri-shell:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
             librsvg2-dev \
             libsoup-3.0-dev \
             libgtk-3-dev \
@@ -48,17 +56,6 @@ jobs:
             cmake \
             nasm \
             file
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: 10
-
-      - name: Setup Node
-        uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -70,12 +67,29 @@ jobs:
 
       # proxy-core is linted in the fast job; here we cover the germi shell.
       - name: Clippy Tauri shell
-        run: cargo clippy -p germi --all-targets -- -D warnings
+        run: cargo clippy -p germi --all-targets --locked -- -D warnings
 
       # The shell's unit tests (rule_store SQLite + --viewer arg parsing) are
       # compiled by the clippy step above but must also be run.
       - name: Test Tauri shell
-        run: cargo test -p germi
+        run: cargo test -p germi --locked
+
+  # Frontend checks need neither the GTK/WebKit system libs nor the Rust
+  # toolchain, so they run as their own parallel job for fast feedback.
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
@@ -94,6 +108,16 @@ jobs:
 
       # Vitest browser-mode (component tests, `src/**/*.test.tsx`) drives a real
       # headless Chromium via Playwright; the node project needs no browser.
+      - name: Read Playwright version
+        id: playwright-version
+        run: echo "version=$(node -p "require('./package.json').devDependencies.playwright")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
       - name: Install Playwright Chromium (vitest browser mode)
         run: pnpm exec playwright install --with-deps chromium
 
