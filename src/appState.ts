@@ -105,11 +105,15 @@ function pruneFlows(map: Map<string, FlowSummary>, order: string[], ids: string[
   order.length = w;
 }
 
+// The backend FlowStore is the single source of truth for retention: it evicts
+// past max_flows and emits `Removed` for whatever it drops (issue #80), so this
+// just mirrors the event stream. There is deliberately no independent cap here —
+// one would evict different flows than the backend and desync the two lists
+// (stale rows the store can't inspect; imported rows silently dropped).
 function applyFlowEvents(
   map: Map<string, FlowSummary>,
   order: string[],
   events: FlowEvent[],
-  cap: number,
 ): boolean {
   let resync = false;
   for (const ev of events) {
@@ -129,10 +133,6 @@ function applyFlowEvents(
     const s = ev.summary;
     if (!map.has(s.id)) order.push(s.id);
     map.set(s.id, s);
-  }
-  if (order.length > cap) {
-    const removed = order.splice(0, order.length - cap);
-    for (const id of removed) map.delete(id);
   }
   return resync;
 }
@@ -337,20 +337,14 @@ async function loadInitialState(opts: {
   }
 }
 
-function useFlowStore(maxFlows: number, setError: SetError) {
+function useFlowStore(setError: SetError) {
   const flowsRef = useRef<Map<string, FlowSummary>>(new Map());
   const orderRef = useRef<string[]>([]);
-  const maxFlowsRef = useRef(maxFlows);
   const [tick, bump] = useReducer((n: number) => n + 1, 0);
 
   useEffect(() => {
-    maxFlowsRef.current = maxFlows;
-  }, [maxFlows]);
-
-  useEffect(() => {
     const channel = subscribeFlows((events) => {
-      const cap = Math.max(1, maxFlowsRef.current);
-      const resync = applyFlowEvents(flowsRef.current, orderRef.current, events, cap);
+      const resync = applyFlowEvents(flowsRef.current, orderRef.current, events);
       bump();
       if (resync) {
         void reconcileFlows(flowsRef.current, orderRef.current, bump, setError);
@@ -1530,7 +1524,7 @@ export function useAppState() {
   const { viewer, setViewer, launchViewer } = useViewerMode(notify, setError);
 
   const settings = useSettings();
-  const flowStore = useFlowStore(settings.settings.maxFlows, setError);
+  const flowStore = useFlowStore(setError);
   const columns = usePersistentColumns(settings.settings.headerColumns);
   const { sort, toggleSort, sortedFlows } = useFlowSort(flowStore.flows, columns.visibleColumns);
   const filtering = useTrafficFilter(sortedFlows, setError);

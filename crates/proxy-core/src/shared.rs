@@ -89,13 +89,22 @@ impl Shared {
             .unwrap_or_default()
     }
 
-    /// Record a freshly-captured request (response pending) and emit `New`.
+    /// Record a freshly-captured request (response pending) and emit `New`,
+    /// preceded by a `Removed` for any flow the insert evicted to honor the cap so
+    /// the UI's list stays in sync with the store. A poisoned store lock skips the
+    /// whole thing rather than emit a `New` for a row that was never stored.
     pub fn record_new(&self, flow: Flow) {
         let cols = self.header_cols();
         let mut summary = flow.summary();
         summary.extra = extract_header_columns(&flow.request, flow.response.as_ref(), &cols);
-        if let Ok(mut store) = self.store.lock() {
-            store.insert(flow);
+        let evicted = {
+            let Ok(mut store) = self.store.lock() else {
+                return;
+            };
+            store.insert(flow)
+        };
+        if !evicted.is_empty() {
+            let _ = self.events.send(FlowEvent::Removed { ids: evicted });
         }
         let _ = self.events.send(FlowEvent::New { summary });
     }
@@ -127,13 +136,20 @@ impl Shared {
     }
 
     /// Insert an already-complete imported flow and emit it as `Completed`
-    /// (the frontend upserts by id, so a single Completed adds the row).
+    /// (the frontend upserts by id, so a single Completed adds the row), preceded
+    /// by a `Removed` for any captured flow the insert evicted to honor the cap.
     pub fn record_imported(&self, flow: Flow) {
         let cols = self.header_cols();
         let mut summary = flow.summary();
         summary.extra = extract_header_columns(&flow.request, flow.response.as_ref(), &cols);
-        if let Ok(mut store) = self.store.lock() {
-            store.insert(flow);
+        let evicted = {
+            let Ok(mut store) = self.store.lock() else {
+                return;
+            };
+            store.insert(flow)
+        };
+        if !evicted.is_empty() {
+            let _ = self.events.send(FlowEvent::Removed { ids: evicted });
         }
         let _ = self.events.send(FlowEvent::Completed { summary });
     }
@@ -303,6 +319,27 @@ mod tests {
             other => panic!("expected New, got {other:?}"),
         }
         assert!(s.store.lock().unwrap().get("a").is_some());
+    }
+
+    #[test]
+    fn record_new_emits_removed_for_the_flow_it_evicts() {
+        let s = Shared::new(1, AutoResponder::example(), ProxySettings::default());
+        s.record_new(flow("a"));
+        let mut rx = s.events.subscribe();
+        // At cap 1, recording "b" evicts "a"; subscribers must get a Removed for "a"
+        // so their list stays in sync with the store, then the New for "b".
+        s.record_new(flow("b"));
+        match rx.try_recv() {
+            Ok(FlowEvent::Removed { ids }) => assert_eq!(ids, vec!["a".to_string()]),
+            other => panic!("expected Removed for the evicted flow, got {other:?}"),
+        }
+        match rx.try_recv() {
+            Ok(FlowEvent::New { summary }) => assert_eq!(summary.id, "b"),
+            other => panic!("expected New for the inserted flow, got {other:?}"),
+        }
+        let store = s.store.lock().unwrap();
+        assert!(store.get("a").is_none(), "evicted flow is gone from the store");
+        assert!(store.get("b").is_some());
     }
 
     #[test]
