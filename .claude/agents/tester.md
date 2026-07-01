@@ -26,6 +26,9 @@ needs. The frontend uses **Vitest** (`pnpm test`) with **two projects in one run
 So:
 
 - Backend / engine logic → `#[cfg(test)]` modules in `proxy-core`.
+- Shell-side logic (e.g. `rule_store` persistence and its schema self-heal, CLI
+  arg parsing) → `#[cfg(test)]` in `src-tauri`, run with `cargo test -p germi`
+  (needs the GTK/WebKit libs; CI runs it — if this machine can't, say so).
 - Pure frontend logic → node Vitest tests co-located as `src/<module>.test.ts`.
 - React components / DOM hooks → browser Vitest tests as `src/<module>.test.tsx`.
 - Frontend type safety → `pnpm build`.
@@ -93,7 +96,8 @@ Cover, for the new feature:
 - Edge cases and the **gotchas** Germi cares about — e.g. host-specific full-URL
   rule matching, one-rule-per-request, exactly-one-active-scenario (or none =
   Off), body decode/`DISPLAY_CAP` truncation, serde round-trips for new DTOs
-  (especially `#[serde(default)]` backward-compat with older JSON).
+  (especially `#[serde(default)]` leniency for `settings.json`, `.germi`
+  sessions, and HAR/SAZ import).
 - Regression guards for anything subtle the implementor flagged.
 
 For **pure frontend helpers**, add Vitest tests beside the module as
@@ -107,6 +111,8 @@ the node environment (no jsdom).
 
 - `cargo test -p proxy-core` — all engine tests (run a single one with `cargo
   test -p proxy-core <name>` while iterating).
+- `cargo test -p germi` — the shell's tests, when you touched `src-tauri` and
+  the GTK/WebKit libs are present (otherwise report it as deferred to CI).
 - `pnpm test` — frontend unit tests, both projects (Vitest; narrow with
   `pnpm test <file>` or `pnpm test -t <name>` while iterating). The browser project
   needs a Playwright Chromium (`pnpm exec playwright install chromium` once); a

@@ -32,7 +32,8 @@ is the single most important thing for every phase to respect:
 
 ## The pipeline
 
-Track progress with TodoWrite (one todo per phase). Create a pipeline workspace
+Track progress with the task tools — TaskCreate one task per phase, TaskUpdate
+as each phase starts and finishes. Create a pipeline workspace
 so each agent can hand structured artifacts to the next:
 
 1. Derive a short kebab-case `<slug>` from the feature (e.g. `repeater-panel`).
@@ -65,10 +66,12 @@ serde↔TS mirror and exact-version pinning intact. It compiles what it can
 
 ### Phase 3 — Tester  →  `03-tests.md`
 Delegate to the **tester** agent. It adds/extends `#[cfg(test)]` unit tests in
-`proxy-core` for the new logic (the primary test surface), plus Vitest unit tests
-for any pure frontend helpers it touched, runs `cargo test -p proxy-core` and
-`pnpm test`, and type-checks the frontend with `pnpm build`. It reports coverage
-of the new behavior and the test run output.
+`proxy-core` for the new logic (the primary test surface), plus Vitest tests on
+the frontend — node tests (`src/*.test.ts`) for pure helpers and browser-mode
+component tests (`src/**/*.test.tsx`, real Chromium) for touched presentational
+components — runs `cargo test -p proxy-core` and `pnpm test`, and type-checks
+the frontend with `pnpm build`. It reports coverage of the new behavior and the
+test run output.
 
 ### Phase 4 — QA validator  →  `04-qa.md`  (the gate)
 Delegate to the **qa-validator** agent. It does **not** fix code — it is the
@@ -76,8 +79,11 @@ gatekeeper. It runs the CI-equivalent gates and audits conventions, producing a
 **PASS / FAIL** verdict with specific blocking issues:
 - `cargo clippy -p proxy-core --all-targets -- -D warnings`
 - `cargo test -p proxy-core`
-- `pnpm test` (frontend unit tests — Vitest)
-- `pnpm build` (frontend type-check)
+- `pnpm install --frozen-lockfile` / `pnpm lint` / `pnpm format:check` /
+  `pnpm fallow`
+- `pnpm build` (frontend type-check) and `pnpm test` (Vitest, both projects)
+- `cargo clippy -p germi` and `cargo test -p germi` when the GTK/WebKit libs are
+  present (otherwise recorded as deferred, never as passed)
 - serde↔TS mirror intact; exact-version pins; the standard path followed; no GUI
   dep leaked into `proxy-core`; documented gotchas respected.
 

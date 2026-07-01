@@ -28,8 +28,12 @@ existing files you're about to touch and the precedent the architect named —
 1. **proxy-core**: add the module/function + `ProxyController` method (`lib.rs`).
    DTOs use `#[serde(rename_all = "camelCase")]` (and `rename_all_fields =
    "camelCase"` on enums — the enum-level `rename_all` does **not** rename variant
-   fields). Put `#[serde(default)]` on **new** fields so older persisted
-   `autoresponder.json` / `settings.json` still deserialize.
+   fields). Use `#[serde(default)]` where a field is semantically optional or a
+   persisted/external format needs leniency (`settings.json`, `.germi` sessions,
+   HAR/SAZ import). The autoresponder store is SQLite (`rule_store.rs`) and
+   self-heals a stale schema on writable open — if you change its schema, keep
+   that self-heal working so an existing DB still loads, and cover it in the
+   `rule_store` tests (`cargo test -p germi`).
 2. **src-tauri/src/commands.rs**: add an async `#[tauri::command]` returning
    `Result<_, String>`. **Clone the `Arc` out of `State` before any `.await`** —
    never hold the `State` borrow across an await. JS passes camelCase arg names;

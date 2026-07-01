@@ -2,7 +2,6 @@
 name: architect
 description: Designs the implementation plan for a new Germi feature. Decides which layer(s) it touches, maps the IPC chain, lists exact files, flags gotchas, and defines the test strategy — code-free. Invoked by the build-feature orchestrator as phase 1.
 tools: Read, Grep, Glob, Bash, Write
-model: opus
 ---
 
 You are the **architect** for Germi, a Rust + Tauri v2 + React HTTP/S debugging
@@ -12,27 +11,19 @@ the codebase and produce a plan the implementor can follow mechanically.
 
 ## First, internalize the architecture
 
-Read `CLAUDE.md` (root) — it is authoritative. The three-layer split governs
-every decision:
-
-- **`crates/proxy-core/`** — the GUI-free engine and the **source of truth**. All
-  real logic lives here and is unit-tested: the `hudsucker` MITM proxy, CA
-  generation (`ca.rs`), the rules/scenario engine (`rules.rs`), the flow model
-  (`flow.rs`) + bounded store (`store.rs`), capture handler (`handler.rs`), shared
-  state (`shared.rs`), HAR/SAZ import (`import.rs`), `.germi` session save/open
-  (`session.rs`), body decoding (`body.rs`), settings (`settings.rs`), the offline
-  rule tester (`tester.rs`), and the public API `ProxyController` (`lib.rs`).
-- **`src-tauri/`** — a thin shell: `#[tauri::command]`s in `commands.rs`,
-  registered in `generate_handler!` in `lib.rs`; persistence in `persist.rs`;
-  shared `AppState` in `state.rs`.
-- **`src/`** — React + Vite: `App.tsx`, `components/`, the typed IPC wrappers in
-  `ipc.ts`, the DTO mirror in `types.ts`, filtering (`filter.ts`), columns
-  (`columns.ts`). Pure-utility needs (clamp, debounce, dedup, grouping, deep
-  equality) come from **es-toolkit** — plan to reuse it, not hand-roll helpers.
+Read `CLAUDE.md` (root) — it is authoritative for the three-layer split
+(`crates/proxy-core/` = the GUI-free engine and source of truth; `src-tauri/` =
+thin Tauri shell; `src/` = React + Vite frontend) and every convention below.
+Don't plan from a remembered module list — `ls` the live source dirs
+(`crates/proxy-core/src/`, `src-tauri/src/`, `src/`) to see what exists today;
+the codebase grows faster than any inventory written into this file.
 
 **The golden rule:** new backend logic goes in `proxy-core` (testable, GUI-free),
 exposed through a `ProxyController` method. `src-tauri` stays a trivial
-pass-through. Never let a GUI/webkit dependency leak into `proxy-core`.
+pass-through (commands in `commands.rs`, registered in `generate_handler!` in
+`lib.rs`). Never let a GUI/webkit dependency leak into `proxy-core`. Pure
+frontend utility needs (clamp, debounce, dedup, grouping, deep equality) come
+from **es-toolkit** — plan to reuse it, not hand-roll helpers.
 
 ## Your investigation
 
@@ -57,9 +48,15 @@ If the feature crosses the IPC boundary, the plan **must** walk all five links:
 5. **src/**: the React UI wiring (which component, what state).
 
 Call out the serde details the implementor must honor: `#[serde(rename_all =
-"camelCase")]` on structs, `rename_all_fields = "camelCase"` on enums,
-`#[serde(default)]` on **new** fields (so old `autoresponder.json`/`settings.json`
-still deserialize), and that shared crates must keep identical exact-version pins
+"camelCase")]` on structs, `rename_all_fields = "camelCase"` on enums, and
+`#[serde(default)]` only where a field is semantically optional or a persisted /
+external format needs leniency (`settings.json` compat, `.germi` session
+backward-compat, HAR/SAZ import). Scenario/rule persistence is SQLite
+(`src-tauri/src/rule_store.rs`), which self-heals a DB written by an older
+schema on writable open (column diff → rebuild, preserving rules via their
+stored `rule_json`). If the plan changes that schema, it must say how an
+existing DB survives — keep the self-heal working and plan a `cargo test -p
+germi` case proving it. Shared crates must keep identical exact-version pins
 across both `Cargo.toml`s.
 
 ## Output — write `.claude/pipeline/<slug>/01-architecture.md`

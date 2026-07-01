@@ -27,12 +27,16 @@ Read `CLAUDE.md` and the pipeline artifacts so far (`01-architecture.md`,
 6. **`pnpm fallow`** — code-health gate passes (no dead code, clones, or files
    over the complexity/coupling thresholds in `.fallowrc.json`).
 7. **`pnpm build`** — frontend type-checks (`tsc --noEmit && vite build`).
-8. **`pnpm test`** — frontend unit tests pass (Vitest).
+8. **`pnpm test`** — frontend unit tests pass (Vitest, both projects; the
+   browser project needs a Playwright Chromium — `pnpm exec playwright install
+   chromium` if it's missing).
 9. **`src-tauri` (the `germi` crate):** CI runs `cargo clippy -p germi
-   --all-targets -- -D warnings`, but it needs the Linux GTK/WebKit dev libs.
-   - If present, run it.
-   - If **absent**, you cannot run it — run `cargo metadata --format-version 1`
-     to confirm the workspace still resolves, and record the `germi` clippy/build
+   --all-targets -- -D warnings` **and `cargo test -p germi`** (the shell's unit
+   tests — rule_store SQLite incl. the schema self-heal, `--viewer` arg parsing),
+   but both need the Linux GTK/WebKit dev libs.
+   - If present, run both.
+   - If **absent**, you cannot run them — run `cargo metadata --format-version 1`
+     to confirm the workspace still resolves, and record the `germi` clippy/tests
      as **"deferred — needs GTK/WebKit libs / `pnpm tauri dev` on a provisioned
      machine."** Never report a gate as passed when you didn't run it.
 
@@ -40,8 +44,11 @@ Read `CLAUDE.md` and the pipeline artifacts so far (`01-architecture.md`,
 
 - **serde ↔ TS mirror:** every new/changed DTO crossing IPC has `#[serde(rename_all
   = "camelCase")]` (enums also `rename_all_fields = "camelCase"`), and
-  `src/types.ts` mirrors it **exactly** in camelCase. New fields have
-  `#[serde(default)]` for backward-compat with older persisted JSON.
+  `src/types.ts` mirrors it **exactly** in camelCase. Fields that must stay
+  lenient (`settings.json`, `.germi` sessions, HAR/SAZ import) have
+  `#[serde(default)]`. If the diff touches the `rule_store` SQLite schema, an
+  existing older-schema DB must still load via the self-heal rebuild — and a
+  test must prove it.
 - **The standard path is complete:** proxy-core method → `#[tauri::command]` in
   `commands.rs` → **registered in `generate_handler!` in `lib.rs`** (grep for the
   command name in `lib.rs` — a missing registration is a classic silent bug) →

@@ -110,9 +110,11 @@ Engine (proxy-core — these work without the GUI system libs):
   `autoresponder.sqlite3`, and `settings.json` (proxy-wide settings, e.g. host
   exclusions) live in the OS app-data dir (`AppState.ca_dir`).
   `src-tauri/src/rule_store.rs` owns normalized scenario/rule persistence and
-  `src-tauri/src/persist.rs` handles settings. There is deliberately no
-  pre-release autoresponder migration path; schema changes may discard old
-  development data.
+  `src-tauri/src/persist.rs` handles settings. On writable open, `rule_store`
+  self-heals a DB written by an older schema (column diff → rebuild, preserving
+  rules via their stored `rule_json`; viewer instances never heal). Schema
+  changes must keep that self-heal working — an existing DB must still load —
+  with a `cargo test -p germi` test proving it.
   **Traffic is deliberately NOT auto-persisted** (privacy: captured tokens/bodies
   shouldn't silently hit disk) — it's explicit Save/Open of a lossless `.germi`
   session file (`proxy-core/src/session.rs`, base64 bodies). Don't add background
