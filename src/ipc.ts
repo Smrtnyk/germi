@@ -24,6 +24,8 @@ export const api = {
   proxyStatus: () => invoke<boolean>("proxy_status"),
   startProxy: (port: number, allowRemote: boolean) =>
     invoke<number>("start_proxy", { port, allowRemote }),
+  restartProxy: (port: number, allowRemote: boolean) =>
+    invoke<number>("restart_proxy", { port, allowRemote }),
   stopProxy: () => invoke<void>("stop_proxy"),
 
   listFlows: () => invoke<FlowSummary[]>("list_flows"),

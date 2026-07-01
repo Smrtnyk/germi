@@ -287,6 +287,7 @@ function persistSettings(
 
 async function loadInitialState(opts: {
   setRunning: (running: boolean) => void;
+  setBoundPort: (port: number) => void;
   setAutoresponder: (ar: AutoResponderSummary) => void;
   setSettings: (s: ProxySettings) => void;
   setCaInfo: (ca: CaInfo) => void;
@@ -301,10 +302,19 @@ async function loadInitialState(opts: {
     opts.setSettings(loaded);
     opts.setCaInfo(await api.caInfo());
     await opts.loadInitialFlows();
-    if (loaded.captureOnStart && !isRunning) {
-      const boundPort = await api.startProxy(loaded.port, loaded.allowRemote);
-      if (boundPort !== loaded.port) opts.setSettings({ ...loaded, port: boundPort });
-      opts.setRunning(true);
+    if (loaded.autoStartOnLaunch && !isRunning) {
+      // Best-effort: a taken port is reported but must not abort the rest of init.
+      try {
+        const boundPort = await api.startProxy(loaded.port, loaded.allowRemote);
+        if (boundPort !== loaded.port) opts.setSettings({ ...loaded, port: boundPort });
+        opts.setBoundPort(boundPort);
+        opts.setRunning(true);
+      } catch (e) {
+        opts.setError(
+          `Couldn't auto-start the proxy on port ${loaded.port} (${e}). ` +
+            `Change the port in Settings → Connections, then press Start.`,
+        );
+      }
     }
   } catch (e) {
     opts.setError(String(e));
@@ -560,16 +570,48 @@ function useProxyControl(
   const [running, setRunning] = useState(false);
   const [systemProxy, setSystemProxy] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Actual bound port; diverges from settings.port after a failed restart, so
+  // the status bar and the system-proxy target read this, not the setting.
+  const [boundPort, setBoundPort] = useState<number | null>(null);
 
   async function startProxy(): Promise<number> {
-    const boundPort = await api.startProxy(settings.port, settings.allowRemote);
-    if (boundPort !== settings.port) onPortBound(boundPort);
+    const bound = await api.startProxy(settings.port, settings.allowRemote);
+    if (bound !== settings.port) onPortBound(bound);
+    setBoundPort(bound);
     setRunning(true);
     notify(
       "success",
-      `Proxy listening on ${settings.allowRemote ? "0.0.0.0" : "127.0.0.1"}:${boundPort}`,
+      `Proxy listening on ${settings.allowRemote ? "0.0.0.0" : "127.0.0.1"}:${bound}`,
     );
-    return boundPort;
+    return bound;
+  }
+
+  async function restartProxy(nextPort: number, nextAllowRemote: boolean) {
+    if (busy) {
+      notify("info", "Proxy is busy — try the port change again in a moment.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const bound = await api.restartProxy(nextPort, nextAllowRemote);
+      setBoundPort(bound);
+      notify("success", `Proxy restarted on ${nextAllowRemote ? "0.0.0.0" : "127.0.0.1"}:${bound}`);
+      // The rebind already happened; a failure re-pointing the system proxy is a
+      // system-proxy error, not a restart failure, so report it distinctly.
+      if (systemProxy) {
+        try {
+          await api.setSystemProxy(bound);
+        } catch (e) {
+          setError(`Proxy moved to port ${bound}, but re-pointing the system proxy failed: ${e}`);
+        }
+      }
+    } catch (e) {
+      setError(
+        `Couldn't restart on port ${nextPort} (${e}). The proxy is still running on the previous port.`,
+      );
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function toggleProxy() {
@@ -602,7 +644,9 @@ function useProxyControl(
         setSystemProxy(false);
         report("System proxy off");
       } else {
-        const port = running ? settings.port : await startProxy();
+        // Route at the actually-bound port, not the desired setting (they
+        // diverge after a failed restart); targeting the unbound port misroutes.
+        const port = running ? (boundPort ?? settings.port) : await startProxy();
         await api.setSystemProxy(port);
         setSystemProxy(true);
         report("System proxy on — routed through Germi");
@@ -627,8 +671,11 @@ function useProxyControl(
   return {
     running,
     setRunning,
+    boundPort,
+    setBoundPort,
     systemProxy,
     busy,
+    restartProxy,
     toggleProxy,
     toggleSystemProxy,
     toggleSystemProxyHotkey,
@@ -643,7 +690,7 @@ function useSettings() {
     allowRemote: false,
     maxFlows: 5000,
     captureFilter: [],
-    captureOnStart: false,
+    autoStartOnLaunch: true,
     responseDelayMs: 0,
     systemProxyHotkey: "",
   });
@@ -1459,6 +1506,7 @@ export function useAppState() {
   useEffect(() => {
     void loadInitialState({
       setRunning: proxy.setRunning,
+      setBoundPort: proxy.setBoundPort,
       setAutoresponder: ar.setAutoresponder,
       setSettings: settings.setSettings,
       setCaInfo,
@@ -1471,8 +1519,18 @@ export function useAppState() {
   }, []);
 
   function saveSettings(next: ProxySettings) {
+    const prev = settings.settings;
     settings.setSettings(next);
-    persistSettings(next, settings.settings.headerColumns, flowStore.refresh, setError);
+    persistSettings(next, prev.headerColumns, flowStore.refresh, setError);
+    // Changing the port while running rebinds the listener. Compare against the
+    // actually-bound port so re-selecting the live port (after an earlier failed
+    // restart left settings ahead of reality) doesn't trigger a self-conflicting
+    // rebind. The LAN-reachable toggle isn't auto-restarted: it keeps the same
+    // port, and binding 0.0.0.0:p while 127.0.0.1:p is held would fail — it
+    // applies on the next manual start instead.
+    if (proxy.running && next.port !== (proxy.boundPort ?? prev.port)) {
+      void proxy.restartProxy(next.port, next.allowRemote);
+    }
   }
 
   function applyImportedSettings(next: ProxySettings) {

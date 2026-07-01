@@ -37,9 +37,9 @@ pub struct ProxySettings {
     /// + recorded (others are tunneled). Same subdomain matching as exclusions.
     #[serde(default)]
     pub capture_filter: Vec<String>,
-    /// Start the proxy automatically when the app launches.
-    #[serde(default)]
-    pub capture_on_start: bool,
+    /// Start the proxy automatically when the app launches (default on).
+    #[serde(default = "default_true")]
+    pub auto_start_on_launch: bool,
 
     // ---- Throttling ----
     /// Artificial delay (ms) added before each response is returned (0 = off).
@@ -60,6 +60,9 @@ fn default_port() -> u16 {
 fn default_max_flows() -> usize {
     5_000
 }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for ProxySettings {
     fn default() -> Self {
@@ -70,7 +73,7 @@ impl Default for ProxySettings {
             allow_remote: false,
             max_flows: default_max_flows(),
             capture_filter: Vec::new(),
-            capture_on_start: false,
+            auto_start_on_launch: true,
             response_delay_ms: 0,
             system_proxy_hotkey: String::new(),
         }
@@ -241,6 +244,23 @@ mod tests {
 
         let back: ProxySettings = serde_json::from_str(&json).expect("round-trip");
         assert_eq!(back.system_proxy_hotkey, "CmdOrCtrl+Shift+P");
+    }
+
+    #[test]
+    fn auto_start_on_launch_defaults_on_and_round_trips() {
+        // A settings.json written before this field existed (or before it was
+        // renamed away from `captureOnStart`) must load with auto-start ON, so
+        // existing installs pick up the new default rather than staying off.
+        let legacy: ProxySettings = serde_json::from_str("{}").expect("load legacy settings");
+        assert!(legacy.auto_start_on_launch);
+        assert!(ProxySettings::default().auto_start_on_launch);
+
+        // camelCase mirror for the TS DTO, and an explicit false is preserved.
+        let json = serde_json::to_string(&ProxySettings::default()).expect("serialize");
+        assert!(json.contains("\"autoStartOnLaunch\":true"));
+        let off: ProxySettings =
+            serde_json::from_str("{\"autoStartOnLaunch\":false}").expect("load explicit off");
+        assert!(!off.auto_start_on_launch);
     }
 
     #[test]

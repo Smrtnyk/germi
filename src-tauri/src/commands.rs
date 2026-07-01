@@ -59,6 +59,12 @@ pub async fn proxy_status(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(controller.is_running().await)
 }
 
+/// Bind `0.0.0.0` (LAN-reachable) only when explicitly allowed; loopback otherwise.
+fn listen_addr(port: u16, allow_remote: bool) -> SocketAddr {
+    let ip = if allow_remote { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
+    SocketAddr::from((ip, port))
+}
+
 #[tauri::command]
 pub async fn start_proxy(
     state: State<'_, AppState>,
@@ -66,12 +72,27 @@ pub async fn start_proxy(
     allow_remote: bool,
 ) -> Result<u16, String> {
     let controller = state.controller.clone();
-    // Bind 0.0.0.0 (LAN-reachable) only when explicitly allowed; loopback otherwise.
-    let ip = if allow_remote { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
-    let addr = SocketAddr::from((ip, port));
     // Returns the actually-bound address (resolving port 0); a bind failure
     // surfaces here as Err instead of the proxy silently dying after "running".
-    let bound = controller.start(addr).await.map_err(|e| e.to_string())?;
+    let bound = controller
+        .start(listen_addr(port, allow_remote))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(bound.port())
+}
+
+/// Rebind the running proxy to a new port (settings changed while running).
+#[tauri::command]
+pub async fn restart_proxy(
+    state: State<'_, AppState>,
+    port: u16,
+    allow_remote: bool,
+) -> Result<u16, String> {
+    let controller = state.controller.clone();
+    let bound = controller
+        .restart(listen_addr(port, allow_remote))
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(bound.port())
 }
 

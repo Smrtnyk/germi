@@ -98,7 +98,9 @@ const SECTIONS: Section[] = [
   {
     id: "connections",
     label: "Connections",
-    render: (c) => <ConnectionsSection settings={c.settings} onChange={c.onChange} />,
+    render: (c) => (
+      <ConnectionsSection settings={c.settings} onChange={c.onChange} running={c.running} />
+    ),
   },
   {
     id: "certificates",
@@ -149,7 +151,7 @@ const SECTIONS: Section[] = [
   },
 ];
 
-function ConnectionsSection({ settings, onChange }: SectionProps) {
+function ConnectionsSection({ settings, onChange, running }: SectionProps & { running: boolean }) {
   return (
     <div className="settings-pane">
       <h4>Connections</h4>
@@ -163,7 +165,9 @@ function ConnectionsSection({ settings, onChange }: SectionProps) {
           width={90}
           onCommit={(port) => onChange({ ...settings, port })}
         />
-        <span className="muted small">applied on next Start</span>
+        <span className="muted small">
+          {running ? "restarts the proxy when changed" : "applied on next Start"}
+        </span>
       </div>
       <label className="check-row">
         <input
@@ -219,11 +223,16 @@ function CaptureSection({ settings, onChange }: SectionProps) {
       <label className="check-row">
         <input
           type="checkbox"
-          checked={settings.captureOnStart}
-          onChange={(e) => onChange({ ...settings, captureOnStart: e.target.checked })}
+          checked={settings.autoStartOnLaunch}
+          onChange={(e) => onChange({ ...settings, autoStartOnLaunch: e.target.checked })}
         />
-        Start capturing automatically on launch
+        Start the proxy automatically on launch
       </label>
+      <p className="muted small">
+        On by default — the listener is harmless until you route the system proxy through Germi, and
+        it saves a click. If the port is taken at launch, you&apos;ll be told so you can change it
+        above.
+      </p>
 
       <div className="col-section-label">Capture filter (record only these hosts)</div>
       <p className="muted small">

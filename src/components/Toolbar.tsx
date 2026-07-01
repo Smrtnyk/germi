@@ -15,8 +15,6 @@ import {
 interface ToolbarProps {
   running: boolean;
   busy: boolean;
-  port: number;
-  onPortChange: (port: number) => void;
   onToggleProxy: () => void;
   systemProxy: boolean;
   onToggleSystemProxy: () => void;
@@ -36,8 +34,6 @@ export function Toolbar(props: ToolbarProps) {
   const {
     running,
     busy,
-    port,
-    onPortChange,
     onToggleProxy,
     systemProxy,
     onToggleSystemProxy,
@@ -83,18 +79,6 @@ export function Toolbar(props: ToolbarProps) {
             </>
           )}
         </button>
-
-        <label className="port">
-          :
-          <input
-            type="number"
-            min={1}
-            max={65535}
-            value={port}
-            disabled={running || busy}
-            onChange={(e) => onPortChange(Number(e.target.value) || 8080)}
-          />
-        </label>
 
         <button
           className={systemProxy ? "btn active" : "btn"}
