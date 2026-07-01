@@ -1,6 +1,16 @@
 import type { RefObject } from "react";
 
 import { FilterHelp } from "./FilterHelp";
+import {
+  IconCert,
+  IconClear,
+  IconClose,
+  IconOpen,
+  IconSave,
+  IconSettings,
+  IconStart,
+  IconStop,
+} from "./icons";
 
 interface ToolbarProps {
   running: boolean;
@@ -57,7 +67,21 @@ export function Toolbar(props: ToolbarProps) {
           disabled={busy}
           title={running ? "Stop the proxy" : "Start the proxy"}
         >
-          {busy ? (running ? "Stopping…" : "Starting…") : running ? "■ Stop" : "▶ Start"}
+          {busy ? (
+            running ? (
+              "Stopping…"
+            ) : (
+              "Starting…"
+            )
+          ) : running ? (
+            <>
+              <IconStop /> Stop
+            </>
+          ) : (
+            <>
+              <IconStart /> Start
+            </>
+          )}
         </button>
 
         <label className="port">
@@ -90,17 +114,17 @@ export function Toolbar(props: ToolbarProps) {
           onClick={onOpen}
           title="Open a .germi session, HAR or Fiddler SAZ archive (replaces current traffic)"
         >
-          Open
+          <IconOpen /> Open
         </button>
         <button
           className="btn ghost"
           onClick={onSaveSession}
           title="Save current traffic to a .germi session"
         >
-          Save
+          <IconSave /> Save
         </button>
         <button className="btn ghost danger" onClick={onClear} title="Clear captured traffic">
-          Clear
+          <IconClear /> Clear
         </button>
       </div>
 
@@ -119,14 +143,14 @@ export function Toolbar(props: ToolbarProps) {
           onClick={onInstallCa}
           title="Trust the Germi root CA for HTTPS"
         >
-          CA cert
+          <IconCert /> CA cert
         </button>
         <button
           className="btn ghost"
           onClick={onOpenSettings}
           title="Settings — connections, certificates, interception, capture"
         >
-          ⚙ Settings
+          <IconSettings /> Settings
         </button>
       </div>
 
@@ -148,7 +172,7 @@ export function Toolbar(props: ToolbarProps) {
             title="Clear filter"
             aria-label="Clear filter"
           >
-            ✕
+            <IconClose />
           </button>
         )}
       </div>

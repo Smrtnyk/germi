@@ -86,6 +86,11 @@ body {
   overflow: hidden;
 }
 
+.gi {
+  flex: none;
+  vertical-align: -0.14em;
+}
+
 /* ---- scrollbars: custom classic thumbs, always visible, never overlay ---- */
 .flow-scroll::-webkit-scrollbar,
 .body::-webkit-scrollbar,

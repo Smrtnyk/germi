@@ -12,29 +12,18 @@ export type AvailabilityTone = "reachable" | "login" | "forbidden" | "gone" | "e
 export interface AvailabilityLabel {
   /** Worded verdict for the Inspector (e.g. "Reachable", "Login", "Forbidden"). */
   text: string;
-  /** Compact glyph for the inline row marker. */
-  icon: string;
   /** Drives the color (shared by the row icon and the Inspector badge). */
   tone: AvailabilityTone;
   /** Full explanation for the hover tooltip / Inspector. */
   title: string;
 }
 
-const TONE_ICON: Record<AvailabilityTone, string> = {
-  reachable: "✓",
-  login: "→",
-  forbidden: "✕",
-  gone: "∅",
-  error: "⚠",
-  unknown: "?",
-};
-
 function isRedirect(status: number | null): boolean {
   return status != null && inRange(status, 300, 400);
 }
 
 function label(text: string, tone: AvailabilityTone, title: string): AvailabilityLabel {
-  return { text, tone, title, icon: TONE_ICON[tone] };
+  return { text, tone, title };
 }
 
 export function availabilityLabel(a: Availability): AvailabilityLabel {

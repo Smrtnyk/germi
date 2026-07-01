@@ -2,6 +2,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
 import type { CaInfo } from "../types";
 import { useCopy } from "../useCopy";
+import { IconClose, IconCopy } from "./icons";
 import { useModalDialog } from "./useModalDialog";
 
 interface Props {
@@ -26,7 +27,7 @@ export function CaDialog({ info, onClose }: Props) {
       <div className="modal-head">
         <h3 id="ca-title">Trust the Germi root CA</h3>
         <button className="btn ghost" onClick={close} aria-label="Close">
-          ✕
+          <IconClose />
         </button>
       </div>
 
@@ -54,7 +55,7 @@ export function CaDialog({ info, onClose }: Props) {
           aria-label="Copy Windows command"
           onClick={() => copy("Command", winCmd)}
         >
-          ⧉ Copy
+          <IconCopy /> Copy
         </button>
       </div>
       <p className="muted small">
@@ -70,7 +71,7 @@ export function CaDialog({ info, onClose }: Props) {
           aria-label="Copy Linux system-store command"
           onClick={() => copy("Command", linuxSystemCmd)}
         >
-          ⧉ Copy
+          <IconCopy /> Copy
         </button>
       </div>
 
@@ -83,7 +84,7 @@ export function CaDialog({ info, onClose }: Props) {
           aria-label="Copy Linux NSS command"
           onClick={() => copy("Command", linuxNssCmd)}
         >
-          ⧉ Copy
+          <IconCopy /> Copy
         </button>
       </div>
       <p className="muted small">

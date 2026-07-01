@@ -31,6 +31,17 @@ import { isShallowScope, ruleMatchesScopeClient } from "../ruleScope";
 import { useResizable } from "../useResizable";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
+import {
+  IconCheck,
+  IconChevronDown,
+  IconChevronRight,
+  IconClose,
+  IconGrip,
+  IconMaximize,
+  IconMock,
+  IconPower,
+  IconWarn,
+} from "./icons";
 import { MaximizedOverlay } from "./MaximizedOverlay";
 import { RuleTester } from "./RuleTester";
 import { Tooltip } from "./Tooltip";
@@ -195,7 +206,7 @@ function Section({
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
       >
-        <span className="rsection-caret">{open ? "▾" : "▸"}</span>
+        <span className="rsection-caret">{open ? <IconChevronDown /> : <IconChevronRight />}</span>
         {title}
       </button>
       {open && <div className="rsection-body">{children}</div>}
@@ -258,7 +269,7 @@ function RuleListItem({
     >
       {draggable && (
         <span className="rgrip" title="Drag to reorder (evaluation order matters)">
-          ⠿
+          <IconGrip />
         </span>
       )}
       <input
@@ -945,7 +956,10 @@ function ScenarioHeader({
           <span className="save-state"> · saving…</span>
         )}
         {(nameEditor.saveState === "saved" || ruleSaveState === "saved") && (
-          <span className="save-state ok"> · saved ✓</span>
+          <span className="save-state ok">
+            {" "}
+            · saved <IconCheck />
+          </span>
         )}
       </span>
       <div className="scenario-actions">
@@ -1139,7 +1153,7 @@ function ScenarioTabs({
         onClick={() => onActivate(null)}
         title="Disable mocking — capture only"
       >
-        ⏻ Off
+        <IconPower /> Off
       </button>
       <button
         className="btn small"
@@ -1452,7 +1466,7 @@ function RuleEditor({
         <div className="rule-warnings">
           {warnings.map((w) => (
             <div key={w} className="warn-text small">
-              ⚠ {w}
+              <IconWarn /> {w}
             </div>
           ))}
         </div>
@@ -1634,7 +1648,9 @@ function ContentEncodingField({
       </select>
       {value && (
         <Tooltip label={`Response will be ${value}-encoded on the wire`}>
-          <span className="muted small">⚡</span>
+          <span className="muted small">
+            <IconMock />
+          </span>
         </Tooltip>
       )}
     </div>
@@ -1695,7 +1711,7 @@ function HeadersTable({
             title="Remove header"
             onClick={() => emit(rows.filter((r) => r.id !== row.id))}
           >
-            ✕
+            <IconClose />
           </button>
         </div>
       ))}
@@ -1752,7 +1768,7 @@ function MapLocalFields({
       </div>
       {path && exists === false && (
         <div className="warn-text small">
-          ⚠ File not found — this rule will be skipped at request time.
+          <IconWarn /> File not found — this rule will be skipped at request time.
         </div>
       )}
       <StatusField status={status} onChange={(s) => setAction({ status: s })} />
@@ -1826,7 +1842,7 @@ function RespondFields({
               title="Maximize editor (full view)"
               onClick={() => setMaximized(true)}
             >
-              ⤢ Maximize
+              <IconMaximize /> Maximize
             </button>
           </div>
           {maximized ? (

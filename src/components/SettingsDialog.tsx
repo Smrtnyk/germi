@@ -17,6 +17,7 @@ import type { ProxySettings } from "../types";
 import { useToast } from "../toast";
 import { ColumnsSettings } from "./ColumnsSettings";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { IconClose, IconWarn } from "./icons";
 import { useModalDialog } from "./useModalDialog";
 
 interface SectionProps {
@@ -166,8 +167,8 @@ function ConnectionsSection({ settings, onChange }: SectionProps) {
       </label>
       {settings.allowRemote && (
         <p className="warn small">
-          ⚠ Any device on your network can route traffic through this proxy. Only enable on trusted
-          networks.
+          <IconWarn /> Any device on your network can route traffic through this proxy. Only enable
+          on trusted networks.
         </p>
       )}
       <p className="muted small">
@@ -256,7 +257,7 @@ function CaptureSection({ settings, onChange }: SectionProps) {
                   })
                 }
               >
-                ✕
+                <IconClose />
               </button>
             </li>
           ))}
@@ -449,7 +450,11 @@ function InAppShortcutsSection({
           );
         })}
       </ul>
-      {conflict && <p className="warn small">⚠ {conflict}</p>}
+      {conflict && (
+        <p className="warn small">
+          <IconWarn /> {conflict}
+        </p>
+      )}
       <div className="col-add-list">
         <button className="btn small" onClick={() => onChange(DEFAULT_SHORTCUTS)}>
           Reset all to defaults
@@ -590,7 +595,7 @@ function InterceptionSection({ settings, onChange }: SectionProps) {
                 aria-label={`Remove ${h}`}
                 onClick={() => removeHost(h)}
               >
-                ✕
+                <IconClose />
               </button>
             </li>
           ))}
@@ -675,7 +680,7 @@ export function SettingsDialog({
           aria-label="Close settings"
           onClick={() => ref.current?.close()}
         >
-          ✕
+          <IconClose />
         </button>
       </div>
 
