@@ -450,8 +450,6 @@ export function App() {
         <Toolbar
           running={s.proxy.running}
           busy={s.proxy.busy}
-          port={s.settings.settings.port}
-          onPortChange={(p) => s.saveSettings({ ...s.settings.settings, port: p })}
           onToggleProxy={s.proxy.toggleProxy}
           systemProxy={s.proxy.systemProxy}
           onToggleSystemProxy={s.proxy.toggleSystemProxy}
@@ -588,7 +586,7 @@ export function App() {
 
         <StatusBar
           running={s.proxy.running}
-          port={s.settings.settings.port}
+          port={s.proxy.boundPort ?? s.settings.settings.port}
           allowRemote={s.settings.settings.allowRemote}
           flowCount={s.flowStore.orderRef.current.length}
           activeScenario={s.activeScenario}

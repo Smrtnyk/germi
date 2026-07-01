@@ -188,13 +188,38 @@ impl ProxyController {
         if guard.is_some() {
             bail!("proxy is already running");
         }
+        let (state, local_addr) = self.spawn_proxy(addr).await?;
+        *guard = Some(state);
+        Ok(local_addr)
+    }
 
+    /// Rebind the running proxy to `addr` (the user changed the port in
+    /// settings). The new listener is bound *first*, so a failed bind (usually a
+    /// taken port) leaves the existing proxy running untouched and returns the
+    /// error — a mistyped port never kills a working proxy. Returns the bound addr.
+    pub async fn restart(&self, addr: SocketAddr) -> Result<SocketAddr> {
+        let mut guard = self.running.lock().await;
+        let (state, local_addr) = self.spawn_proxy(addr).await?;
+        if let Some((tx, task)) = guard.take() {
+            let _ = tx.send(());
+            let _ = task.await;
+        }
+        *guard = Some(state);
+        Ok(local_addr)
+    }
+
+    /// Bind `addr`, build the MITM proxy and spawn its serving task, returning the
+    /// shutdown handle plus the bound address. The caller owns the `running` slot;
+    /// binding here (not in the spawned task) means a bind failure surfaces before
+    /// anything is recorded as running, so `start`/`restart` can bind first and
+    /// commit only on success.
+    async fn spawn_proxy(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<((oneshot::Sender<()>, JoinHandle<()>), SocketAddr)> {
         // Install a default crypto provider once (ignored if already set).
         let _ = aws_lc_rs::default_provider().install_default();
 
-        // Bind here (not inside the spawned task) so a bind failure propagates to
-        // the caller BEFORE we record the proxy as running — otherwise the UI
-        // would show "running" while the proxy had actually died on bind.
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(|e| anyhow!("failed to bind {addr}: {e}"))?;
@@ -225,8 +250,7 @@ impl ProxyController {
             }
         });
 
-        *guard = Some((shutdown_tx, task));
-        Ok(local_addr)
+        Ok(((shutdown_tx, task), local_addr))
     }
 
     /// Gracefully stop the proxy if running. Waits for the proxy task to finish
@@ -1267,6 +1291,40 @@ mod tests {
             timestamp_ms: 1,
         });
         flow
+    }
+
+    fn loopback(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    #[tokio::test]
+    async fn restart_rebinds_to_a_new_port() {
+        let c = controller();
+        let first = c.start(loopback(0)).await.expect("start");
+        assert!(c.is_running().await);
+        // Rebind to another OS-assigned port. Because the new listener is bound
+        // before the old one is released, the OS can't hand back the same port.
+        let second = c.restart(loopback(0)).await.expect("restart");
+        assert!(c.is_running().await);
+        assert_ne!(first.port(), second.port());
+        c.stop().await;
+        assert!(!c.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn restart_onto_taken_port_keeps_old_proxy_running() {
+        let c = controller();
+        c.start(loopback(0)).await.expect("start");
+        // Occupy a port with a plain listener, then try to rebind onto it.
+        let blocker = std::net::TcpListener::bind(loopback(0)).expect("bind blocker");
+        let taken = blocker.local_addr().expect("addr");
+        assert!(
+            c.restart(taken).await.is_err(),
+            "rebinding onto an in-use port must fail"
+        );
+        // The failed rebind left the original proxy serving, not stopped.
+        assert!(c.is_running().await);
+        c.stop().await;
     }
 
     #[tokio::test]

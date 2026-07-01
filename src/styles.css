@@ -215,16 +215,6 @@ body {
   width: 100%;
 }
 
-.port {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  color: var(--muted);
-}
-.port input {
-  width: 64px;
-}
-
 input,
 select,
 textarea {

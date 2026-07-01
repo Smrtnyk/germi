@@ -181,7 +181,7 @@ export interface ProxySettings {
   // Capture
   maxFlows: number;
   captureFilter: string[];
-  captureOnStart: boolean;
+  autoStartOnLaunch: boolean;
   // Throttling
   responseDelayMs: number;
   // Shortcuts
