@@ -1284,12 +1284,15 @@ textarea {
   display: grid;
   grid-template-columns: auto auto 1fr;
   align-items: center;
-  gap: var(--space-4);
-  padding: 7px 8px;
+  gap: var(--space-3);
+  padding: 4px 8px;
   border-radius: var(--radius);
   cursor: pointer;
   height: 100%;
   box-sizing: border-box;
+}
+.rule-item.poppedout {
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .rule-item:hover {
   background: var(--bg-1);
@@ -1409,6 +1412,40 @@ textarea {
   gap: var(--space-3);
   min-width: 0;
 }
+/* Compact traffic-list-style row: colored method + host/path, never the URL
+   twice (issue #72). `.m-*` supply the method color; ANY falls back to muted. */
+.rmethod {
+  flex: none;
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  min-width: 30px;
+  color: var(--muted);
+}
+.rurl {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rurl.off {
+  text-decoration: line-through;
+}
+.rhost {
+  color: var(--muted);
+}
+.rpath {
+  color: var(--text);
+}
+.rurl.off .rhost,
+.rurl.off .rpath {
+  color: var(--muted);
+}
+.rpop {
+  flex: none;
+  display: inline-flex;
+  color: var(--accent);
+}
 .rsub {
   font-family: var(--mono);
   font-size: var(--fs-2xs);
@@ -1418,6 +1455,7 @@ textarea {
   white-space: nowrap;
 }
 .rfire {
+  flex: none;
   margin-left: 6px;
   padding: 0 5px;
   border-radius: var(--radius-xs);
@@ -1426,13 +1464,91 @@ textarea {
 }
 
 .rule-editor {
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.rule-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 4px 8px 4px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-1);
+}
+.rule-detail-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+}
+.rule-detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 18px;
+}
+.rule-locked {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+/* Collapsed detail pane: a thin rail with an expand affordance, echoing the
+   app-level PanelRail but scoped to the list/detail split (issue #72). */
+.rule-detail-rail {
+  display: flex;
+  background: var(--bg-1);
+  overflow: hidden;
+}
+.rule-detail-rail.side {
+  border-left: 1px solid var(--line);
+}
+.rule-detail-rail.stacked {
+  border-top: 1px solid var(--line);
+}
+/* Fill the rail so clicking anywhere in it — not just on the label — expands. */
+.rule-detail-rail .rail-btn {
+  width: 100%;
+  height: 100%;
+  justify-content: center;
+}
+.rule-detail-rail .rail-btn:hover {
+  background: var(--bg-2);
+}
+.rule-detail-rail.stacked .rail-btn {
+  flex-direction: row;
+}
+.rule-detail-rail.stacked .rail-label {
+  writing-mode: horizontal-tb;
+}
+/* Stacked (top/bottom) split: the list sits above the detail, so its divider
+   becomes a bottom border instead of a right one. */
+.rules.stacked .rule-list {
+  border-right: none;
+  border-bottom: 1px solid var(--line);
+}
+/* Detached rule-editor window (issue #72): full-height scroll host. */
+.rule-window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 0;
+}
+.rule-window-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
   padding: 16px 18px;
 }
 .editor-form {
-  max-width: 760px;
-  min-width: 460px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
@@ -1908,7 +2024,6 @@ code {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  max-width: 760px;
 }
 .tester h4 {
   margin: 0;

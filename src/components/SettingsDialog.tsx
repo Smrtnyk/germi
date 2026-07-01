@@ -13,6 +13,7 @@ import {
   type CommandId,
 } from "../shortcuts";
 import { useHotkeyMode } from "../useHotkeyMode";
+import type { AutoLayout } from "../appState";
 import type { ProxySettings } from "../types";
 import { useToast } from "../toast";
 import { ColumnsSettings } from "./ColumnsSettings";
@@ -30,6 +31,8 @@ interface SectionCtx extends SectionProps {
   onColumnOrderChange: (order: string[]) => void;
   shortcuts: Bindings;
   onShortcutsChange: (b: Bindings) => void;
+  autoLayout: AutoLayout;
+  onAutoLayoutChange: (layout: AutoLayout) => void;
   running: boolean;
   onCaChanged: () => void;
 }
@@ -116,6 +119,11 @@ const SECTIONS: Section[] = [
     id: "throttling",
     label: "Throttling",
     render: (c) => <ThrottlingSection settings={c.settings} onChange={c.onChange} />,
+  },
+  {
+    id: "autoresponder",
+    label: "Autoresponder",
+    render: (c) => <AutoresponderSection layout={c.autoLayout} onChange={c.onAutoLayoutChange} />,
   },
   {
     id: "shortcuts",
@@ -299,6 +307,43 @@ function ThrottlingSection({ settings, onChange }: SectionProps) {
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+const AUTO_LAYOUTS: { value: AutoLayout; label: string; hint: string }[] = [
+  { value: "side", label: "Side by side", hint: "Rule list on the left, details on the right." },
+  { value: "stacked", label: "Stacked", hint: "Rule list on top, details below." },
+];
+
+function AutoresponderSection({
+  layout,
+  onChange,
+}: {
+  layout: AutoLayout;
+  onChange: (layout: AutoLayout) => void;
+}) {
+  return (
+    <div className="settings-pane">
+      <h4>Autoresponder</h4>
+      <p className="muted small">
+        Where the rule detail editor sits relative to the rule list. Double-click a rule to pop its
+        details out into a separate, movable window instead — you can open several at once, and
+        press Esc to close one.
+      </p>
+      <div className="col-section-label">Detail layout</div>
+      <div className="col-add-list">
+        {AUTO_LAYOUTS.map((o) => (
+          <button
+            key={o.value}
+            className={`btn small ${layout === o.value ? "active" : ""}`}
+            onClick={() => onChange(o.value)}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+      <p className="muted small">{AUTO_LAYOUTS.find((o) => o.value === layout)?.hint}</p>
     </div>
   );
 }
@@ -605,7 +650,7 @@ function InterceptionSection({ settings, onChange }: SectionProps) {
   );
 }
 
-interface Props {
+export interface SettingsDialogProps {
   settings: ProxySettings;
   onChange: (s: ProxySettings) => void;
   onImportApplied: (s: ProxySettings) => void;
@@ -613,6 +658,8 @@ interface Props {
   onColumnOrderChange: (order: string[]) => void;
   shortcuts: Bindings;
   onShortcutsChange: (b: Bindings) => void;
+  autoLayout: AutoLayout;
+  onAutoLayoutChange: (layout: AutoLayout) => void;
   running: boolean;
   onCaChanged: () => void;
   onClose: () => void;
@@ -635,10 +682,12 @@ export function SettingsDialog({
   onColumnOrderChange,
   shortcuts,
   onShortcutsChange,
+  autoLayout,
+  onAutoLayoutChange,
   running,
   onCaChanged,
   onClose,
-}: Props) {
+}: SettingsDialogProps) {
   const notify = useToast();
   const ref = useModalDialog(onClose);
   const [active, setActive] = useState(loadSection);
@@ -704,6 +753,8 @@ export function SettingsDialog({
             onColumnOrderChange,
             shortcuts,
             onShortcutsChange,
+            autoLayout,
+            onAutoLayoutChange,
             running,
             onCaChanged,
           })}

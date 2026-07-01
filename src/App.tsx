@@ -6,18 +6,17 @@ import {
   prettyShortcut,
   reverseLookup,
   type Accel,
-  type Bindings,
   type CommandId,
 } from "./shortcuts";
 import { hasFlowDrag } from "./dnd";
-import type { CaInfo, FlowDetail, FlowSummary, ProxySettings } from "./types";
+import type { CaInfo, FlowDetail, FlowSummary } from "./types";
 import { Toolbar } from "./components/Toolbar";
 import { FilterChips } from "./components/FilterChips";
 import { TrafficList } from "./components/TrafficList";
 import { FlowInspector } from "./components/FlowInspector";
 import { AutoresponderPanel, type AutoresponderPanelProps } from "./components/AutoresponderPanel";
 import { CaDialog } from "./components/CaDialog";
-import { SettingsDialog } from "./components/SettingsDialog";
+import { SettingsDialog, type SettingsDialogProps } from "./components/SettingsDialog";
 import { StatusBar } from "./components/StatusBar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
@@ -411,49 +410,18 @@ function AppDialogs({
   caInfo,
   onCaClose,
   settingsOpen,
-  settings,
-  onSettingsChange,
-  onSettingsImported,
-  columnOrder,
-  onColumnOrderChange,
-  shortcuts,
-  onShortcutsChange,
-  running,
-  onCaChanged,
-  onSettingsClose,
+  settingsProps,
 }: {
   caOpen: boolean;
   caInfo: CaInfo | null;
   onCaClose: () => void;
   settingsOpen: boolean;
-  settings: ProxySettings;
-  onSettingsChange: (s: ProxySettings) => void;
-  onSettingsImported: (s: ProxySettings) => void;
-  columnOrder: string[];
-  onColumnOrderChange: (order: string[]) => void;
-  shortcuts: Bindings;
-  onShortcutsChange: (b: Bindings) => void;
-  running: boolean;
-  onCaChanged: () => void;
-  onSettingsClose: () => void;
+  settingsProps: SettingsDialogProps;
 }) {
   return (
     <>
       {caOpen && caInfo && <CaDialog info={caInfo} onClose={onCaClose} />}
-      {settingsOpen && (
-        <SettingsDialog
-          settings={settings}
-          onChange={onSettingsChange}
-          onImportApplied={onSettingsImported}
-          columnOrder={columnOrder}
-          onColumnOrderChange={onColumnOrderChange}
-          shortcuts={shortcuts}
-          onShortcutsChange={onShortcutsChange}
-          running={running}
-          onCaChanged={onCaChanged}
-          onClose={onSettingsClose}
-        />
-      )}
+      {settingsOpen && <SettingsDialog {...settingsProps} />}
     </>
   );
 }
@@ -610,6 +578,9 @@ export function App() {
                 ruleHits: s.ar.ruleHits,
                 bulkMockProgress: s.ar.bulkMockProgress,
                 reloadToken: s.history.version,
+                layout: s.autoLayout,
+                openWindowRuleIds: s.openRuleWindows,
+                onOpenRuleWindow: s.openRuleWindow,
               }}
             />
           )}
@@ -631,16 +602,20 @@ export function App() {
           caInfo={s.caInfo}
           onCaClose={() => s.setCaOpen(false)}
           settingsOpen={s.settings.settingsOpen}
-          settings={s.settings.settings}
-          onSettingsChange={s.saveSettings}
-          onSettingsImported={s.applyImportedSettings}
-          columnOrder={s.columns.columnOrder}
-          onColumnOrderChange={s.columns.setColumnOrder}
-          shortcuts={s.shortcuts}
-          onShortcutsChange={s.setShortcuts}
-          running={s.proxy.running}
-          onCaChanged={s.refreshCa}
-          onSettingsClose={() => s.settings.setSettingsOpen(false)}
+          settingsProps={{
+            settings: s.settings.settings,
+            onChange: s.saveSettings,
+            onImportApplied: s.applyImportedSettings,
+            columnOrder: s.columns.columnOrder,
+            onColumnOrderChange: s.columns.setColumnOrder,
+            shortcuts: s.shortcuts,
+            onShortcutsChange: s.setShortcuts,
+            autoLayout: s.autoLayout,
+            onAutoLayoutChange: s.setAutoLayout,
+            running: s.proxy.running,
+            onCaChanged: s.refreshCa,
+            onClose: () => s.settings.setSettingsOpen(false),
+          }}
         />
 
         {s.confirmClear && (
