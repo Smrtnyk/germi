@@ -1182,6 +1182,7 @@ mod tests {
     fn rule_from_flow_seeds_respond_from_response() {
         let flow = Flow {
             id: "f1".into(),
+            seq: 0,
             request: CapturedRequest {
                 method: "GET".into(),
                 uri: "https://x/api".into(),
@@ -1230,6 +1231,7 @@ mod tests {
     fn rule_from_flow_uses_full_url() {
         let flow = Flow {
             id: "f".into(),
+            seq: 0,
             request: CapturedRequest {
                 method: "POST".into(),
                 uri: "https://x/api/v2/rum?dd=1&k=abc".into(),
@@ -1271,6 +1273,7 @@ mod tests {
 
         let flow = Flow {
             id: "f".into(),
+            seq: 0,
             request: CapturedRequest {
                 method: "GET".into(),
                 uri: "https://x/api".into(),
@@ -1342,6 +1345,7 @@ mod tests {
         // and the wire matches the original response.
         let flow = Flow {
             id: "f".into(),
+            seq: 0,
             request: CapturedRequest {
                 method: "GET".into(),
                 uri: "https://x/api".into(),
@@ -1394,6 +1398,7 @@ mod tests {
         let binary: Vec<u8> = [0x00, 0xff, 0xfe, 0x80, 0x9c, 0x01, 0x02, 0x88].repeat(20);
         let flow = Flow {
             id: "f".into(),
+            seq: 0,
             request: CapturedRequest {
                 method: "GET".into(),
                 uri: "https://x/api".into(),
@@ -1566,6 +1571,7 @@ mod tests {
         };
         let flow = Flow {
             id: "f".into(),
+            seq: 0,
             request: req("github.com", "/feed"),
             response: None,
             matched_rule: None,
@@ -1586,6 +1592,7 @@ mod tests {
     fn mock_rule_is_exact_not_substring() {
         let flow = Flow {
             id: "f".into(),
+            seq: 0,
             request: req("GET", "https", "google.com", "/"),
             response: None,
             matched_rule: None,

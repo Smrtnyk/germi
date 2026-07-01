@@ -24,6 +24,9 @@ export interface Availability {
 
 export interface FlowSummary {
   id: string;
+  /** Monotonic request number for the leading `#` column; assigned in arrival
+   *  order on capture/import, renumbered from 1 on a fresh import (issue #75). */
+  seq: number;
   method: string;
   host: string;
   path: string;

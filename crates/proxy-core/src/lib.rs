@@ -471,6 +471,7 @@ impl ProxyController {
             other => bail!("Unsupported file type: .{other}"),
         };
         self.clear_flows();
+        self.shared.reset_seq();
         Ok(self.import_flows(flows))
     }
 
@@ -530,6 +531,7 @@ impl ProxyController {
         let mut count = 0;
         for mut flow in flows {
             flow.id = self.shared.next_id();
+            flow.seq = self.shared.next_seq();
             self.shared.record_imported(flow);
             count += 1;
         }
@@ -1243,6 +1245,7 @@ mod tests {
     fn flow(id: &str) -> crate::flow::Flow {
         crate::flow::Flow {
             id: id.to_string(),
+            seq: 0,
             request: request(),
             response: None,
             matched_rule: None,
@@ -1456,6 +1459,35 @@ mod tests {
             summaries.iter().all(|s| s.imported),
             "every flow loaded via open_capture is marked imported"
         );
+    }
+
+    #[test]
+    fn captured_flows_get_increasing_request_numbers() {
+        let c = controller();
+        for id in ["a", "b", "c"] {
+            let mut f = flow(id);
+            f.seq = c.shared.next_seq();
+            c.shared.record_new(f);
+        }
+        let seqs: Vec<u64> = c.list_flows().into_iter().map(|s| s.seq).collect();
+        assert_eq!(seqs, vec![1, 2, 3], "request numbers increase in capture order");
+    }
+
+    #[test]
+    fn opening_a_capture_renumbers_from_one() {
+        let c = controller();
+        // Burn some request numbers on live traffic first.
+        for id in ["a", "b", "c"] {
+            let mut f = flow(id);
+            f.seq = c.shared.next_seq();
+            c.shared.record_new(f);
+        }
+        // Opening a file replaces the traffic AND restarts numbering at 1.
+        let bytes = crate::session::export_session(&[flow("x"), flow("y")]);
+        let n = c.open_capture(&bytes, "germi").expect("open germi");
+        assert_eq!(n, 2);
+        let seqs: Vec<u64> = c.list_flows().into_iter().map(|s| s.seq).collect();
+        assert_eq!(seqs, vec![1, 2], "an opened session is numbered 1..N, not continued");
     }
 
     #[test]

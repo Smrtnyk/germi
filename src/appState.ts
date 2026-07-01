@@ -15,7 +15,7 @@ import { compact, difference, intersection, isEqual } from "es-toolkit";
 import { announce } from "./announce";
 import { api, subscribeFlows } from "./ipc";
 import { parseFilter, statusClass, type ContentTerm, type ParsedFilter } from "./filter";
-import { resolveColumns, DEFAULT_COLUMNS, type ColumnDef } from "./columns";
+import { backfillSeqColumn, resolveColumns, DEFAULT_COLUMNS, type ColumnDef } from "./columns";
 import { nextSort, resolveSort, sortFlows, type SortState } from "./sort";
 import { useSplitRatio } from "./useResizable";
 import { useProxyIndicator } from "./useProxyIndicator";
@@ -248,7 +248,10 @@ function intersectMatches(
 function loadColumnOrder(): string[] {
   try {
     const saved = JSON.parse(localStorage.getItem("germi.columns") ?? "null");
-    return Array.isArray(saved) && saved.length ? saved : DEFAULT_COLUMNS;
+    if (!Array.isArray(saved) || !saved.length) return DEFAULT_COLUMNS;
+    const marked = localStorage.getItem("germi.columns.seqBackfilled") !== null;
+    if (!marked) localStorage.setItem("germi.columns.seqBackfilled", "1");
+    return backfillSeqColumn(saved, marked);
   } catch {
     return DEFAULT_COLUMNS;
   }

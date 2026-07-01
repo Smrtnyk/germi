@@ -217,6 +217,7 @@ mod tests {
     fn flow(id: &str) -> Flow {
         Flow {
             id: id.to_string(),
+            seq: 0,
             request: CapturedRequest {
                 method: "GET".into(),
                 uri: format!("https://h/{id}"),

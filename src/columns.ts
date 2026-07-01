@@ -62,6 +62,14 @@ function availabilityRank(f: FlowSummary): number | null {
 
 const BUILTIN_COLUMNS: ColumnDef[] = [
   {
+    id: "seq",
+    label: "#",
+    width: 60,
+    align: "right",
+    text: (f) => `${f.seq}`,
+    sortKey: (f) => f.seq,
+  },
+  {
     id: "method",
     label: "Method",
     width: 62,
@@ -192,22 +200,22 @@ const BUILTIN_COLUMNS: ColumnDef[] = [
 ];
 
 export const PRESETS: { name: string; columns: string[] }[] = [
-  { name: "Minimal", columns: ["method", "host", "path", "status", "respSize"] },
+  { name: "Minimal", columns: ["seq", "method", "host", "path", "status", "respSize"] },
   {
     name: "Default",
-    columns: ["method", "host", "path", "status", "type", "respSize", "duration", "comment"],
+    columns: ["seq", "method", "host", "path", "status", "type", "respSize", "duration", "comment"],
   },
   {
     name: "Timing",
-    columns: ["method", "path", "status", "start", "ttfb", "duration", "download"],
+    columns: ["seq", "method", "path", "status", "start", "ttfb", "duration", "download"],
   },
   {
     name: "Sizes",
-    columns: ["method", "path", "status", "reqSize", "respSize", "totalSize", "type"],
+    columns: ["seq", "method", "path", "status", "reqSize", "respSize", "totalSize", "type"],
   },
   {
     name: "Mocking",
-    columns: ["method", "host", "path", "status", "origin", "rule", "comment"],
+    columns: ["seq", "method", "host", "path", "status", "origin", "rule", "comment"],
   },
 ];
 
@@ -234,4 +242,12 @@ export function allColumns(headerSpecs: string[]): ColumnDef[] {
 export function resolveColumns(order: string[], headerSpecs: string[]): ColumnDef[] {
   const byId = new Map(allColumns(headerSpecs).map((c) => [c.id, c]));
   return compact(order.map((id) => byId.get(id)));
+}
+
+/** Surface the leading `#` column on an order saved before it existed, so the
+ *  feature appears for existing installs. `alreadyBackfilled` gates it to run once
+ *  — a later manual removal must stick rather than being re-added on every load. */
+export function backfillSeqColumn(saved: string[], alreadyBackfilled: boolean): string[] {
+  if (alreadyBackfilled || saved.includes("seq")) return saved;
+  return ["seq", ...saved];
 }

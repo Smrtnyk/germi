@@ -164,6 +164,7 @@ pub fn import_session(bytes: &[u8]) -> Result<Vec<Flow>> {
             };
             Flow {
                 id: String::new(),
+                seq: 0,
                 request,
                 response,
                 matched_rule: sf.matched_rule,
@@ -188,6 +189,7 @@ mod tests {
     fn session_round_trips() {
         let flow = Flow {
             id: "x".into(),
+            seq: 0,
             request: CapturedRequest {
                 method: "GET".into(),
                 uri: "https://h/p".into(),

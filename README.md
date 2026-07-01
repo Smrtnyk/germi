@@ -79,7 +79,8 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   type/status chips, a token filter (`host: status:4xx kind:xhr is:imported -neg /regex/` —
   see the `?` popover), and backend `body:` / `req-body:` / `resp-body:` content search.
 - **Columns** — configurable in **Settings → Columns** (show/hide, reorder, presets,
-  drag-resize): scheme, sizes, **timing (TTFB / Time / Download)**, **Mocked-by**, an
+  drag-resize): a leading **request number (`#`)** to re-sort back to capture order and
+  reference a request, scheme, sizes, **timing (TTFB / Time / Download)**, **Mocked-by**, an
   editable **Comment**, and **pin-any-header** columns.
 - **Settings** — Connections (port, **allow remote devices**), Certificates
   (export/regenerate), Interception (host exclusions, tunneled), Capture (max flows,
