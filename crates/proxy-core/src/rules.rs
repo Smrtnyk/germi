@@ -401,6 +401,21 @@ impl RuleCursors {
     }
 }
 
+/// Upper bound on a `MapLocal` file served as a synthetic response body, mirroring
+/// the capture cap. A larger mapping is skipped (treated like a missing file) so a
+/// giant or hostile file can't be read entirely into memory on the request path.
+const MAP_LOCAL_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read a `MapLocal` file, returning `None` (skip the rule) for a missing,
+/// unreadable, or over-cap file instead of breaking the flow or blowing up memory.
+fn read_map_local(path: &str) -> Option<Vec<u8>> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAP_LOCAL_MAX_BYTES {
+        return None;
+    }
+    std::fs::read(path).ok()
+}
+
 fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors) -> RequestOutcome {
     let mut set_headers = Vec::new();
     for rule in rules.iter().filter(|r| r.enabled && cursors.allows_fire(r)) {
@@ -447,9 +462,11 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
                     },
                 };
             }
-            // Missing file: skip this rule rather than break the flow.
+            // Missing (or too-large) file: skip this rule rather than break the
+            // flow. The size cap keeps a huge/hostile mapping from being slurped
+            // whole into memory on the request hot path.
             Action::MapLocal { path, status } => {
-                if let Ok(bytes) = std::fs::read(path) {
+                if let Some(bytes) = read_map_local(path) {
                     let ct = mime_guess::from_path(path)
                         .first_raw()
                         .unwrap_or("application/octet-stream")
@@ -610,6 +627,12 @@ fn rewrite_response_body(resp: &mut CapturedResponse, find: &str, replace: &str,
     } else {
         text.replace(find, replace)
     };
+    // No match ⇒ nothing changed: report no-op so the caller doesn't burn the
+    // fire budget, stamp "Mocked-by", or strip Content-Encoding on an untouched
+    // body (which would serve it decompressed for no reason).
+    if new == text {
+        return false;
+    }
     resp.body = new.into_bytes();
     // The body is now identity bytes, so drop the stale Content-Encoding
     // (Content-Length is recomputed downstream in build_parts).
@@ -1131,6 +1154,57 @@ mod tests {
                 .iter()
                 .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding")),
             "content-encoding must be stripped after decode+rewrite"
+        );
+    }
+
+    #[test]
+    fn response_body_rewrite_noop_when_find_absent() {
+        use std::io::Write;
+        // The find string never occurs, so the rewrite must be a true no-op: no
+        // match reported, body + Content-Encoding untouched, and the one-shot fire
+        // budget intact (the bug reported a fire and stripped the encoding anyway).
+        let mut enc =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(b"nothing to redact here").unwrap();
+        let gz = enc.finish().unwrap();
+
+        let rules = vec![Rule {
+            id: "1".into(),
+            enabled: true,
+            fire_limit: Some(1),
+            repeat: false,
+            matcher: Matcher::default(),
+            action: Action::RewriteResponseBody {
+                find: "secret".into(),
+                replace: "public".into(),
+                regex: false,
+            },
+        }];
+        let mut resp = CapturedResponse {
+            status: 200,
+            version: "HTTP/1.1".into(),
+            headers: vec![("Content-Encoding".into(), "gzip".into())],
+            body: gz.clone(),
+            timestamp_ms: 0,
+        };
+        let mut cursors = RuleCursors::default();
+        let matched = apply_response_rules_stateful(
+            &rules,
+            &req("GET", "https", "x", "/"),
+            &mut resp,
+            &mut cursors,
+        );
+        assert_eq!(matched, None, "a find that doesn't occur is not a match");
+        assert_eq!(resp.body, gz, "the body is left byte-for-byte untouched");
+        assert!(
+            resp.headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding")),
+            "Content-Encoding must NOT be stripped when nothing changed"
+        );
+        assert!(
+            cursors.allows_fire(&rules[0]),
+            "a no-op rewrite must not burn the one-shot fire limit"
         );
     }
 

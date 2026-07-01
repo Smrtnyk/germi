@@ -92,13 +92,35 @@ pub fn parse_url(url: &str) -> (String, String, String) {
         return (scheme, String::new(), rest);
     }
     match rest.find('/') {
-        Some(i) => (scheme, rest[..i].to_string(), rest[i..].to_string()),
+        Some(i) => (scheme, host_without_port(&rest[..i]), rest[i..].to_string()),
         // No path but a query (e.g. `host?x=1`): the query belongs to the path
         // (the live URI parser yields `/?x=1`), not the host.
         None => match rest.find('?') {
-            Some(i) => (scheme, rest[..i].to_string(), format!("/{}", &rest[i..])),
-            None => (scheme, rest, "/".to_string()),
+            Some(i) => (scheme, host_without_port(&rest[..i]), format!("/{}", &rest[i..])),
+            None => (scheme, host_without_port(&rest), "/".to_string()),
         },
+    }
+}
+
+/// Strip a trailing `:port` from a host so a rule matches regardless of the port.
+/// The live plain-HTTP matcher reconstructs the host via `Uri::host()`, which
+/// never includes the port, so keeping it here (for the offline tester and for
+/// imported flows) is exactly what made a `:port` rule pass the tester yet never
+/// fire live. Bracketed IPv6 literals keep their form; bare IPv6 is left as-is.
+fn host_without_port(host: &str) -> String {
+    if host.starts_with('[') {
+        return match host.split_once(']') {
+            Some((addr, _)) => format!("{addr}]"),
+            None => host.to_string(),
+        };
+    }
+    match host.rsplit_once(':') {
+        Some((h, port))
+            if !h.contains(':') && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            h.to_string()
+        }
+        _ => host.to_string(),
     }
 }
 
@@ -387,6 +409,26 @@ mod tests {
             parse_url("example.com"),
             ("https".into(), "example.com".into(), "/".into())
         );
+        // The port is stripped from the host so a rule matches regardless of it
+        // (the live plain-HTTP matcher reconstructs the host without a port).
+        assert_eq!(
+            parse_url("http://localhost:3000/api?x=1"),
+            ("http".into(), "localhost".into(), "/api?x=1".into())
+        );
+        assert_eq!(
+            parse_url("localhost:8080"),
+            ("https".into(), "localhost".into(), "/".into())
+        );
+        assert_eq!(
+            parse_url("host:8080?q=1"),
+            ("https".into(), "host".into(), "/?q=1".into())
+        );
+        // Bracketed IPv6 keeps its form (port dropped); bare IPv6 is untouched.
+        assert_eq!(
+            parse_url("http://[::1]:8080/x").1,
+            "[::1]".to_string()
+        );
+        assert_eq!(parse_url("http://[::1]/x").1, "[::1]".to_string());
     }
 
     #[test]
