@@ -3,6 +3,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import type {
   AutoResponderSummary,
   AvailabilityProgress,
+  BoundAddr,
   BulkMockEvent,
   CaInfo,
   FlowDetail,
@@ -22,6 +23,7 @@ import type {
 /** Typed wrappers around the Tauri commands in `src-tauri/src/commands.rs`. */
 export const api = {
   proxyStatus: () => invoke<boolean>("proxy_status"),
+  boundAddr: () => invoke<BoundAddr | null>("bound_addr"),
   startProxy: (port: number, allowRemote: boolean) =>
     invoke<number>("start_proxy", { port, allowRemote }),
   restartProxy: (port: number, allowRemote: boolean) =>

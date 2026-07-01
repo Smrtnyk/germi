@@ -34,6 +34,7 @@ interface SectionCtx extends SectionProps {
   autoLayout: AutoLayout;
   onAutoLayoutChange: (layout: AutoLayout) => void;
   running: boolean;
+  portError: string | null;
   onCaChanged: () => void;
 }
 
@@ -99,7 +100,12 @@ const SECTIONS: Section[] = [
     id: "connections",
     label: "Connections",
     render: (c) => (
-      <ConnectionsSection settings={c.settings} onChange={c.onChange} running={c.running} />
+      <ConnectionsSection
+        settings={c.settings}
+        onChange={c.onChange}
+        running={c.running}
+        portError={c.portError}
+      />
     ),
   },
   {
@@ -151,7 +157,12 @@ const SECTIONS: Section[] = [
   },
 ];
 
-function ConnectionsSection({ settings, onChange, running }: SectionProps & { running: boolean }) {
+function ConnectionsSection({
+  settings,
+  onChange,
+  running,
+  portError,
+}: SectionProps & { running: boolean; portError: string | null }) {
   return (
     <div className="settings-pane">
       <h4>Connections</h4>
@@ -166,9 +177,14 @@ function ConnectionsSection({ settings, onChange, running }: SectionProps & { ru
           onCommit={(port) => onChange({ ...settings, port })}
         />
         <span className="muted small">
-          {running ? "restarts the proxy when changed" : "applied on next Start"}
+          {running ? "rebinds the proxy when changed" : "applied on next Start"}
         </span>
       </div>
+      {portError && (
+        <p className="warn small" role="alert">
+          <IconWarn /> {portError}
+        </p>
+      )}
       <label className="check-row">
         <input
           type="checkbox"
@@ -176,6 +192,7 @@ function ConnectionsSection({ settings, onChange, running }: SectionProps & { ru
           onChange={(e) => onChange({ ...settings, allowRemote: e.target.checked })}
         />
         Allow remote devices to connect (bind 0.0.0.0)
+        {running && <span className="muted small"> — rebinds the proxy when changed</span>}
       </label>
       {settings.allowRemote && (
         <p className="warn small">
@@ -670,6 +687,7 @@ export interface SettingsDialogProps {
   autoLayout: AutoLayout;
   onAutoLayoutChange: (layout: AutoLayout) => void;
   running: boolean;
+  portError: string | null;
   onCaChanged: () => void;
   onClose: () => void;
 }
@@ -694,6 +712,7 @@ export function SettingsDialog({
   autoLayout,
   onAutoLayoutChange,
   running,
+  portError,
   onCaChanged,
   onClose,
 }: SettingsDialogProps) {
@@ -765,6 +784,7 @@ export function SettingsDialog({
             autoLayout,
             onAutoLayoutChange,
             running,
+            portError,
             onCaChanged,
           })}
         </div>

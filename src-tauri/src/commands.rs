@@ -59,6 +59,24 @@ pub async fn proxy_status(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(controller.is_running().await)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoundAddr {
+    pub port: u16,
+    pub allow_remote: bool,
+}
+
+/// The live listen address (port + LAN scope), or `None` if stopped. Lets the
+/// webview re-read reality after a reload instead of trusting the persisted port.
+#[tauri::command]
+pub async fn bound_addr(state: State<'_, AppState>) -> Result<Option<BoundAddr>, String> {
+    let controller = state.controller.clone();
+    Ok(controller.bound_addr().await.map(|addr| BoundAddr {
+        port: addr.port(),
+        allow_remote: addr.ip().is_unspecified(),
+    }))
+}
+
 /// Bind `0.0.0.0` (LAN-reachable) only when explicitly allowed; loopback otherwise.
 fn listen_addr(port: u16, allow_remote: bool) -> SocketAddr {
     let ip = if allow_remote { [0, 0, 0, 0] } else { [127, 0, 0, 1] };

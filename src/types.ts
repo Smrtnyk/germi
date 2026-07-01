@@ -170,6 +170,11 @@ export interface AutoResponderSummary {
 /** Which rule fields `searchRules` scans (mirrors proxy-core `RuleSearchScope`). */
 export type RuleSearchScope = "url" | "method" | "status" | "response" | "headers" | "all";
 
+export interface BoundAddr {
+  port: number;
+  allowRemote: boolean;
+}
+
 export interface ProxySettings {
   /** Host patterns tunneled without interception (no decrypt, no capture). */
   excludedHosts: string[];

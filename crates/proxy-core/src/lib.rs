@@ -120,14 +120,18 @@ pub enum SearchField {
     Headers,
 }
 
+/// A live proxy: its bound address, a shutdown signal, and the serving task's
+/// join handle (so `stop()` can wait for the listener socket to be released).
+type RunningProxy = (SocketAddr, oneshot::Sender<()>, JoinHandle<()>);
+
 /// Owns the proxy lifecycle, the captured-flow store and the rules.
 pub struct ProxyController {
     shared: Arc<Shared>,
     /// Behind a lock so the CA can be regenerated at runtime.
     ca: RwLock<CertAuthority>,
-    /// `Some((shutdown_sender, task))` while the proxy is running. The join
-    /// handle lets `stop()` wait for the listener to actually release.
-    running: Mutex<Option<(oneshot::Sender<()>, JoinHandle<()>)>>,
+    /// `Some(..)` while the proxy is running; the bound address lets the UI
+    /// re-read the live listen port/scope after a webview reload.
+    running: Mutex<Option<RunningProxy>>,
 }
 
 impl ProxyController {
@@ -180,6 +184,13 @@ impl ProxyController {
         self.running.lock().await.is_some()
     }
 
+    /// The address the proxy is currently bound to, or `None` if stopped. Lets the
+    /// UI re-read the live listen address (port + LAN scope) after a reload,
+    /// instead of guessing from the persisted setting.
+    pub async fn bound_addr(&self) -> Option<SocketAddr> {
+        self.running.lock().await.as_ref().map(|(addr, _, _)| *addr)
+    }
+
     /// Start the proxy listening on `addr`. Errors if already running, or if the
     /// bind fails (e.g. the port is in use). Returns the actually-bound address
     /// (e.g. resolving port 0 to the OS-assigned port).
@@ -188,7 +199,8 @@ impl ProxyController {
         if guard.is_some() {
             bail!("proxy is already running");
         }
-        let (state, local_addr) = self.spawn_proxy(addr).await?;
+        let state = self.spawn_proxy(addr).await?;
+        let local_addr = state.0;
         *guard = Some(state);
         Ok(local_addr)
     }
@@ -199,8 +211,9 @@ impl ProxyController {
     /// error — a mistyped port never kills a working proxy. Returns the bound addr.
     pub async fn restart(&self, addr: SocketAddr) -> Result<SocketAddr> {
         let mut guard = self.running.lock().await;
-        let (state, local_addr) = self.spawn_proxy(addr).await?;
-        if let Some((tx, task)) = guard.take() {
+        let state = self.spawn_proxy(addr).await?;
+        let local_addr = state.0;
+        if let Some((_addr, tx, task)) = guard.take() {
             let _ = tx.send(());
             let _ = task.await;
         }
@@ -213,10 +226,7 @@ impl ProxyController {
     /// binding here (not in the spawned task) means a bind failure surfaces before
     /// anything is recorded as running, so `start`/`restart` can bind first and
     /// commit only on success.
-    async fn spawn_proxy(
-        &self,
-        addr: SocketAddr,
-    ) -> Result<((oneshot::Sender<()>, JoinHandle<()>), SocketAddr)> {
+    async fn spawn_proxy(&self, addr: SocketAddr) -> Result<RunningProxy> {
         // Install a default crypto provider once (ignored if already set).
         let _ = aws_lc_rs::default_provider().install_default();
 
@@ -250,7 +260,7 @@ impl ProxyController {
             }
         });
 
-        Ok(((shutdown_tx, task), local_addr))
+        Ok((local_addr, shutdown_tx, task))
     }
 
     /// Gracefully stop the proxy if running. Waits for the proxy task to finish
@@ -258,7 +268,7 @@ impl ProxyController {
     /// restart on the same port doesn't fail with "address already in use".
     pub async fn stop(&self) {
         let taken = self.running.lock().await.take();
-        if let Some((tx, task)) = taken {
+        if let Some((_addr, tx, task)) = taken {
             let _ = tx.send(());
             let _ = task.await;
         }
@@ -1295,6 +1305,19 @@ mod tests {
 
     fn loopback(port: u16) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    #[tokio::test]
+    async fn bound_addr_tracks_the_live_listener() {
+        let c = controller();
+        assert_eq!(c.bound_addr().await, None);
+        let bound = c.start(loopback(0)).await.expect("start");
+        // Reports exactly what's bound (so the UI can re-read it after a reload).
+        assert_eq!(c.bound_addr().await, Some(bound));
+        let rebound = c.restart(loopback(0)).await.expect("restart");
+        assert_eq!(c.bound_addr().await, Some(rebound));
+        c.stop().await;
+        assert_eq!(c.bound_addr().await, None);
     }
 
     #[tokio::test]
