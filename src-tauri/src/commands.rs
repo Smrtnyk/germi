@@ -137,6 +137,12 @@ pub async fn restart_proxy(
     port: u16,
     allow_remote: bool,
 ) -> Result<u16, String> {
+    // Defense in depth (as in `start_proxy`): `ProxyController::restart` starts the
+    // proxy when nothing is running, so without this a viewer could bind a live
+    // proxy and fight the capturing instance for the port.
+    if state.viewer {
+        return Err("Proxy is disabled in viewer mode".to_string());
+    }
     let controller = state.controller.clone();
     let bound = controller
         .restart(listen_addr(port, allow_remote))
@@ -162,35 +168,39 @@ pub async fn subscribe_flows(
     channel: Channel<Vec<FlowEvent>>,
 ) -> Result<(), String> {
     let mut rx = state.controller.subscribe();
-    let handle = tauri::async_runtime::spawn(async move {
-        let mut buf: Vec<FlowEvent> = Vec::new();
-        let mut ticker = tokio::time::interval(Duration::from_millis(60));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                received = rx.recv() => match received {
-                    Ok(event) => {
-                        buf.push(event);
-                        if buf.len() >= 200 && channel.send(std::mem::take(&mut buf)).is_err() {
+    // Take the slot lock BEFORE spawning so two concurrent subscribes (React Strict
+    // Mode double-mount / hot reload) can't interleave: whoever holds the lock
+    // aborts the prior forwarder and installs its own atomically. Spawning under
+    // the lock is fine — it's synchronous, no `.await` is held. Without this, a
+    // spawn-then-lock race could abort the newest forwarder (the live channel) and
+    // leave a dead one feeding a nulled-onmessage channel.
+    if let Ok(mut slot) = state.flow_forwarder.lock() {
+        let handle = tauri::async_runtime::spawn(async move {
+            let mut buf: Vec<FlowEvent> = Vec::new();
+            let mut ticker = tokio::time::interval(Duration::from_millis(60));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    received = rx.recv() => match received {
+                        Ok(event) => {
+                            buf.push(event);
+                            if buf.len() >= 200 && channel.send(std::mem::take(&mut buf)).is_err() {
+                                break;
+                            }
+                        }
+                        // Subscriber fell behind and events were dropped; tell the UI
+                        // to re-list and resynchronize (flushed with the next batch).
+                        Err(RecvError::Lagged(_)) => buf.push(FlowEvent::Resync),
+                        Err(RecvError::Closed) => break,
+                    },
+                    _ = ticker.tick() => {
+                        if !buf.is_empty() && channel.send(std::mem::take(&mut buf)).is_err() {
                             break;
                         }
                     }
-                    // Subscriber fell behind and events were dropped; tell the UI
-                    // to re-list and resynchronize (flushed with the next batch).
-                    Err(RecvError::Lagged(_)) => buf.push(FlowEvent::Resync),
-                    Err(RecvError::Closed) => break,
-                },
-                _ = ticker.tick() => {
-                    if !buf.is_empty() && channel.send(std::mem::take(&mut buf)).is_err() {
-                        break;
-                    }
                 }
             }
-        }
-    });
-    // Replace (and abort) any prior forwarder so a re-subscribe doesn't leak it.
-    // No `.await` is held across this lock, so a std Mutex is fine.
-    if let Ok(mut slot) = state.flow_forwarder.lock() {
+        });
         if let Some(prev) = slot.replace(handle) {
             prev.abort();
         }
@@ -204,13 +214,18 @@ pub fn list_flows(state: State<'_, AppState>) -> Vec<FlowSummary> {
 }
 
 #[tauri::command]
-pub fn get_flow(
+pub async fn get_flow(
     state: State<'_, AppState>,
     id: String,
     decoded: bool,
     full: bool,
-) -> Option<FlowDetail> {
-    state.controller.get_flow(&id, decoded, full)
+) -> Result<Option<FlowDetail>, String> {
+    // Decoding + base64-encoding an up-to-64 MB body is heavy; run it on the
+    // blocking pool so a large flow can't freeze the webview's IPC thread.
+    let controller = state.controller.clone();
+    tauri::async_runtime::spawn_blocking(move || controller.get_flow(&id, decoded, full))
+        .await
+        .map_err(|e| format!("get_flow task failed: {e}"))
 }
 
 #[tauri::command]
@@ -437,6 +452,12 @@ pub fn get_settings(state: State<'_, AppState>) -> ProxySettings {
 
 #[tauri::command]
 pub fn set_settings(state: State<'_, AppState>, settings: ProxySettings) {
+    // A viewer shares settings.json with the capturing instance. Persisting its
+    // (stale) snapshot would clobber the capturing instance's saved settings —
+    // the same clobber the read-only RuleStore prevents for rules (issue #71).
+    if state.viewer {
+        return;
+    }
     state.controller.set_settings(settings.clone());
     crate::persist::save_settings(&state.ca_dir, &settings);
 }
@@ -580,6 +601,14 @@ pub async fn export_ca(
 /// Generate a fresh root CA (proxy must be stopped). The user must re-trust it.
 #[tauri::command]
 pub async fn regenerate_ca(state: State<'_, AppState>) -> Result<(), String> {
+    // The CA lives in the shared app-data dir. A viewer regenerating it would swap
+    // the CA out from under the capturing instance (which keeps minting leaves with
+    // the old in-memory CA), breaking HTTPS interception and invalidating the user's
+    // installed trust. The controller's only guard is "proxy stopped", which is
+    // always true in a viewer — so gate it here.
+    if state.viewer {
+        return Err("Regenerating the CA is disabled in viewer mode".to_string());
+    }
     state
         .controller
         .regenerate_ca(&state.ca_dir)
@@ -644,30 +673,38 @@ pub fn file_exists(path: String) -> bool {
 
 /// Body-content search: return the ids of flows whose (decompressed) body matches.
 #[tauri::command]
-pub fn search_bodies(
+pub async fn search_bodies(
     state: State<'_, AppState>,
     pattern: String,
     side: SearchSide,
     regex: bool,
     candidates: Option<Vec<String>>,
-) -> Vec<String> {
-    state
-        .controller
-        .search_bodies(&pattern, side, regex, candidates.as_deref())
+) -> Result<Vec<String>, String> {
+    // Decompress-and-scan over every stored body is heavy on a large capture; run
+    // it on the blocking pool rather than the webview's IPC thread.
+    let controller = state.controller.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        controller.search_bodies(&pattern, side, regex, candidates.as_deref())
+    })
+    .await
+    .map_err(|e| format!("body search task failed: {e}"))
 }
 
 /// Header search: return the ids of flows whose header table (name/value) matches.
 #[tauri::command]
-pub fn search_headers(
+pub async fn search_headers(
     state: State<'_, AppState>,
     pattern: String,
     side: SearchSide,
     regex: bool,
     candidates: Option<Vec<String>>,
-) -> Vec<String> {
-    state
-        .controller
-        .search_headers(&pattern, side, regex, candidates.as_deref())
+) -> Result<Vec<String>, String> {
+    let controller = state.controller.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        controller.search_headers(&pattern, side, regex, candidates.as_deref())
+    })
+    .await
+    .map_err(|e| format!("header search task failed: {e}"))
 }
 
 /// Deep rule search within one scenario: ids of rules whose `scope` fields match.
@@ -697,7 +734,11 @@ pub async fn save_session(
         return Ok(false);
     };
     let path = picked.into_path().map_err(|e| e.to_string())?;
-    std::fs::write(&path, state.controller.export_session()).map_err(|e| e.to_string())?;
+    // Atomic write: overwriting an existing (possibly large) .germi that fails
+    // mid-write would otherwise destroy the old capture and leave a truncated,
+    // unopenable file. Stage to a temp sibling then rename.
+    let bytes = state.controller.export_session();
+    crate::persist::write_atomic(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -751,8 +792,8 @@ pub async fn export_rules(
         return Ok(false);
     };
     let path = picked.into_path().map_err(|e| e.to_string())?;
-    std::fs::write(&path, controller.export_rules(scenario_id.as_deref()))
-        .map_err(|e| e.to_string())?;
+    let bytes = controller.export_rules(scenario_id.as_deref());
+    crate::persist::write_atomic(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -803,7 +844,7 @@ pub async fn export_settings(
     let path = picked.into_path().map_err(|e| e.to_string())?;
     let settings = state.controller.get_settings();
     let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    crate::persist::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -814,6 +855,11 @@ pub async fn import_settings(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ProxySettings, String> {
+    // Don't let a viewer persist imported settings over the capturing instance's
+    // shared settings.json (see `set_settings`).
+    if state.viewer {
+        return Err("Settings import is disabled in viewer mode".to_string());
+    }
     let Some(picked) = app
         .dialog()
         .file()
@@ -834,24 +880,41 @@ pub async fn import_settings(
 // ---- undo / redo history ----
 
 /// Persist the autoresponder to `SQLite` after a mock undo/redo (traffic-only
-/// steps touch memory + the live stream and need no persistence).
-fn apply_history_step(state: &AppState, step: Option<HistoryStep>) -> Result<(), String> {
+/// steps touch memory + the live stream and need no persistence). A mock step's
+/// `replace` is a full DB rewrite, so this runs on the blocking pool.
+fn apply_history_step(
+    controller: &proxy_core::ProxyController,
+    rule_store: &crate::rule_store::RuleStore,
+    step: Option<HistoryStep>,
+) -> Result<(), String> {
     if let Some(step) = step {
         if step.mock_changed {
-            state.rule_store.replace(&state.controller.get_autoresponder())?;
+            rule_store.replace(&controller.get_autoresponder())?;
         }
     }
     Ok(())
 }
 
 #[tauri::command]
-pub fn history_undo(state: State<'_, AppState>) -> Result<(), String> {
-    let step = state.controller.undo();
-    apply_history_step(state.inner(), step)
+pub async fn history_undo(state: State<'_, AppState>) -> Result<(), String> {
+    let controller = state.controller.clone();
+    let rule_store = state.rule_store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let step = controller.undo();
+        apply_history_step(&controller, &rule_store, step)
+    })
+    .await
+    .map_err(|e| format!("undo task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn history_redo(state: State<'_, AppState>) -> Result<(), String> {
-    let step = state.controller.redo();
-    apply_history_step(state.inner(), step)
+pub async fn history_redo(state: State<'_, AppState>) -> Result<(), String> {
+    let controller = state.controller.clone();
+    let rule_store = state.rule_store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let step = controller.redo();
+        apply_history_step(&controller, &rule_store, step)
+    })
+    .await
+    .map_err(|e| format!("redo task failed: {e}"))?
 }

@@ -18,7 +18,7 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// would silently fall back to defaults, losing all the user's scenarios.
 /// The temp file name is unique per write (pid + monotonic counter) so
 /// concurrent writers never share — and clobber — the same temp file.
-fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let pid = std::process::id();
     let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = path.with_extension(format!("tmp.{pid}.{n}"));
