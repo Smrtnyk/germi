@@ -69,8 +69,18 @@ function highlight(
   caseSensitive = false,
 ): ReactNode {
   if (!query) return line === "" ? " " : line;
-  const lc = fold(line, caseSensitive);
-  const q = fold(query, caseSensitive);
+  let lc = fold(line, caseSensitive);
+  let q = fold(query, caseSensitive);
+  // Folding (toLowerCase) can change string length for a few code points (İ, ẞ,
+  // ligatures). When it does, folded indices no longer line up with the original
+  // string and the <mark> would cover the wrong characters — fall back to an exact
+  // match so the highlighted span is always correct (case just isn't folded on
+  // that rare line). Match counting (inspectorFind.ts) folds consistently, so the
+  // count stays right regardless.
+  if (lc.length !== line.length || q.length !== query.length) {
+    lc = line;
+    q = query;
+  }
   const nodes: ReactNode[] = [];
   let from = 0;
   let key = 0;
@@ -1283,7 +1293,13 @@ function useFindCoordinator(
   );
 
   const { total, regionForIndex } = combined;
-  useEffect(() => setActiveIndex(0), [detail?.id, side, rawMode, setActiveIndex]);
+  // Reset the body match count on every flow/side/mode change. A text body viewer
+  // reports its real count on mount; an image/binary/empty body mounts no viewer,
+  // so without this reset the previous flow's body count would leak into the total.
+  useEffect(() => {
+    setActiveIndex(0);
+    setBodyCount(0);
+  }, [detail?.id, side, rawMode, setActiveIndex]);
 
   const activeIndex = total ? Math.min(rawIndex, total - 1) : 0;
   const loc = regionForIndex(activeIndex);
@@ -1470,7 +1486,7 @@ function SingleFlowView({
       />
       {summary?.availability && <AvailabilityPanel availability={summary.availability} url={url} />}
       <div className="inspect-modes">
-        <SideToggle side={side} setSide={setSide} hasResponse={!!detail.response} />
+        <SideToggle side={activeSide} setSide={setSide} hasResponse={!!detail.response} />
         <ViewToggle msgView={msgView} setMsgView={setMsgView} />
       </div>
       <FlowMessage

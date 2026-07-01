@@ -137,30 +137,20 @@ function applyFlowEvents(
   return resync;
 }
 
-async function reconcileFlows(
+/** Rebuild the flow list from an authoritative backend snapshot, in backend
+ *  (capture) order. The resync path uses this so a flow the backend restored
+ *  (undo) or reordered lands at its real position instead of being appended at
+ *  the tail, and a row the backend dropped can't linger as a ghost. */
+function rebuildFromSnapshot(
   map: Map<string, FlowSummary>,
   order: string[],
-  bump: () => void,
-  setError: SetError,
-): Promise<void> {
-  const knownBefore = new Set(order);
-  try {
-    const fresh = await api.listFlows();
-    const freshIds = new Set(fresh.map((s) => s.id));
-    for (const s of fresh) {
-      if (!map.has(s.id)) order.push(s.id);
-      map.set(s.id, s);
-    }
-    for (let i = order.length - 1; i >= 0; i--) {
-      const id = order[i];
-      if (knownBefore.has(id) && !freshIds.has(id)) {
-        order.splice(i, 1);
-        map.delete(id);
-      }
-    }
-    bump();
-  } catch (e) {
-    setError(String(e));
+  fresh: FlowSummary[],
+): void {
+  map.clear();
+  order.length = 0;
+  for (const s of fresh) {
+    order.push(s.id);
+    map.set(s.id, s);
   }
 }
 
@@ -343,12 +333,41 @@ function useFlowStore(setError: SetError) {
   const [tick, bump] = useReducer((n: number) => n + 1, 0);
 
   useEffect(() => {
+    // Batches that arrive while a resync re-list is in flight are buffered and
+    // replayed on top of the authoritative snapshot, so events captured during
+    // the `listFlows` await are neither lost nor able to resurrect a removed row.
+    const pending: FlowEvent[][] = [];
+    let reconciling = false;
+
+    async function reconcile() {
+      if (reconciling) return;
+      reconciling = true;
+      try {
+        for (;;) {
+          const fresh = await api.listFlows();
+          rebuildFromSnapshot(flowsRef.current, orderRef.current, fresh);
+          let resync = false;
+          for (let batch = pending.shift(); batch; batch = pending.shift()) {
+            if (applyFlowEvents(flowsRef.current, orderRef.current, batch)) resync = true;
+          }
+          if (!resync) break;
+        }
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        reconciling = false;
+        bump();
+      }
+    }
+
     const channel = subscribeFlows((events) => {
+      if (reconciling) {
+        pending.push(events);
+        return;
+      }
       const resync = applyFlowEvents(flowsRef.current, orderRef.current, events);
       bump();
-      if (resync) {
-        void reconcileFlows(flowsRef.current, orderRef.current, bump, setError);
-      }
+      if (resync) void reconcile();
     }, setError);
     return () => {
       channel.onmessage = () => {};
@@ -377,8 +396,10 @@ function useFlowStore(setError: SetError) {
   }
 
   async function refresh() {
-    const fresh = await api.listFlows();
-    for (const fs of fresh) flowsRef.current.set(fs.id, fs);
+    // Use mergeFlows (not a bare map write): a flow captured in the batch window
+    // before this snapshot lands must be pushed into `order` too, or it stays in
+    // the map but never renders and no later event can heal it.
+    mergeFlows(orderRef.current, flowsRef.current, await api.listFlows());
     bump();
   }
 
@@ -461,15 +482,21 @@ function useSelection(flows: FlowSummary[]) {
   const anchorRef = useRef<string | null>(null);
 
   function extendOrSelect(id: string, extend: boolean) {
-    if (extend && anchorRef.current) {
-      const range = rangeSelection(
-        flows.map((f) => f.id),
-        anchorRef.current,
-        id,
-      );
-      if (range) setSelectedIds(range);
+    const range =
+      extend && anchorRef.current
+        ? rangeSelection(
+            flows.map((f) => f.id),
+            anchorRef.current,
+            id,
+          )
+        : null;
+    if (range) {
+      setSelectedIds(range);
       setSelectedId(id);
     } else {
+      // Fresh single selection: either not extending, or the anchor was
+      // evicted/removed so a range can't be computed — re-anchor here instead of
+      // moving selectedId while leaving selectedIds on the stale set.
       setSelectedIds(new Set([id]));
       setSelectedId(id);
       anchorRef.current = id;
@@ -853,6 +880,25 @@ function useAutoresponder(
     }
   }, [setError]);
 
+  // A rule edited/deleted in a detached window (a different source) mutates the
+  // shared store directly, bypassing this window's optimistic summary updates —
+  // refresh the summary so the list badge (URL/status/enabled) doesn't go stale.
+  useEffect(() => {
+    const self = currentWindowLabel();
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void onRulesChanged((p) => {
+      if (p.source !== self) void refresh();
+    }).then((fn) => {
+      if (active) unlisten = fn;
+      else fn();
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [refresh]);
+
   const activateScenario = useCallback(
     (scenarioId: string | null) => {
       setAutoresponder((current) => ({ ...current, activeScenarioId: scenarioId }));
@@ -953,6 +999,9 @@ function useAutoresponder(
           },
         );
         setAutoresponder((current) => replaceRuleSummary(current, scenarioId, summary));
+        // Tell any detached window showing this rule to reload (source-scoped so
+        // this window's own listener ignores it).
+        emitRulesChanged(currentWindowLabel(), rule.id);
         return summary;
       } catch (e) {
         setError(String(e));
@@ -966,6 +1015,9 @@ function useAutoresponder(
     (scenarioId: string, ruleId: string) => {
       const label = `Delete rule "${ruleLabelIn(arRef.current, ruleId)}"`;
       setAutoresponder((current) => removeRuleSummary(current, scenarioId, ruleId));
+      // Tell a detached window for this rule that it's gone (it shows "deleted"
+      // instead of leaving a zombie editor whose every save errors).
+      emitRulesChanged(currentWindowLabel(), ruleId);
       void api.deleteRule(scenarioId, ruleId, { label }).catch((e) => {
         setError(String(e));
         void refresh();
@@ -1113,7 +1165,7 @@ function usePersistentColumns(headerColumns: string[]) {
   const [columnOrder, setColumnOrder] = useState<string[]>(() => loadColumnOrder());
 
   useEffect(() => {
-    localStorage.setItem("germi.columns", JSON.stringify(columnOrder));
+    persist("germi.columns", JSON.stringify(columnOrder));
   }, [columnOrder]);
 
   const visibleColumns = useMemo(
@@ -1160,7 +1212,7 @@ function useFlowSort(flows: FlowSummary[], columns: ColumnDef[]) {
   const [sort, setSort] = useState<SortState | null>(loadSort);
 
   useEffect(() => {
-    localStorage.setItem("germi.sort", JSON.stringify(sort));
+    persist("germi.sort", JSON.stringify(sort));
   }, [sort]);
 
   const toggleSort = useCallback((columnId: string) => {
@@ -1252,7 +1304,6 @@ function countFlows(flows: FlowSummary[]): { imported: number; captured: number 
  *  rows; it's undoable via Ctrl/⌘ Z). */
 function deleteCapturedAction(
   flows: FlowSummary[],
-  orderRef: MutableRefObject<string[]>,
   selectedId: string | null,
   pendingSelectRef: MutableRefObject<PendingSelect>,
   notify: Notify,
@@ -1265,7 +1316,13 @@ function deleteCapturedAction(
   }
   const deleted = new Set(capturedIds);
   pendingSelectRef.current = {
-    nextId: nextIdAfterDelete(orderRef.current, deleted, selectedId),
+    // Pick the next selection from the VISIBLE (sorted) order, matching
+    // `deleteSelected`, so a distant arrival-order flow isn't selected instead.
+    nextId: nextIdAfterDelete(
+      flows.map((f) => f.id),
+      deleted,
+      selectedId,
+    ),
     deleted,
   };
   void api
@@ -1281,7 +1338,6 @@ function deleteCapturedAction(
  *  #49) so the composition root just wires it, like the other feature hooks. */
 function useCapturedDelete(
   flows: FlowSummary[],
-  orderRef: MutableRefObject<string[]>,
   selectedId: string | null,
   pendingSelectRef: MutableRefObject<PendingSelect>,
   notify: Notify,
@@ -1289,7 +1345,7 @@ function useCapturedDelete(
 ) {
   const counts = useMemo(() => countFlows(flows), [flows]);
   const deleteCaptured = () =>
-    deleteCapturedAction(flows, orderRef, selectedId, pendingSelectRef, notify, setError);
+    deleteCapturedAction(flows, selectedId, pendingSelectRef, notify, setError);
   return { deleteCaptured, capturedCount: counts.captured, importedCount: counts.imported };
 }
 
@@ -1391,8 +1447,15 @@ function useAvailabilityCheck(
       return;
     }
     setAvailabilityCheck({ completed: 0, total: ids.length });
+    // A trailing progress message can arrive after the command resolves (channel
+    // messages aren't ordered against the response). Ignore any after completion,
+    // or it would re-set the progress and permanently block further checks via the
+    // guard above.
+    let done = false;
     try {
-      const checked = await api.checkDocAvailability(ids, (p) => setAvailabilityCheck(p));
+      const checked = await api.checkDocAvailability(ids, (p) => {
+        if (!done) setAvailabilityCheck(p);
+      });
       notify(
         checked > 0 ? "success" : "info",
         checked > 0
@@ -1402,6 +1465,7 @@ function useAvailabilityCheck(
     } catch (e) {
       setError(String(e));
     } finally {
+      done = true;
       setAvailabilityCheck(null);
     }
   }
@@ -1556,6 +1620,9 @@ export function useAppState() {
     const order = flowStore.orderRef.current;
     if (pending.deleted.size > 0 && order.some((id) => pending.deleted.has(id))) return;
     pendingSelectRef.current = null;
+    // Reset the full-body flag as handleKeySelect would; this deferred reselect
+    // bypasses it, so without this the next flow would be fetched uncapped.
+    setFullBody(false);
     if (pending.nextId === null || !order.includes(pending.nextId)) {
       selection.clearSelection();
       inspector.setDetail(null);
@@ -1567,7 +1634,6 @@ export function useAppState() {
 
   const captured = useCapturedDelete(
     sortedFlows,
-    flowStore.orderRef,
     selection.selectedId,
     pendingSelectRef,
     notify,
@@ -1632,9 +1698,14 @@ export function useAppState() {
   }
 
   function applyImportedSettings(next: ProxySettings) {
-    const headersChanged = !isEqual(next.headerColumns, settings.settings.headerColumns);
+    const prev = settings.settings;
+    const headersChanged = !isEqual(next.headerColumns, prev.headerColumns);
     settings.setSettings(next);
     if (headersChanged) void flowStore.refresh().catch((e) => setError(String(e)));
+    // Rebind the running proxy if the imported file changed the port/scope, the
+    // same as an in-app settings change — otherwise the field shows the new port
+    // while traffic still flows through the old one.
+    proxy.applyListenChange(prev, next);
   }
 
   function handleRowClick(id: string, e: ReactMouseEvent) {
