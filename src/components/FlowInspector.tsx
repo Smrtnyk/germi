@@ -376,6 +376,8 @@ interface SingleProps {
   summary: FlowSummary | undefined;
   loading: boolean;
   onMock: (detail: FlowDetail) => void;
+  /** Viewer mode disables the autoresponder, so the mock buttons are hidden. */
+  viewer: boolean;
   decode: boolean;
   onLoadFull: () => void;
   inspectorFindRef: React.RefObject<InspectorFindHandle | null>;
@@ -1040,6 +1042,7 @@ function RequestHead({
   detail,
   ttfb,
   onMock,
+  viewer,
   url,
   find,
   copy,
@@ -1047,6 +1050,7 @@ function RequestHead({
   detail: FlowDetail;
   ttfb: number | null;
   onMock: (detail: FlowDetail) => void;
+  viewer: boolean;
   url: string;
   find: InspectorFind;
   copy: (label: string, value: string) => void;
@@ -1065,13 +1069,15 @@ function RequestHead({
         )}
         {ttfb !== null && <span className="muted timing">TTFB {ttfb} ms</span>}
         {detail.durationMs !== null && <span className="muted timing">{detail.durationMs} ms</span>}
-        <button
-          className="btn primary mock-btn"
-          onClick={() => onMock(detail)}
-          title="Create an autoresponder rule seeded from this response"
-        >
-          <IconMock /> Mock this →
-        </button>
+        {!viewer && (
+          <button
+            className="btn primary mock-btn"
+            onClick={() => onMock(detail)}
+            title="Create an autoresponder rule seeded from this response"
+          >
+            <IconMock /> Mock this →
+          </button>
+        )}
       </div>
       <div className="req-url">
         <span className="url-text">
@@ -1149,11 +1155,13 @@ function MultiSelectView({
   onSelectOne,
   onMockMany,
   onClearSelection,
+  viewer,
 }: {
   flows: FlowSummary[];
   onSelectOne: (id: string) => void;
   onMockMany: (ids: string[]) => void;
   onClearSelection: () => void;
+  viewer: boolean;
 }) {
   const notify = useToast();
   const parentRef = useRef<HTMLDivElement>(null);
@@ -1180,9 +1188,11 @@ function MultiSelectView({
             <strong>{flows.length}</strong> requests selected
           </span>
           <div className="multi-actions">
-            <button className="btn primary" onClick={() => onMockMany(flows.map((f) => f.id))}>
-              <IconMock /> Mock all
-            </button>
+            {!viewer && (
+              <button className="btn primary" onClick={() => onMockMany(flows.map((f) => f.id))}>
+                <IconMock /> Mock all
+              </button>
+            )}
             <button className="btn ghost" onClick={copyUrls}>
               Copy URLs
             </button>
@@ -1415,11 +1425,20 @@ function FlowMessage({
   );
 }
 
+function InspectorEmpty({ loading }: { loading: boolean }) {
+  return (
+    <div className="inspector empty-pane">
+      <span className="muted">{loading ? "Loading…" : "Select a request to inspect."}</span>
+    </div>
+  );
+}
+
 function SingleFlowView({
   detail,
   summary,
   loading,
   onMock,
+  viewer,
   decode,
   onLoadFull,
   inspectorFindRef,
@@ -1434,11 +1453,7 @@ function SingleFlowView({
   useRegisterFind(detail, inspectorFindRef, find);
 
   if (!detail || !activeMsg) {
-    return (
-      <div className="inspector empty-pane">
-        <span className="muted">{loading ? "Loading…" : "Select a request to inspect."}</span>
-      </div>
-    );
+    return <InspectorEmpty loading={loading} />;
   }
 
   return (
@@ -1448,6 +1463,7 @@ function SingleFlowView({
         detail={detail}
         ttfb={summary?.ttfbMs ?? null}
         onMock={onMock}
+        viewer={viewer}
         url={url}
         find={find}
         copy={copy}
@@ -1478,6 +1494,7 @@ export function FlowInspector(props: Props) {
         onSelectOne={props.onSelectOne}
         onMockMany={props.onMockMany}
         onClearSelection={props.onClearSelection}
+        viewer={props.viewer}
       />
     );
   }
@@ -1487,6 +1504,7 @@ export function FlowInspector(props: Props) {
       summary={props.summary}
       loading={props.loading}
       onMock={props.onMock}
+      viewer={props.viewer}
       decode={props.decode}
       onLoadFull={props.onLoadFull}
       inspectorFindRef={props.inspectorFindRef}

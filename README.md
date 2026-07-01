@@ -92,7 +92,8 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
 - **Viewer mode** — **New viewer** (or launching with `--viewer`) opens a second,
   proxy-less window for inspecting saved `.germi`/HAR/SAZ captures *alongside* a
   capturing instance, without the two fighting over the proxy port or system proxy.
-  The proxy controls are hidden and a **Viewer mode** badge makes the state obvious.
+  The proxy controls and the (proxy-dependent) autoresponder are hidden and a
+  **Viewer mode** badge makes the state obvious.
 
 ## Limitations
 

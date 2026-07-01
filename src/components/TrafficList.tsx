@@ -48,6 +48,8 @@ interface Props {
   onExcludeHost: (host: string) => void;
   onCopyCurl: (id: string) => void;
   onCopyBody: (id: string) => void;
+  /** Viewer mode disables the autoresponder, so the "Mock" action is hidden. */
+  viewer: boolean;
 }
 
 const MIN_W = 38;
@@ -475,6 +477,8 @@ function useColumnLayout(columns: ColumnDef[], widthOf: (c: ColumnDef) => number
 interface MenuActions {
   beginEdit: (f: FlowSummary) => void;
   onMockFlow: (id: string) => void;
+  /** False in viewer mode: omit the "Mock this" item (autoresponder disabled). */
+  canMock: boolean;
   onFilterToHost: (host: string) => void;
   onExcludeHost: (host: string) => void;
   onCopyCurl: (id: string) => void;
@@ -489,14 +493,18 @@ function menuItemsFor(
   selectedCount: number,
 ): MenuItem[] {
   return [
-    {
-      label: (
-        <>
-          <IconMock /> Mock this
-        </>
-      ),
-      onClick: () => a.onMockFlow(f.id),
-    },
+    ...(a.canMock
+      ? [
+          {
+            label: (
+              <>
+                <IconMock /> Mock this
+              </>
+            ),
+            onClick: () => a.onMockFlow(f.id),
+          },
+        ]
+      : []),
     { label: "Add note", onClick: () => a.beginEdit(f) },
     { label: "", sep: true, onClick: () => {} },
     {
@@ -753,6 +761,7 @@ export function TrafficList({
   onExcludeHost,
   onCopyCurl,
   onCopyBody,
+  viewer,
 }: Props) {
   const headerRef = useRef<HTMLDivElement>(null);
   const { widthOf, resetWidth, startResize } = useColumnWidths();
@@ -761,6 +770,7 @@ export function TrafficList({
   const { openMenu, menuEl } = useFlowMenu(selectedId, selectedIds, onKeySelect, {
     beginEdit: comments.beginEdit,
     onMockFlow,
+    canMock: !viewer,
     onFilterToHost,
     onExcludeHost,
     onCopyCurl,

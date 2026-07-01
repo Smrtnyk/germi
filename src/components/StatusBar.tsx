@@ -41,15 +41,20 @@ export function StatusBar({
       <span className="sep">·</span>
       <span>{flowCount} flows</span>
       <span className="spacer" />
-      <span>
-        Autoresponder:{" "}
-        {activeScenario ? (
-          <strong className="scenario-live">{activeScenario}</strong>
-        ) : (
-          <span className="muted">Off</span>
-        )}
-      </span>
-      <span className="sep">·</span>
+      {/* The autoresponder is disabled in viewer mode (no proxy to mock). */}
+      {!viewer && (
+        <>
+          <span>
+            Autoresponder:{" "}
+            {activeScenario ? (
+              <strong className="scenario-live">{activeScenario}</strong>
+            ) : (
+              <span className="muted">Off</span>
+            )}
+          </span>
+          <span className="sep">·</span>
+        </>
+      )}
       <button
         className="status-key"
         onClick={onOpenPalette}

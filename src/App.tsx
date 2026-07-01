@@ -47,6 +47,24 @@ function buildActions(s: AppStateValue): PaletteAction[] {
           run: s.proxy.toggleSystemProxy,
         },
       ];
+  // The autoresponder is disabled in viewer mode — drop its view commands too.
+  const autoViewActions: PaletteAction[] = s.viewer
+    ? []
+    : [
+        {
+          id: "show-auto",
+          group: "View",
+          label: "Show Autoresponder",
+          shortcut: prettyShortcut(s.shortcuts["show-autoresponder"]),
+          run: () => s.setRightTab("autoresponder"),
+        },
+        {
+          id: "split",
+          group: "View",
+          label: s.rightMode === "split" ? "Use single panel" : "Split panels",
+          run: () => s.setRightMode(s.rightMode === "split" ? "single" : "split"),
+        },
+      ];
   const actions: PaletteAction[] = [
     ...proxyActions,
     {
@@ -96,19 +114,7 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       shortcut: prettyShortcut(s.shortcuts["show-inspector"]),
       run: () => s.setRightTab("inspector"),
     },
-    {
-      id: "show-auto",
-      group: "View",
-      label: "Show Autoresponder",
-      shortcut: prettyShortcut(s.shortcuts["show-autoresponder"]),
-      run: () => s.setRightTab("autoresponder"),
-    },
-    {
-      id: "split",
-      group: "View",
-      label: s.rightMode === "split" ? "Use single panel" : "Split panels",
-      run: () => s.setRightMode(s.rightMode === "split" ? "single" : "split"),
-    },
+    ...autoViewActions,
     {
       id: "toggle-panel",
       group: "View",
@@ -130,6 +136,7 @@ function buildActions(s: AppStateValue): PaletteAction[] {
     { id: "ca", group: "App", label: "CA certificate…", run: () => s.setCaOpen(true) },
     { id: "new-viewer", group: "App", label: "New viewer window", run: s.launchViewer },
   ];
+  if (s.viewer) return actions;
   for (const sc of ar.scenarios) {
     actions.push({
       id: `scenario-${sc.id}`,
@@ -168,8 +175,13 @@ function commandActions(
     open: () => s.requestOpenCapture(),
     "copy-url": () => s.copySelectedUrl(),
     "show-inspector": () => s.setRightTab("inspector"),
-    "show-autoresponder": () => s.setRightTab("autoresponder"),
-    "edit-mock-body": () => s.focusMockBody(),
+    // The autoresponder is disabled in viewer mode, so these are no-ops there.
+    "show-autoresponder": () => {
+      if (!s.viewer) s.setRightTab("autoresponder");
+    },
+    "edit-mock-body": () => {
+      if (!s.viewer) s.focusMockBody();
+    },
   };
 }
 
@@ -344,6 +356,7 @@ function RightPanel({
   onCollapse,
   inspector,
   auto,
+  viewer,
 }: {
   rightTab: RightTab;
   setRightTab: (tab: RightTab) => void;
@@ -365,7 +378,40 @@ function RightPanel({
     inspectorFindRef: AppStateValue["inspectorFindRef"];
   };
   auto: AutoresponderPanelProps;
+  viewer: boolean;
 }) {
+  // Viewer mode disables the autoresponder entirely: an Inspector-only panel,
+  // no tabs / split / autoresponder pane.
+  if (viewer) {
+    return (
+      <div className="right-panel">
+        <div className="right-header">
+          <span className="split-label">Inspector</span>
+          <div className="spacer" />
+          <button
+            className="btn ghost small"
+            title="Search the inspected request & response (Ctrl/⌘ F)"
+            onClick={() => inspector.inspectorFindRef.current?.openFind(undefined, "body")}
+          >
+            <IconSearch /> Search
+          </button>
+          <button
+            className="btn ghost small"
+            title="Hide panel — widen the traffic list"
+            onClick={onCollapse}
+          >
+            <IconPanelCollapse />
+          </button>
+        </div>
+        <div className="right-content">
+          <div className="pane">
+            <FlowInspector {...inspector} viewer />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const split = rightMode === "split";
   const inspectorVisible = split || rightTab === "inspector";
   const autoVisible = split || rightTab === "autoresponder";
@@ -384,7 +430,7 @@ function RightPanel({
 
       <div className={`right-content ${split ? "split" : ""}`}>
         <div className={inspectorVisible ? "pane" : "pane hidden"}>
-          <FlowInspector {...inspector} />
+          <FlowInspector {...inspector} viewer={false} />
         </div>
         <div className={autoVisible ? "pane" : "pane hidden"}>
           <AutoresponderPanel {...auto} />
@@ -397,15 +443,17 @@ function RightPanel({
 function PanelRail({
   activeScenario,
   onExpand,
+  viewer,
 }: {
   activeScenario: string | null;
   onExpand: () => void;
+  viewer: boolean;
 }) {
   return (
     <div className="panel-rail">
       <button className="rail-btn" onClick={onExpand} title="Show Inspector / Autoresponder panel">
         <IconPanelExpand />
-        {activeScenario && <span className="live-dot" />}
+        {!viewer && activeScenario && <span className="live-dot" />}
         <span className="rail-label">Panel</span>
       </button>
     </div>
@@ -520,6 +568,7 @@ export function App() {
               onExcludeHost={s.excludeHost}
               onCopyCurl={s.copyFlowAsCurl}
               onCopyBody={s.copyFlowBody}
+              viewer={s.viewer}
             />
           </div>
 
@@ -533,6 +582,7 @@ export function App() {
             <PanelRail
               activeScenario={s.activeScenario}
               onExpand={() => s.setRightCollapsed(false)}
+              viewer={s.viewer}
             />
           ) : (
             <RightPanel
@@ -542,6 +592,7 @@ export function App() {
               setRightMode={s.setRightMode}
               activeScenario={s.activeScenario}
               onCollapse={() => s.setRightCollapsed(true)}
+              viewer={s.viewer}
               inspector={{
                 detail: s.inspector.detail,
                 summary: s.selectedSummary,
