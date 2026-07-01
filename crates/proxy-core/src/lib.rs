@@ -798,7 +798,6 @@ impl ProxyController {
             .ok_or_else(|| anyhow!("rule not found"))?;
         let mut copy = scenario.rules[index].clone();
         copy.id = new_entity_id("rule");
-        copy.name = format!("{} copy", copy.name);
         let summary = RuleSummary::from(&copy);
         scenario.rules.insert(index + 1, copy.clone());
         Ok((copy, summary))
@@ -1193,7 +1192,6 @@ mod tests {
     fn respond_rule(id: &str) -> Rule {
         Rule {
             id: id.to_string(),
-            name: id.to_string(),
             enabled: true,
             fire_limit: Some(1),
             repeat: false,
@@ -1534,7 +1532,6 @@ mod tests {
                 name: "Summary".to_string(),
                 rules: vec![Rule {
                     id: "large".to_string(),
-                    name: "Large".to_string(),
                     enabled: true,
                     fire_limit: None,
                     repeat: false,
@@ -1944,9 +1941,9 @@ mod tests {
         });
     }
 
-    fn renamed_rule(name: &str) -> Rule {
+    fn rule_with_url(url: &str) -> Rule {
         let mut rule = respond_rule("r1");
-        rule.name = name.to_string();
+        rule.matcher.url = url.to_string();
         rule
     }
 
@@ -1956,33 +1953,33 @@ mod tests {
         seed_one_rule(&c);
 
         c.with_history(HistoryTag::new("Edit rule", None), |ctrl| {
-            ctrl.update_rule("A", renamed_rule("Renamed"))
+            ctrl.update_rule("A", rule_with_url("/edited"))
         })
         .expect("update");
-        assert_eq!(c.get_rule("r1").expect("rule").name, "Renamed");
+        assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/edited");
 
         let step = c.undo().expect("undo");
         assert!(step.mock_changed, "a mock undo must signal the caller to re-persist");
         assert!(!step.view.can_undo && step.view.can_redo);
-        assert_eq!(c.get_rule("r1").expect("rule").name, "r1", "undo restores the prior name");
+        assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/seq", "undo restores the prior url");
 
         let step = c.redo().expect("redo");
         assert!(step.mock_changed);
-        assert_eq!(c.get_rule("r1").expect("rule").name, "Renamed", "redo re-applies the edit");
+        assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/edited", "redo re-applies the edit");
     }
 
     #[test]
     fn coalesced_edits_undo_as_a_single_step() {
         let c = controller();
         seed_one_rule(&c);
-        let key = Some("edit:r1:name".to_string());
-        for name in ["a", "ab", "abc"] {
-            c.with_history(HistoryTag::new("Edit rule name", key.clone()), |ctrl| {
-                ctrl.update_rule("A", renamed_rule(name))
+        let key = Some("edit:r1:url".to_string());
+        for url in ["/a", "/ab", "/abc"] {
+            c.with_history(HistoryTag::new("Edit rule url", key.clone()), |ctrl| {
+                ctrl.update_rule("A", rule_with_url(url))
             })
             .expect("update");
         }
-        assert_eq!(c.get_rule("r1").expect("rule").name, "abc");
+        assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/abc");
         assert_eq!(
             c.history_view().entries.len(),
             1,
@@ -1991,8 +1988,8 @@ mod tests {
 
         c.undo().expect("undo");
         assert_eq!(
-            c.get_rule("r1").expect("rule").name,
-            "r1",
+            c.get_rule("r1").expect("rule").matcher.url,
+            "/seq",
             "one undo reverts the whole coalesced run"
         );
     }
@@ -2098,9 +2095,9 @@ mod tests {
     fn jump_to_walks_multiple_steps_in_both_directions() {
         let c = controller();
         seed_one_rule(&c);
-        for (i, name) in ["one", "two", "three"].iter().enumerate() {
+        for (i, url) in ["/one", "/two", "/three"].iter().enumerate() {
             c.with_history(HistoryTag::new(format!("edit {i}"), Some(format!("k{i}"))), |ctrl| {
-                ctrl.update_rule("A", renamed_rule(name))
+                ctrl.update_rule("A", rule_with_url(url))
             })
             .expect("update");
         }
@@ -2109,12 +2106,12 @@ mod tests {
 
         // Jump back to the oldest entry → rewinds two steps.
         c.jump_to(entries[0].id).expect("jump back");
-        assert_eq!(c.get_rule("r1").expect("rule").name, "one");
+        assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/one");
 
         // Jump forward to the newest entry → fast-forwards.
         let last_id = c.history_view().entries.last().expect("entry").id;
         c.jump_to(last_id).expect("jump forward");
-        assert_eq!(c.get_rule("r1").expect("rule").name, "three");
+        assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/three");
     }
 
     #[test]
@@ -2122,7 +2119,7 @@ mod tests {
         let c = controller();
         seed_one_rule(&c);
         c.with_history(HistoryTag::new("edit", None), |ctrl| {
-            ctrl.update_rule("A", renamed_rule("x"))
+            ctrl.update_rule("A", rule_with_url("/x"))
         })
         .expect("update");
         assert!(!c.history_view().entries.is_empty());
@@ -2307,24 +2304,6 @@ mod tests {
     }
 
     #[test]
-    fn search_rules_by_name() {
-        let c = controller();
-        let mut a = respond_rule("a");
-        a.name = "Login mock".to_string();
-        let mut b = respond_rule("b");
-        b.name = "Health check".to_string();
-        c.set_autoresponder(AutoResponder {
-            scenarios: vec![scenario("S", vec![a, b])],
-            active_scenario_id: Some("S".to_string()),
-        });
-
-        assert_eq!(
-            c.search_rules("S", "login", RuleSearchScope::Name),
-            vec!["a".to_string()],
-        );
-    }
-
-    #[test]
     fn search_rules_by_url() {
         let c = controller();
         let mut a = respond_rule("a");
@@ -2373,7 +2352,6 @@ mod tests {
         };
         let teapot = Rule {
             id: "teapot".to_string(),
-            name: "teapot".to_string(),
             enabled: true,
             fire_limit: None,
             repeat: false,
@@ -2431,7 +2409,6 @@ mod tests {
         };
         let set_header = Rule {
             id: "set-header".to_string(),
-            name: "set-header".to_string(),
             enabled: true,
             fire_limit: None,
             repeat: false,
@@ -2467,7 +2444,6 @@ mod tests {
     fn search_rules_all_unions_scopes() {
         let c = controller();
         let mut a = respond_rule("a");
-        a.name = "plain".to_string();
         a.matcher = Matcher::default();
         a.action = Action::Respond {
             status: 200,
@@ -2497,7 +2473,7 @@ mod tests {
         });
 
         assert!(
-            c.search_rules("ghost", "a", RuleSearchScope::Name).is_empty(),
+            c.search_rules("ghost", "a", RuleSearchScope::Url).is_empty(),
             "searching a non-existent scenario returns empty",
         );
         assert!(
@@ -2510,18 +2486,18 @@ mod tests {
     fn search_rules_is_substring_not_regex() {
         let c = controller();
         let mut a = respond_rule("a");
-        a.name = "x-a value".to_string();
+        a.matcher.url = "x-a value".to_string();
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("S", vec![a])],
             active_scenario_id: Some("S".to_string()),
         });
 
         assert!(
-            c.search_rules("S", "x-a.*", RuleSearchScope::Name).is_empty(),
+            c.search_rules("S", "x-a.*", RuleSearchScope::Url).is_empty(),
             "rule search is plain substring, so a regex metacharacter pattern does not match",
         );
         assert_eq!(
-            c.search_rules("S", "x-a", RuleSearchScope::Name),
+            c.search_rules("S", "x-a", RuleSearchScope::Url),
             vec!["a".to_string()],
             "the literal prefix still matches as a substring",
         );
@@ -2582,14 +2558,14 @@ mod tests {
         let c = controller();
         let mut off = respond_rule("off");
         off.enabled = false;
-        off.name = "disabled login mock".to_string();
+        off.matcher.url = "https://example.com/login".to_string();
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("S", vec![off])],
             active_scenario_id: Some("S".to_string()),
         });
 
         assert_eq!(
-            c.search_rules("S", "login", RuleSearchScope::Name),
+            c.search_rules("S", "login", RuleSearchScope::Url),
             vec!["off".to_string()],
             "rule search ignores the enabled flag and still finds a disabled rule",
         );
@@ -2622,7 +2598,6 @@ mod tests {
     fn search_rules_all_matches_via_headers_only() {
         let c = controller();
         let mut a = respond_rule("a");
-        a.name = "plain".to_string();
         a.matcher = Matcher::default();
         a.action = Action::Respond {
             status: 200,

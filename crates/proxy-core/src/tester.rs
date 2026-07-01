@@ -195,7 +195,7 @@ pub(crate) fn test_rule_slice(rules: &[Rule], input: &TestInput) -> TestResult {
     let matched_rules: Vec<String> = rules
         .iter()
         .filter(|r| r.enabled && r.matcher.matches(&req))
-        .map(|r| r.name.clone())
+        .map(|r| r.label())
         .collect();
 
     let mut notes = Vec::new();
@@ -355,7 +355,6 @@ mod tests {
     fn respond_rule() -> Rule {
         Rule {
             id: "1".into(),
-            name: "mock health".into(),
             enabled: true,
             fire_limit: None,
             repeat: false,
@@ -407,7 +406,8 @@ mod tests {
         let result = test_rules(&rules, &input);
         assert_eq!(result.outcome, "respond");
         assert!(result.short_circuit);
-        assert_eq!(result.fired_rule.as_deref(), Some("mock health"));
+        assert_eq!(result.fired_rule.as_deref(), Some("/health"));
+        assert_eq!(result.matched_rules, vec!["/health".to_string()]);
         let resp = result.response.unwrap();
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, "{\"ok\":true}");
@@ -419,7 +419,6 @@ mod tests {
         let rules = RuleSet {
             rules: vec![Rule {
                 id: "2".into(),
-                name: "redact".into(),
                 enabled: true,
                 fire_limit: None,
                 repeat: false,
@@ -454,7 +453,6 @@ mod tests {
         let rules = RuleSet {
             rules: vec![Rule {
                 id: "1".into(),
-                name: "mock".into(),
                 enabled: true,
                 fire_limit: None,
                 repeat: false,
@@ -513,7 +511,6 @@ mod tests {
     fn seq_rule(id: &str, status: u16, fire_limit: Option<u32>, repeat: bool) -> Rule {
         Rule {
             id: id.into(),
-            name: id.into(),
             enabled: true,
             fire_limit,
             repeat,

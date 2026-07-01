@@ -6,7 +6,6 @@ import type { ActionSummary, RuleSummary } from "./types";
 function rule(overrides: Partial<RuleSummary> = {}, action?: ActionSummary): RuleSummary {
   return {
     id: "r1",
-    name: "Login mock",
     enabled: true,
     fireLimit: null,
     repeat: false,
@@ -22,8 +21,7 @@ function rule(overrides: Partial<RuleSummary> = {}, action?: ActionSummary): Rul
 }
 
 describe("isShallowScope", () => {
-  it("treats name/url/method/status as shallow", () => {
-    expect(isShallowScope("name")).toBe(true);
+  it("treats url/method/status as shallow", () => {
     expect(isShallowScope("url")).toBe(true);
     expect(isShallowScope("method")).toBe(true);
     expect(isShallowScope("status")).toBe(true);
@@ -37,13 +35,8 @@ describe("isShallowScope", () => {
 });
 
 describe("ruleMatchesScopeClient", () => {
-  it("matches on name case-insensitively", () => {
-    expect(ruleMatchesScopeClient(rule(), "name", "login")).toBe(true);
-    expect(ruleMatchesScopeClient(rule(), "name", "LOGIN")).toBe(true);
-    expect(ruleMatchesScopeClient(rule(), "name", "logout")).toBe(false);
-  });
-
-  it("matches on url substring", () => {
+  it("matches on url substring case-insensitively", () => {
+    expect(ruleMatchesScopeClient(rule(), "url", "/API")).toBe(true);
     expect(ruleMatchesScopeClient(rule(), "url", "/api")).toBe(true);
     expect(ruleMatchesScopeClient(rule(), "url", "/static")).toBe(false);
   });
@@ -71,7 +64,7 @@ describe("ruleMatchesScopeClient", () => {
   });
 
   it("matches every rule on an empty query", () => {
-    expect(ruleMatchesScopeClient(rule(), "name", "")).toBe(true);
+    expect(ruleMatchesScopeClient(rule(), "url", "")).toBe(true);
     expect(ruleMatchesScopeClient(rule(), "status", "")).toBe(true);
   });
 

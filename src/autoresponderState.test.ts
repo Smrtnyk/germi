@@ -10,14 +10,13 @@ import {
 } from "./autoresponderState";
 import type { AutoResponderSummary, RuleSummary } from "./types";
 
-function rule(id: string, name = id): RuleSummary {
+function rule(id: string, url = `/${id}`): RuleSummary {
   return {
     id,
-    name,
     enabled: true,
     fireLimit: null,
     repeat: false,
-    matcher: { method: "GET", url: `/${id}`, urlMatch: "exact" },
+    matcher: { method: "GET", url, urlMatch: "exact" },
     action: {
       kind: "respond",
       status: 200,
@@ -42,11 +41,11 @@ describe("autoresponder summary updates", () => {
   it("adds, replaces and removes one rule without replacing other summaries", () => {
     const initial = state();
     const added = appendRuleSummary(initial, "scenario", rule("d"));
-    const replaced = replaceRuleSummary(added, "scenario", rule("b", "Updated"));
+    const replaced = replaceRuleSummary(added, "scenario", rule("b", "/updated"));
     const removed = removeRuleSummary(replaced, "scenario", "a");
 
     expect(ids(removed)).toEqual(["b", "c", "d"]);
-    expect(removed.scenarios[0].rules[0].name).toBe("Updated");
+    expect(removed.scenarios[0].rules[0].matcher.url).toBe("/updated");
     expect(initial.scenarios[0].rules).toHaveLength(3);
   });
 

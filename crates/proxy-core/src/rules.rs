@@ -43,7 +43,6 @@ fn cached_regex(pattern: &str) -> Option<Regex> {
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 pub enum RuleSearchScope {
-    Name,
     Url,
     Method,
     Status,
@@ -148,12 +147,12 @@ fn default_ok() -> u16 {
     200
 }
 
-/// A single named rule.
+/// A single rule. Rules are unnamed and identified by `id`; the matcher URL is
+/// their human-facing label (see [`Rule::label`]).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Rule {
     pub id: String,
-    pub name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
@@ -162,6 +161,18 @@ pub struct Rule {
     pub repeat: bool,
     pub matcher: Matcher,
     pub action: Action,
+}
+
+impl Rule {
+    /// The rule's display label now that rules are unnamed: its matcher URL, or
+    /// `*` for a match-all (empty-URL) matcher.
+    pub fn label(&self) -> String {
+        if self.matcher.url.is_empty() {
+            "*".to_string()
+        } else {
+            self.matcher.url.clone()
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -217,7 +228,6 @@ pub struct ScenarioSummary {
 #[serde(rename_all = "camelCase")]
 pub struct RuleSummary {
     pub id: String,
-    pub name: String,
     pub enabled: bool,
     pub fire_limit: Option<u32>,
     pub repeat: bool,
@@ -280,7 +290,6 @@ impl From<&Rule> for RuleSummary {
     fn from(rule: &Rule) -> Self {
         Self {
             id: rule.id.clone(),
-            name: rule.name.clone(),
             enabled: rule.enabled,
             fire_limit: rule.fire_limit,
             repeat: rule.repeat,
@@ -326,13 +335,13 @@ pub struct SyntheticResponse {
 pub enum RequestOutcome {
     /// Forward the request upstream, after applying these header edits.
     Continue { set_headers: Vec<(String, String)> },
-    /// Short-circuit with a synthesized response. Carries the rule name + id.
+    /// Short-circuit with a synthesized response. Carries the rule's URL label + id.
     Respond {
         rule: String,
         rule_id: String,
         response: SyntheticResponse,
     },
-    /// Drop the request. Carries the rule name + id.
+    /// Drop the request. Carries the rule's URL label + id.
     Block { rule: String, rule_id: String },
 }
 
@@ -429,7 +438,7 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
                 };
                 cursors.record_fire(rule);
                 return RequestOutcome::Respond {
-                    rule: rule.name.clone(),
+                    rule: rule.label(),
                     rule_id: rule.id.clone(),
                     response: SyntheticResponse {
                         status: *status,
@@ -447,7 +456,7 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
                         .to_string();
                     cursors.record_fire(rule);
                     return RequestOutcome::Respond {
-                        rule: rule.name.clone(),
+                        rule: rule.label(),
                         rule_id: rule.id.clone(),
                         response: SyntheticResponse {
                             status: *status,
@@ -460,7 +469,7 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
             Action::Block => {
                 cursors.record_fire(rule);
                 return RequestOutcome::Block {
-                    rule: rule.name.clone(),
+                    rule: rule.label(),
                     rule_id: rule.id.clone(),
                 };
             }
@@ -560,7 +569,7 @@ pub fn apply_response_rules_stateful(
         };
         if fired {
             cursors.record_fire(rule);
-            matched = Some(rule.name.clone());
+            matched = Some(rule.label());
         }
     }
     matched
@@ -629,7 +638,6 @@ impl RuleSet {
         RuleSet {
             rules: vec![Rule {
                 id: "example-health".to_string(),
-                name: "Mock GET /api/health".to_string(),
                 enabled: true,
                 fire_limit: None,
                 repeat: false,
@@ -722,7 +730,6 @@ impl AutoResponder {
 pub fn blank_rule(id: String) -> Rule {
     Rule {
         id,
-        name: "New rule".to_string(),
         enabled: true,
         fire_limit: None,
         repeat: false,
@@ -805,21 +812,15 @@ pub fn respond_rule_from_flow(flow: &Flow, id: String) -> Rule {
 
     // One rule per request, host-specific: the matcher targets the flow's full
     // URL (scheme://host/path+query) so mocking github.com/feed does NOT also
-    // catch dynatrace.com/feed. Fiddler-style — nothing is collapsed. The name
-    // includes the host so rules across hosts stay distinguishable; cap it (the
-    // list middle-truncates).
+    // catch dynatrace.com/feed. Fiddler-style — nothing is collapsed. The full
+    // URL is also the rule's display label (rules are unnamed).
     let full_url = format!(
         "{}://{}{}",
         flow.request.scheme, flow.request.host, flow.request.path
     );
-    let mut name = format!("{} {}{}", flow.request.method, flow.request.host, flow.request.path);
-    if name.chars().count() > 100 {
-        name = name.chars().take(99).collect::<String>() + "\u{2026}";
-    }
 
     Rule {
         id,
-        name,
         enabled: true,
         fire_limit: None,
         repeat: false,
@@ -928,7 +929,6 @@ fn action_header_text(action: &Action) -> String {
 fn scope_text_matches(rule: &Rule, scope: RuleSearchScope, needle: &str) -> bool {
     let contains = |text: &str| text.to_lowercase().contains(needle);
     match scope {
-        RuleSearchScope::Name => contains(&rule.name),
         RuleSearchScope::Url => contains(&rule.matcher.url),
         RuleSearchScope::Method => rule.matcher.method.as_deref().is_some_and(contains),
         RuleSearchScope::Status => action_status_text(&rule.action).is_some_and(|s| contains(&s)),
@@ -943,7 +943,6 @@ fn scope_text_matches(rule: &Rule, scope: RuleSearchScope, needle: &str) -> bool
 pub(crate) fn rule_matches_scope(rule: &Rule, scope: RuleSearchScope, needle: &str) -> bool {
     match scope {
         RuleSearchScope::All => [
-            RuleSearchScope::Name,
             RuleSearchScope::Url,
             RuleSearchScope::Method,
             RuleSearchScope::Status,
@@ -977,7 +976,6 @@ mod tests {
     fn respond_rule(name: &str, url: &str) -> Rule {
         Rule {
             id: name.to_string(),
-            name: name.to_string(),
             enabled: true,
             fire_limit: None,
             repeat: false,
@@ -1003,9 +1001,9 @@ mod tests {
         rule
     }
 
-    fn responded_rule_name(outcome: &RequestOutcome) -> Option<&str> {
+    fn responded_rule_id(outcome: &RequestOutcome) -> Option<&str> {
         match outcome {
-            RequestOutcome::Respond { rule, .. } => Some(rule.as_str()),
+            RequestOutcome::Respond { rule_id, .. } => Some(rule_id.as_str()),
             _ => None,
         }
     }
@@ -1031,7 +1029,7 @@ mod tests {
         };
         match rs.evaluate_request(&req("GET", "https", "example.com", "/health")) {
             RequestOutcome::Respond { response, rule, .. } => {
-                assert_eq!(rule, "mock");
+                assert_eq!(rule, "/health");
                 assert_eq!(response.status, 200);
                 assert_eq!(response.body, b"mock");
             }
@@ -1044,7 +1042,6 @@ mod tests {
         let rs = RuleSet {
             rules: vec![Rule {
                 id: "1".into(),
-                name: "post-only".into(),
                 enabled: true,
                 fire_limit: None,
                 repeat: false,
@@ -1071,7 +1068,6 @@ mod tests {
         let rs = RuleSet {
             rules: vec![Rule {
                 id: "1".into(),
-                name: "redact".into(),
                 enabled: true,
                 fire_limit: None,
                 repeat: false,
@@ -1091,7 +1087,7 @@ mod tests {
             timestamp_ms: 0,
         };
         let matched = rs.apply_response(&req("GET", "https", "x", "/"), &mut resp);
-        assert_eq!(matched.as_deref(), Some("redact"));
+        assert_eq!(matched.as_deref(), Some("*"));
         assert_eq!(resp.body, b"card XXXX XXXX");
     }
 
@@ -1108,7 +1104,6 @@ mod tests {
         let rs = RuleSet {
             rules: vec![Rule {
                 id: "1".into(),
-                name: "redact".into(),
                 enabled: true,
                 fire_limit: None,
                 repeat: false,
@@ -1128,7 +1123,7 @@ mod tests {
             timestamp_ms: 0,
         };
         let matched = rs.apply_response(&req("GET", "https", "x", "/"), &mut resp);
-        assert_eq!(matched.as_deref(), Some("redact"));
+        assert_eq!(matched.as_deref(), Some("*"));
         assert_eq!(resp.body, b"the public token");
         assert!(
             !resp
@@ -1157,7 +1152,7 @@ mod tests {
             active_scenario_id: Some("b".into()),
         };
         match ar.evaluate_request(&req("GET", "https", "h", "/x")) {
-            RequestOutcome::Respond { rule, .. } => assert_eq!(rule, "from-b"),
+            RequestOutcome::Respond { rule_id, .. } => assert_eq!(rule_id, "from-b"),
             other => panic!("expected Respond from scenario b, got {other:?}"),
         }
     }
@@ -1210,7 +1205,7 @@ mod tests {
         let rule = respond_rule_from_flow(&flow, "r1".into());
         assert_eq!(rule.matcher.method.as_deref(), Some("GET"));
         assert_eq!(rule.matcher.url, "https://x/api");
-        assert_eq!(rule.name, "GET x/api");
+        assert_eq!(rule.label(), "https://x/api");
         match rule.action {
             Action::Respond {
                 status,
@@ -1253,7 +1248,39 @@ mod tests {
         let rule = respond_rule_from_flow(&flow, "r".into());
         assert_eq!(rule.matcher.url, "https://x/api/v2/rum?dd=1&k=abc");
         assert_eq!(rule.matcher.url_match, MatchKind::Exact);
-        assert_eq!(rule.name, "POST x/api/v2/rum?dd=1&k=abc");
+        assert_eq!(rule.label(), "https://x/api/v2/rum?dd=1&k=abc");
+    }
+
+    #[test]
+    fn empty_matcher_rule_labels_as_star() {
+        // Issue #74: rules are unnamed; a match-all (empty-URL) rule falls back
+        // to "*" as its display/provenance label.
+        let rule = blank_rule("id".into());
+        assert_eq!(rule.matcher.url, "");
+        assert_eq!(rule.label(), "*");
+    }
+
+    #[test]
+    fn two_rules_can_share_a_url() {
+        // Issue #74: rules are keyed by id, not URL, so several rules may target
+        // the same URL. Both keep that URL as their label; ids stay distinct.
+        let a = respond_rule("a", "https://x/api");
+        let b = respond_rule("b", "https://x/api");
+        assert_ne!(a.id, b.id);
+        assert_eq!(a.label(), b.label());
+        assert_eq!(a.label(), "https://x/api");
+
+        let ar = AutoResponder {
+            scenarios: vec![Scenario {
+                id: "s".into(),
+                name: "S".into(),
+                rules: vec![a, b],
+            }],
+            active_scenario_id: Some("s".into()),
+        };
+        assert_eq!(ar.scenarios[0].rules.len(), 2);
+        let outcome = ar.evaluate_request(&req("GET", "https", "x", "/api"));
+        assert_eq!(responded_rule_id(&outcome), Some("a"), "first matching rule wins");
     }
 
     #[test]
@@ -1441,7 +1468,6 @@ mod tests {
         // (None) sends raw bytes with no encoding header, as before.
         let gzip_rule = Rule {
             id: "gz".into(),
-            name: "gz".into(),
             enabled: true,
             fire_limit: None,
             repeat: false,
@@ -1460,7 +1486,6 @@ mod tests {
         };
         let identity_rule = Rule {
             id: "id".into(),
-            name: "id".into(),
             enabled: true,
             fire_limit: None,
             repeat: false,
@@ -1519,7 +1544,6 @@ mod tests {
         // corrupt response labeled with an encoding it doesn't have.
         let rule = Rule {
             id: "x".into(),
-            name: "x".into(),
             enabled: true,
             fire_limit: None,
             repeat: false,
@@ -1615,20 +1639,20 @@ mod tests {
 
         let first = evaluate_request_rules_stateful(&rules, &r(), &mut cursors);
         assert_eq!(
-            responded_rule_name(&first),
-            Some("rule-a"),
+            responded_rule_id(&first),
+            Some("a"),
             "first request must hit the match-once rule A"
         );
         let second = evaluate_request_rules_stateful(&rules, &r(), &mut cursors);
         assert_eq!(
-            responded_rule_name(&second),
-            Some("rule-b"),
+            responded_rule_id(&second),
+            Some("b"),
             "after A is consumed the same URL must fall through to B"
         );
         let third = evaluate_request_rules_stateful(&rules, &r(), &mut cursors);
         assert_eq!(
-            responded_rule_name(&third),
-            Some("rule-b"),
+            responded_rule_id(&third),
+            Some("b"),
             "unlimited rule B keeps responding"
         );
     }
@@ -1688,7 +1712,6 @@ mod tests {
     fn status_sequence_503_503_200() {
         let status_rule = |id: &str, status: u16| Rule {
             id: id.to_string(),
-            name: id.to_string(),
             enabled: true,
             fire_limit: Some(if status == 503 { 2 } else { 1 }),
             repeat: false,
@@ -1766,7 +1789,7 @@ mod tests {
 
         let order: Vec<Option<String>> = (0..4)
             .map(|_| {
-                responded_rule_name(&evaluate_request_rules_stateful(
+                responded_rule_id(&evaluate_request_rules_stateful(
                     &group,
                     &gr(),
                     &mut group_cursors,
@@ -1872,7 +1895,6 @@ mod tests {
     fn missing_maplocal_does_not_consume() {
         let rules = vec![Rule {
             id: "map".into(),
-            name: "map".into(),
             enabled: true,
             fire_limit: Some(1),
             repeat: false,
@@ -1914,7 +1936,6 @@ mod tests {
     fn set_request_header_does_not_consume() {
         let rules = vec![Rule {
             id: "hdr".into(),
-            name: "hdr".into(),
             enabled: true,
             fire_limit: Some(1),
             repeat: false,
@@ -2039,7 +2060,7 @@ mod tests {
         let mut cursors = RuleCursors::default();
 
         match ar.evaluate_request_stateful(&req("GET", "https", "h", "/x"), &mut cursors) {
-            RequestOutcome::Respond { rule, .. } => assert_eq!(rule, "from-b"),
+            RequestOutcome::Respond { rule_id, .. } => assert_eq!(rule_id, "from-b"),
             other => panic!("expected Respond from scenario b, got {other:?}"),
         }
         let snap = cursors.snapshot();
@@ -2133,7 +2154,7 @@ mod tests {
 
         let order: Vec<Option<String>> = (0..5)
             .map(|_| {
-                responded_rule_name(&evaluate_request_rules_stateful(&rules, &r(), &mut cursors))
+                responded_rule_id(&evaluate_request_rules_stateful(&rules, &r(), &mut cursors))
                     .map(str::to_string)
             })
             .collect();
@@ -2168,7 +2189,7 @@ mod tests {
         let r = || req("GET", "https", "h", "/z");
 
         assert_eq!(
-            responded_rule_name(&evaluate_request_rules_stateful(&rules, &r(), &mut cursors)),
+            responded_rule_id(&evaluate_request_rules_stateful(&rules, &r(), &mut cursors)),
             Some("once"),
             "first request: the one-shot fires"
         );
@@ -2186,7 +2207,6 @@ mod tests {
     fn set_status_rule(id: &str, status: u16, limit: Option<u32>, repeat: bool) -> Rule {
         Rule {
             id: id.into(),
-            name: id.into(),
             enabled: true,
             fire_limit: limit,
             repeat,
@@ -2218,7 +2238,7 @@ mod tests {
         let mut a = resp();
         assert_eq!(
             apply_response_rules_stateful(&rules, &r, &mut a, &mut cursors).as_deref(),
-            Some("once")
+            Some("/r")
         );
         assert_eq!(a.status, 503, "first matching response is overridden");
 
@@ -2241,7 +2261,7 @@ mod tests {
             let mut resp = resp();
             assert_eq!(
                 apply_response_rules_stateful(&rules, &r, &mut resp, &mut cursors).as_deref(),
-                Some("loop"),
+                Some("/r"),
                 "a repeat response rule keeps firing"
             );
             assert_eq!(resp.status, 503);
@@ -2256,7 +2276,7 @@ mod tests {
             let mut resp = resp();
             assert_eq!(
                 apply_response_rules(&rules, &r, &mut resp).as_deref(),
-                Some("once"),
+                Some("/r"),
                 "the scratch preview re-applies every call (no state)"
             );
         }

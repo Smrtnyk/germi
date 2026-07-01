@@ -1,5 +1,9 @@
 import type { AutoResponderSummary, RuleSummary } from "./types";
 
+export function ruleLabel(url: string): string {
+  return url || "*";
+}
+
 function updateScenarioRules(
   state: AutoResponderSummary,
   scenarioId: string,

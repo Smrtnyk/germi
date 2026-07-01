@@ -57,7 +57,6 @@ impl RuleStore {
                     id TEXT PRIMARY KEY,
                     scenario_id TEXT NOT NULL REFERENCES scenarios(id) ON DELETE CASCADE,
                     sort_key REAL NOT NULL,
-                    name TEXT NOT NULL,
                     enabled INTEGER NOT NULL,
                     fire_limit INTEGER,
                     repeat INTEGER NOT NULL,
@@ -224,15 +223,14 @@ impl RuleStore {
         connection
             .execute(
                 "UPDATE rules SET
-                    name = ?3, enabled = ?4, fire_limit = ?5, repeat = ?6,
-                    method = ?7, url = ?8, url_match = ?9, action_kind = ?10,
-                    action_status = ?11, action_content_type = ?12,
-                    action_name = ?13, rule_json = ?14
+                    enabled = ?3, fire_limit = ?4, repeat = ?5,
+                    method = ?6, url = ?7, url_match = ?8, action_kind = ?9,
+                    action_status = ?10, action_content_type = ?11,
+                    action_name = ?12, rule_json = ?13
                  WHERE scenario_id = ?1 AND id = ?2",
                 params![
                     scenario_id,
                     rule.id,
-                    rule.name,
                     rule.enabled,
                     rule.fire_limit,
                     rule.repeat,
@@ -354,17 +352,16 @@ fn insert_rule_connection(
     connection
         .execute(
             "INSERT INTO rules (
-                id, scenario_id, sort_key, name, enabled, fire_limit, repeat,
+                id, scenario_id, sort_key, enabled, fire_limit, repeat,
                 method, url, url_match, action_kind, action_status,
                 action_content_type, action_name, rule_json
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
              )",
             params![
                 rule.id,
                 scenario_id,
                 key,
-                rule.name,
                 rule.enabled,
                 rule.fire_limit,
                 rule.repeat,
@@ -393,17 +390,16 @@ fn insert_rule_row(
     transaction
         .execute(
             "INSERT INTO rules (
-                id, scenario_id, sort_key, name, enabled, fire_limit, repeat,
+                id, scenario_id, sort_key, enabled, fire_limit, repeat,
                 method, url, url_match, action_kind, action_status,
                 action_content_type, action_name, rule_json
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
              )",
             params![
                 rule.id,
                 scenario_id,
                 key,
-                rule.name,
                 rule.enabled,
                 rule.fire_limit,
                 rule.repeat,
@@ -510,7 +506,6 @@ mod tests {
     fn rule(id: &str, body: &str) -> Rule {
         Rule {
             id: id.to_string(),
-            name: id.to_string(),
             enabled: true,
             fire_limit: None,
             repeat: false,
@@ -559,8 +554,7 @@ mod tests {
         let (store, _) = RuleStore::open(&dir).expect("open store");
         store.replace(&autoresponder()).expect("seed store");
 
-        let mut updated = rule("two", "updated");
-        updated.name = "Updated two".to_string();
+        let updated = rule("two", "updated");
         store
             .update_rule("scenario", &updated)
             .expect("update one rule");
@@ -582,6 +576,39 @@ mod tests {
             &rules[1].action,
             Action::Respond { body, .. } if body == "first"
         ));
+
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn two_rules_can_share_a_url() {
+        // Issue #74: rules are keyed by id, not URL, so a scenario may hold
+        // several rules with the same matcher URL. All must round-trip.
+        let dir = test_dir("shared-url");
+        let (store, _) = RuleStore::open(&dir).expect("open store");
+
+        let mut a = rule("a", "first");
+        a.matcher.url = "https://example.com/dup".to_string();
+        let mut b = rule("b", "second");
+        b.matcher.url = "https://example.com/dup".to_string();
+        let ar = AutoResponder {
+            scenarios: vec![Scenario {
+                id: "scenario".to_string(),
+                name: "Scenario".to_string(),
+                rules: vec![a, b],
+            }],
+            active_scenario_id: Some("scenario".to_string()),
+        };
+        store.replace(&ar).expect("persist two same-url rules");
+
+        let loaded = store.load().expect("reload store");
+        let rules = &loaded.scenarios[0].rules;
+        assert_eq!(
+            rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_eq!(rules[0].matcher.url, rules[1].matcher.url);
+        assert_eq!(rules[0].matcher.url, "https://example.com/dup");
 
         std::fs::remove_dir_all(dir).expect("remove temp dir");
     }

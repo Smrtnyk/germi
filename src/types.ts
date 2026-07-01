@@ -127,7 +127,6 @@ export type ActionKind = Action["kind"];
 
 export interface Rule {
   id: string;
-  name: string;
   enabled: boolean;
   fireLimit: number | null;
   repeat: boolean;
@@ -146,7 +145,6 @@ export type ActionSummary =
 
 export interface RuleSummary {
   id: string;
-  name: string;
   enabled: boolean;
   fireLimit: number | null;
   repeat: boolean;
@@ -167,7 +165,7 @@ export interface AutoResponderSummary {
 }
 
 /** Which rule fields `searchRules` scans (mirrors proxy-core `RuleSearchScope`). */
-export type RuleSearchScope = "name" | "url" | "method" | "status" | "response" | "headers" | "all";
+export type RuleSearchScope = "url" | "method" | "status" | "response" | "headers" | "all";
 
 export interface ProxySettings {
   /** Host patterns tunneled without interception (no decrypt, no capture). */
@@ -218,7 +216,7 @@ export type BulkMockEvent =
 
 /**
  * Metadata the frontend attaches to a mock mutation. `coalesceKey` merges
- * consecutive same-key edits into one undo step (e.g. typing a rule name); omit
+ * consecutive same-key edits into one undo step (e.g. typing a rule URL); omit
  * it (or use a fresh key) to force a discrete entry.
  */
 export interface HistoryTag {
