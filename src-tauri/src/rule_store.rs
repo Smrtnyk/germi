@@ -43,7 +43,11 @@ impl RuleStore {
             .execute_batch(
                 "PRAGMA foreign_keys = ON;
                  PRAGMA journal_mode = WAL;
-                 PRAGMA synchronous = NORMAL;",
+                 PRAGMA synchronous = NORMAL;
+                 -- A viewer instance shares this DB with the capturing one; wait
+                 -- out a transient write lock instead of failing a mutation with a
+                 -- raw \"database is locked\" surfaced to the UI.
+                 PRAGMA busy_timeout = 5000;",
             )
             .map_err(|e| e.to_string())?;
         Ok(connection)
