@@ -31,10 +31,81 @@ impl RuleStore {
             path: dir.join(DB_FILE),
             read_only,
         };
-        let connection = store.connect()?;
-        Self::create_schema(&connection)?;
+        let mut connection = store.connect()?;
+        // Self-heal a database written by an older build: if the `rules` table has
+        // a different shape than the current schema (e.g. the pre-#74 `name`
+        // column), `CREATE TABLE IF NOT EXISTS` would leave it as-is and every rule
+        // insert would fail against the stale constraint. Rebuild the autoresponder
+        // tables instead. A viewer opens read-only and must never mutate the shared
+        // DB, so only the writable (capturing) instance heals.
+        if !read_only && Self::rules_schema_stale(&connection)? {
+            Self::rebuild_schema(&mut connection)?;
+        } else {
+            Self::create_schema(&connection)?;
+        }
         let autoresponder = Self::load_with_connection(&connection)?;
         Ok((store, autoresponder))
+    }
+
+    /// The columns the current `rules` schema defines. There is deliberately no
+    /// autoresponder migration path, so an on-disk table whose columns differ from
+    /// this is treated as coming from an older build and rebuilt (not migrated).
+    const RULES_COLUMNS: &[&str] = &[
+        "id",
+        "scenario_id",
+        "sort_key",
+        "enabled",
+        "fire_limit",
+        "repeat",
+        "method",
+        "url",
+        "url_match",
+        "action_kind",
+        "action_status",
+        "action_content_type",
+        "action_name",
+        "rule_json",
+    ];
+
+    /// Whether an existing `rules` table's columns differ from [`Self::RULES_COLUMNS`].
+    /// A missing table (a brand-new DB) is not stale — `create_schema` builds it.
+    fn rules_schema_stale(connection: &Connection) -> Result<bool, String> {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(rules)")
+            .map_err(|e| e.to_string())?;
+        let columns: Vec<String> = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        if columns.is_empty() {
+            return Ok(false);
+        }
+        let current = columns.len() == Self::RULES_COLUMNS.len()
+            && Self::RULES_COLUMNS
+                .iter()
+                .all(|expected| columns.iter().any(|actual| actual == expected));
+        Ok(!current)
+    }
+
+    /// Rebuild the autoresponder tables from an older build's schema, preserving the
+    /// rules via their stored `rule_json` when the old schema is still readable (an
+    /// unreadable one is discarded — schema changes may discard old dev data).
+    fn rebuild_schema(connection: &mut Connection) -> Result<(), String> {
+        tracing::warn!("autoresponder database is from an older build; rebuilding its schema");
+        let preserved = Self::load_with_connection(connection).ok();
+        connection
+            .execute_batch(
+                "DROP TABLE IF EXISTS rules;
+                 DROP TABLE IF EXISTS scenarios;
+                 DROP TABLE IF EXISTS metadata;",
+            )
+            .map_err(|e| e.to_string())?;
+        Self::create_schema(connection)?;
+        if let Some(existing) = preserved {
+            Self::replace_with_connection(connection, &existing)?;
+        }
+        Ok(())
     }
 
     fn connect(&self) -> Result<Connection, String> {
@@ -691,6 +762,109 @@ mod tests {
         assert_eq!(after.scenarios.len(), 1);
         assert_eq!(after.scenarios[0].id, "scenario");
         let ids: Vec<_> = after.scenarios[0].rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["one", "two", "three"]);
+
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn open_rebuilds_a_legacy_schema_and_preserves_rules() {
+        let dir = test_dir("legacy-schema");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join(DB_FILE);
+
+        // Hand-build a pre-#74 database: `rules` carries a `name TEXT NOT NULL`
+        // column the current code no longer writes, with a rule stored (as the
+        // migrated real DBs are) via its full rule_json.
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE scenarios (id TEXT PRIMARY KEY, name TEXT NOT NULL, sort_key REAL NOT NULL);
+                 CREATE TABLE rules (
+                    id TEXT PRIMARY KEY,
+                    scenario_id TEXT NOT NULL REFERENCES scenarios(id) ON DELETE CASCADE,
+                    sort_key REAL NOT NULL,
+                    name TEXT NOT NULL,
+                    enabled INTEGER NOT NULL,
+                    fire_limit INTEGER,
+                    repeat INTEGER NOT NULL,
+                    method TEXT,
+                    url TEXT NOT NULL,
+                    url_match TEXT NOT NULL,
+                    action_kind TEXT NOT NULL,
+                    action_status INTEGER,
+                    action_content_type TEXT,
+                    action_name TEXT,
+                    rule_json TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO scenarios (id, name, sort_key) VALUES ('scenario', 'Scenario', 1024.0)",
+                [],
+            )
+            .unwrap();
+            let seeded = rule("one", "first");
+            let json = serde_json::to_string(&seeded).unwrap();
+            conn.execute(
+                "INSERT INTO rules
+                    (id, scenario_id, sort_key, name, enabled, repeat, url, url_match, action_kind, rule_json)
+                 VALUES ('one', 'scenario', 1024.0, 'legacy name', 1, 0, ?1, 'exact', 'respond', ?2)",
+                params![seeded.matcher.url, json],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO metadata (key, value) VALUES ('active_scenario_id', 'scenario')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Opening writable heals the schema and preserves the rule.
+        let (store, loaded) = RuleStore::open(&dir, false).expect("open heals stale schema");
+
+        let cols: Vec<String> = {
+            let conn = Connection::open(&db).unwrap();
+            let mut stmt = conn.prepare("PRAGMA table_info(rules)").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.map(|c| c.unwrap()).collect()
+        };
+        assert!(
+            !cols.iter().any(|c| c == "name"),
+            "the legacy `name` column must be dropped: {cols:?}"
+        );
+
+        assert_eq!(loaded.scenarios.len(), 1);
+        assert_eq!(loaded.scenarios[0].rules.len(), 1, "the rule is preserved via rule_json");
+        assert_eq!(loaded.scenarios[0].rules[0].id, "one");
+        assert_eq!(loaded.active_scenario_id.as_deref(), Some("scenario"));
+
+        // The insert that used to fail on the dead constraint now succeeds.
+        store
+            .insert_rule("scenario", &rule("two", "second"), None)
+            .expect("insert after heal");
+        let reloaded = store.load().expect("reload");
+        let ids: Vec<_> =
+            reloaded.scenarios[0].rules.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"two"), "a fresh rule inserts cleanly: {ids:?}");
+
+        drop(store);
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn open_leaves_a_current_schema_untouched() {
+        // A DB already on the current schema must NOT be flagged stale (no needless
+        // rebuild): seed it, reopen, and confirm the rules survive unchanged.
+        let dir = test_dir("current-schema");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+        store.replace(&autoresponder()).expect("seed store");
+        drop(store);
+
+        let (_, reloaded) = RuleStore::open(&dir, false).expect("reopen store");
+        let ids: Vec<_> =
+            reloaded.scenarios[0].rules.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["one", "two", "three"]);
 
         std::fs::remove_dir_all(dir).expect("remove temp dir");
