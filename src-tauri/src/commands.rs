@@ -83,12 +83,43 @@ fn listen_addr(port: u16, allow_remote: bool) -> SocketAddr {
     SocketAddr::from((ip, port))
 }
 
+/// Whether this instance was launched in viewer mode (`--viewer`): the proxy is
+/// disabled and only saved captures can be inspected. The frontend hides the
+/// proxy controls and shows a viewer badge when true.
+#[tauri::command]
+pub fn is_viewer_mode(state: State<'_, AppState>) -> bool {
+    state.viewer
+}
+
+/// Launch a second Germi in viewer mode (`--viewer`) — a proxy-less inspector
+/// that can run alongside the capturing instance. Works from a normal *or* a
+/// viewer instance (spawning the same executable either way).
+#[tauri::command]
+pub fn launch_viewer() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut child = std::process::Command::new(exe)
+        .arg("--viewer")
+        .spawn()
+        .map_err(|e| format!("failed to launch viewer: {e}"))?;
+    // Reap the child once it exits so a closed viewer window doesn't linger as a
+    // zombie in this long-lived process (Unix has no auto-reaping `Child` drop).
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn start_proxy(
     state: State<'_, AppState>,
     port: u16,
     allow_remote: bool,
 ) -> Result<u16, String> {
+    // Defense in depth: the UI hides the Start control in viewer mode, but never
+    // let a viewer instance bind the proxy port and fight the capturing one.
+    if state.viewer {
+        return Err("Proxy is disabled in viewer mode".to_string());
+    }
     let controller = state.controller.clone();
     // Returns the actually-bound address (resolving port 0); a bind failure
     // surfaces here as Err instead of the proxy silently dying after "running".

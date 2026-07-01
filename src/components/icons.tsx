@@ -23,6 +23,7 @@ import {
   LuColumns2,
   LuCopy,
   LuExternalLink,
+  LuEye,
   LuGripVertical,
   LuInfo,
   LuLogIn,
@@ -61,6 +62,7 @@ export const IconCheck = make(LuCheck, { color: "var(--s2)" });
 export const IconInfo = make(LuInfo, { color: "var(--s3)" });
 export const IconSave = make(LuSave, { color: "var(--accent)" });
 export const IconExternal = make(LuExternalLink, { color: "var(--accent)", size: 14 });
+export const IconViewer = make(LuEye, { color: "var(--s3)" });
 
 export const IconClose = make(LuX);
 export const IconCopy = make(LuCopy, { size: 14 });

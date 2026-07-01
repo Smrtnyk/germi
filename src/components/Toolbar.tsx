@@ -10,6 +10,7 @@ import {
   IconSettings,
   IconStart,
   IconStop,
+  IconViewer,
 } from "./icons";
 
 interface ToolbarProps {
@@ -18,6 +19,9 @@ interface ToolbarProps {
   onToggleProxy: () => void;
   systemProxy: boolean;
   onToggleSystemProxy: () => void;
+  /** Viewer mode (`--viewer`): the proxy is disabled; hide the proxy controls. */
+  viewer: boolean;
+  onLaunchViewer: () => void;
   onInstallCa: () => void;
   decode: boolean;
   onToggleDecode: () => void;
@@ -30,13 +34,63 @@ interface ToolbarProps {
   filterInputRef: RefObject<HTMLInputElement | null>;
 }
 
+/** The proxy label on the Start/Stop button, split out so the busy/running
+ *  branching lives in one small function rather than inflating the toolbar. */
+function proxyButtonLabel(running: boolean, busy: boolean) {
+  if (busy) return running ? "Stopping…" : "Starting…";
+  return running ? (
+    <>
+      <IconStop /> Stop
+    </>
+  ) : (
+    <>
+      <IconStart /> Start
+    </>
+  );
+}
+
+type ProxyControlsProps = Pick<
+  ToolbarProps,
+  "running" | "busy" | "onToggleProxy" | "systemProxy" | "onToggleSystemProxy"
+>;
+
+/** The live-proxy controls (Start/Stop, system proxy). Rendered only outside
+ *  viewer mode, where the proxy is disabled. The port lives in Settings. */
+function ProxyControls({
+  running,
+  busy,
+  onToggleProxy,
+  systemProxy,
+  onToggleSystemProxy,
+}: ProxyControlsProps) {
+  return (
+    <div className="tb-group" role="group" aria-label="Proxy">
+      <button
+        className={running ? "btn danger" : "btn primary"}
+        onClick={onToggleProxy}
+        disabled={busy}
+        title={running ? "Stop the proxy" : "Start the proxy"}
+      >
+        {proxyButtonLabel(running, busy)}
+      </button>
+
+      <button
+        className={systemProxy ? "btn active" : "btn"}
+        onClick={onToggleSystemProxy}
+        disabled={!running}
+        title="Route the OS system proxy through Germi"
+      >
+        {systemProxy ? "System proxy: ON" : "System proxy: off"}
+      </button>
+    </div>
+  );
+}
+
 export function Toolbar(props: ToolbarProps) {
   const {
     running,
-    busy,
-    onToggleProxy,
-    systemProxy,
-    onToggleSystemProxy,
+    viewer,
+    onLaunchViewer,
     onInstallCa,
     decode,
     onToggleDecode,
@@ -52,43 +106,20 @@ export function Toolbar(props: ToolbarProps) {
   return (
     <header className="toolbar">
       <div className="brand">
-        <span className={`dot ${running ? "on" : ""}`} />
+        <span className={`dot ${running && !viewer ? "on" : ""}`} />
         Germi
       </div>
 
-      <div className="tb-group" role="group" aria-label="Proxy">
-        <button
-          className={running ? "btn danger" : "btn primary"}
-          onClick={onToggleProxy}
-          disabled={busy}
-          title={running ? "Stop the proxy" : "Start the proxy"}
+      {viewer ? (
+        <div
+          className="viewer-badge"
+          title="Proxy disabled — this instance only inspects saved captures"
         >
-          {busy ? (
-            running ? (
-              "Stopping…"
-            ) : (
-              "Starting…"
-            )
-          ) : running ? (
-            <>
-              <IconStop /> Stop
-            </>
-          ) : (
-            <>
-              <IconStart /> Start
-            </>
-          )}
-        </button>
-
-        <button
-          className={systemProxy ? "btn active" : "btn"}
-          onClick={onToggleSystemProxy}
-          disabled={!running}
-          title="Route the OS system proxy through Germi"
-        >
-          {systemProxy ? "System proxy: ON" : "System proxy: off"}
-        </button>
-      </div>
+          <IconViewer /> Viewer mode
+        </div>
+      ) : (
+        <ProxyControls {...props} />
+      )}
 
       <div className="tb-sep" />
 
@@ -128,6 +159,13 @@ export function Toolbar(props: ToolbarProps) {
           title="Trust the Germi root CA for HTTPS"
         >
           <IconCert /> CA cert
+        </button>
+        <button
+          className="btn ghost"
+          onClick={onLaunchViewer}
+          title="Open a second, proxy-less Germi window for inspecting saved captures"
+        >
+          <IconViewer /> New viewer
         </button>
         <button
           className="btn ghost"

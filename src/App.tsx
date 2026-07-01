@@ -28,21 +28,27 @@ type AppStateValue = ReturnType<typeof useAppState>;
 
 function buildActions(s: AppStateValue): PaletteAction[] {
   const ar = s.ar.autoresponder;
+  // The proxy is disabled in viewer mode, so its commands don't apply there.
+  const proxyActions: PaletteAction[] = s.viewer
+    ? []
+    : [
+        {
+          id: "proxy",
+          group: "Proxy",
+          label: s.proxy.running ? "Stop proxy" : "Start proxy",
+          disabled: s.proxy.busy,
+          run: s.proxy.toggleProxy,
+        },
+        {
+          id: "system-proxy",
+          group: "Proxy",
+          label: s.proxy.systemProxy ? "Disable system proxy" : "Enable system proxy",
+          disabled: !s.proxy.running,
+          run: s.proxy.toggleSystemProxy,
+        },
+      ];
   const actions: PaletteAction[] = [
-    {
-      id: "proxy",
-      group: "Proxy",
-      label: s.proxy.running ? "Stop proxy" : "Start proxy",
-      disabled: s.proxy.busy,
-      run: s.proxy.toggleProxy,
-    },
-    {
-      id: "system-proxy",
-      group: "Proxy",
-      label: s.proxy.systemProxy ? "Disable system proxy" : "Enable system proxy",
-      disabled: !s.proxy.running,
-      run: s.proxy.toggleSystemProxy,
-    },
+    ...proxyActions,
     {
       id: "focus-filter",
       group: "Traffic",
@@ -122,6 +128,7 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       run: () => s.settings.setSettingsOpen(true),
     },
     { id: "ca", group: "App", label: "CA certificate…", run: () => s.setCaOpen(true) },
+    { id: "new-viewer", group: "App", label: "New viewer window", run: s.launchViewer },
   ];
   for (const sc of ar.scenarios) {
     actions.push({
@@ -453,6 +460,8 @@ export function App() {
           onToggleProxy={s.proxy.toggleProxy}
           systemProxy={s.proxy.systemProxy}
           onToggleSystemProxy={s.proxy.toggleSystemProxy}
+          viewer={s.viewer}
+          onLaunchViewer={s.launchViewer}
           onInstallCa={() => s.setCaOpen(true)}
           decode={s.decode}
           onToggleDecode={() => s.setDecode((d) => !d)}
@@ -588,6 +597,7 @@ export function App() {
           running={s.proxy.running}
           port={s.proxy.listenPort}
           allowRemote={s.proxy.listenAllowRemote}
+          viewer={s.viewer}
           flowCount={s.flowStore.orderRef.current.length}
           activeScenario={s.activeScenario}
           paletteAccel={prettyShortcut(s.shortcuts.palette)}
