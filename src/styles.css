@@ -640,11 +640,17 @@ textarea {
   letter-spacing: 0.4px;
   min-width: var(--row-w);
   will-change: transform;
+  align-items: stretch;
 }
 /* header cells host the drag handles, so they must not clip them */
 .flow-head > span {
   position: relative;
   overflow: visible;
+  display: flex;
+  align-items: center;
+}
+.flow-head > span.cell-right {
+  justify-content: flex-end;
 }
 .col-resize {
   position: absolute;
@@ -686,10 +692,12 @@ textarea {
   width: 2px;
 }
 .col-sort {
-  display: inline-flex;
+  display: flex;
+  flex: 1;
+  align-self: stretch;
   align-items: center;
   gap: 3px;
-  max-width: 100%;
+  min-width: 0;
   padding: 0;
   border: none;
   background: none;
@@ -699,6 +707,9 @@ textarea {
   letter-spacing: inherit;
   cursor: pointer;
 }
+.cell-right .col-sort {
+  justify-content: flex-end;
+}
 .col-sort:hover {
   color: var(--text);
 }
@@ -706,6 +717,7 @@ textarea {
   color: var(--accent);
 }
 .col-sort-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }

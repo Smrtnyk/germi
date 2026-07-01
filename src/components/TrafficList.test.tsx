@@ -1,8 +1,11 @@
+import type { CSSProperties } from "react";
 import { userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
-import { CommentCell } from "./TrafficList";
+import "../styles.css";
+import { CommentCell, HeaderRow } from "./TrafficList";
+import { resolveColumns } from "../columns";
 import type { FlowSummary } from "../types";
 
 function flowSummary(overrides: Partial<FlowSummary> = {}): FlowSummary {
@@ -88,5 +91,49 @@ describe("CommentCell", () => {
     expect(comments.setEditingId).toHaveBeenCalledWith(null);
     expect(comments.commitComment).not.toHaveBeenCalled();
     expect(comments.cancelEdit.current).toBe(true);
+  });
+});
+
+describe("HeaderRow sort target", () => {
+  function renderHeader(onToggleSort = vi.fn()) {
+    const [col] = resolveColumns(["url"], []);
+    return render(
+      <div className="flow-list" style={{ "--cols": "320px", "--row-w": "360px" } as CSSProperties}>
+        <HeaderRow
+          columns={[col]}
+          headerRef={{ current: null }}
+          sort={null}
+          onToggleSort={onToggleSort}
+          startResize={vi.fn()}
+          resetWidth={vi.fn()}
+        />
+      </div>,
+    );
+  }
+
+  it("stretches the sort button to fill the whole header cell", async () => {
+    const screen = await renderHeader();
+    const button = screen.getByRole("button", { name: /url/i });
+    const btnEl = button.element();
+    const cellEl = btnEl.parentElement as HTMLElement;
+
+    const b = btnEl.getBoundingClientRect();
+    const c = cellEl.getBoundingClientRect();
+
+    expect(c.width).toBeGreaterThan(100);
+    expect(Math.abs(b.width - c.width)).toBeLessThan(2);
+    expect(Math.abs(b.height - c.height)).toBeLessThan(2);
+  });
+
+  it("sorts when clicking the empty column area, not just the label text", async () => {
+    const onToggleSort = vi.fn();
+    const screen = await renderHeader(onToggleSort);
+    const cellEl = screen.getByRole("button", { name: /url/i }).element()
+      .parentElement as HTMLElement;
+    const c = cellEl.getBoundingClientRect();
+
+    await userEvent.click(cellEl, { position: { x: c.width - 20, y: c.height / 2 } });
+
+    expect(onToggleSort).toHaveBeenCalledWith("url");
   });
 });

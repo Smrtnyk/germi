@@ -228,7 +228,7 @@ interface HeaderRowProps {
   resetWidth: (id: string, width: number) => void;
 }
 
-function HeaderRow({
+export function HeaderRow({
   columns,
   headerRef,
   sort,
