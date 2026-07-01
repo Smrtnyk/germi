@@ -33,6 +33,7 @@ import {
   removeRuleSummary,
   reorderRuleSummary,
   replaceRuleSummary,
+  ruleLabel,
 } from "./autoresponderState";
 import type {
   AutoResponderSummary,
@@ -667,10 +668,10 @@ function scenarioNameIn(ar: AutoResponderSummary, id: string | null): string {
   return ar.scenarios.find((scenario) => scenario.id === id)?.name || "scenario";
 }
 
-function ruleNameIn(ar: AutoResponderSummary, ruleId: string): string {
+function ruleLabelIn(ar: AutoResponderSummary, ruleId: string): string {
   for (const scenario of ar.scenarios) {
     const found = scenario.rules.find((rule) => rule.id === ruleId);
-    if (found) return found.name || "rule";
+    if (found) return ruleLabel(found.matcher.url);
   }
   return "rule";
 }
@@ -698,7 +699,7 @@ function useAutoresponder(
   );
 
   // Latest summary in a ref so actions can build human history labels (scenario
-  // / rule names) without taking the summary as a dependency.
+  // names / rule URLs) without taking the summary as a dependency.
   const arRef = useRef(autoresponder);
   arRef.current = autoresponder;
 
@@ -805,7 +806,7 @@ function useAutoresponder(
           scenarioId,
           rule,
           tag ?? {
-            label: `Edit rule "${rule.name || "untitled"}"`,
+            label: `Edit rule "${ruleLabel(rule.matcher.url)}"`,
             coalesceKey: `rule:${rule.id}`,
           },
         );
@@ -821,7 +822,7 @@ function useAutoresponder(
 
   const deleteRule = useCallback(
     (scenarioId: string, ruleId: string) => {
-      const label = `Delete rule "${ruleNameIn(arRef.current, ruleId)}"`;
+      const label = `Delete rule "${ruleLabelIn(arRef.current, ruleId)}"`;
       setAutoresponder((current) => removeRuleSummary(current, scenarioId, ruleId));
       void api.deleteRule(scenarioId, ruleId, { label }).catch((e) => {
         setError(String(e));

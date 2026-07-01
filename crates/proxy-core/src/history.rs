@@ -10,7 +10,7 @@
 //! Entries are **bidirectional**: undo and redo apply opposite "sides" of the
 //! same op, so no separate inverse is ever stored. Coalescing is **clock-free** —
 //! it merges consecutive entries that share a frontend-supplied key, so typing a
-//! rule name lands as one undo step instead of one-per-keystroke.
+//! rule URL lands as one undo step instead of one-per-keystroke.
 
 use serde::{Deserialize, Serialize};
 

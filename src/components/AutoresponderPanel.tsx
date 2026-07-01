@@ -14,6 +14,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { debounce } from "es-toolkit";
 
 import { api } from "../ipc";
+import { ruleLabel } from "../autoresponderState";
 import { decodeFlowIds, FLOW_DRAG_MIME, hasFlowDrag, RULE_DRAG_MIME } from "../dnd";
 import type {
   Action,
@@ -150,7 +151,7 @@ function actionSummary(a: ActionSummary): string {
 }
 
 function ruleSummary(r: RuleSummary): string {
-  return `${r.matcher.method || "ANY"} · ${r.matcher.url || "*"} → ${actionSummary(r.action)}`;
+  return `${r.matcher.method || "ANY"} → ${actionSummary(r.action)}`;
 }
 
 function fireBadge(rule: RuleSummary): string | null {
@@ -242,12 +243,13 @@ function RuleListItem({
   onDragEnd: () => void;
 }) {
   const badge = fireBadge(rule);
+  const label = ruleLabel(rule.matcher.url);
   return (
     <div
       className={`rule-item ${selected ? "selected" : ""} ${dragOver ? "dragover" : ""}`}
       onClick={onSelect}
       onContextMenu={onContextMenu}
-      title={rule.name}
+      title={label}
       draggable={draggable}
       onDragStart={(e) => {
         e.dataTransfer.setData(RULE_DRAG_MIME, rule.id);
@@ -280,7 +282,7 @@ function RuleListItem({
       />
       <div className="rmeta">
         <div className="rtop">
-          <span className={`rname ${rule.enabled ? "" : "off"}`}>{middleTruncate(rule.name)}</span>
+          <span className={`rname ${rule.enabled ? "" : "off"}`}>{middleTruncate(label)}</span>
           {rule.action.kind !== "respond" && <span className="rkind">{rule.action.kind}</span>}
         </div>
         <div className="rsub">
@@ -594,7 +596,6 @@ interface RuleListBehavior {
 }
 
 const RULE_SCOPES: { value: RuleSearchScope; label: string }[] = [
-  { value: "name", label: "Name" },
   { value: "url", label: "URL" },
   { value: "method", label: "Method" },
   { value: "status", label: "Status" },
@@ -1450,13 +1451,7 @@ function RuleEditor({
 
   return (
     <div className="editor-form">
-      <div className="row">
-        <label>Name</label>
-        <input
-          className="grow"
-          value={rule.name}
-          onChange={(e) => onPatch({ name: e.target.value })}
-        />
+      <div className="row end">
         <button className="btn danger" onClick={onDelete}>
           Delete
         </button>

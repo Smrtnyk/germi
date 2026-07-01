@@ -125,7 +125,6 @@ mod tests {
     fn respond_rule(id: &str) -> Rule {
         Rule {
             id: id.to_string(),
-            name: id.to_string(),
             enabled: true,
             fire_limit: Some(3),
             repeat: true,
