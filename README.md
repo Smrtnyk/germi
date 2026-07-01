@@ -106,4 +106,6 @@ upstream/parent-proxy chaining · SQLite-backed persistent store.
 
 ## License
 
-MIT
+[0BSD](LICENSE) (BSD Zero Clause License) — a maximally permissive,
+OSI-approved license: use, copy, modify and distribute freely, with no
+attribution requirement.

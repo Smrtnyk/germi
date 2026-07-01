@@ -26,6 +26,8 @@
   },
   "bundle": {
     "active": true,
+    "license": "0BSD",
+    "licenseFile": "../LICENSE",
     "targets": ["nsis", "deb", "appimage", "rpm"],
     "icon": [
       "icons/32x32.png",
