@@ -34,9 +34,10 @@ jobs:
         run: cargo test -p proxy-core --locked
 
   # Verify the Tauri shell compiles and its unit tests pass (Linux). Native
-  # installer builds for Windows + Linux are skipped for now — to restore them,
-  # re-add a `tauri-apps/tauri-action@v0` step across an OS matrix (with the
-  # Windows NASM step) to bundle the .msi/.exe + .deb/.AppImage/.rpm.
+  # installer builds are skipped for now — to restore them, re-add a
+  # `tauri-apps/tauri-action@v0` step across an OS matrix to bundle the
+  # .msi/.exe + .deb/.AppImage/.rpm. A portable Windows exe IS built, on tags
+  # and on demand, by portable-windows.yml.
   tauri-shell:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

@@ -1,0 +1,70 @@
+name: portable-windows
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable-exe:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      # aws-lc-rs (via hudsucker/rustls) needs NASM to assemble on Windows.
+      - uses: ilammy/setup-nasm@v1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      # The bare exe IS the portable app: the frontend dist is embedded at
+      # compile time and there are no sidecars/resources. The only runtime
+      # dependency is the evergreen WebView2 shipped with Windows 10/11.
+      - name: Build portable exe
+        run: pnpm tauri build --no-bundle
+
+      - name: Stage artifact
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { $env:GITHUB_SHA.Substring(0, 7) }
+          Copy-Item src-tauri/target/release/germi.exe "Germi-portable-$version-windows-x64.exe"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: germi-portable-windows-x64
+          path: Germi-portable-*.exe
+          if-no-files-found: error
+
+      - name: Attach to release (tags)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $exe = (Get-Item Germi-portable-*.exe).Name
+          gh release upload "$env:GITHUB_REF_NAME" $exe --clobber
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "$env:GITHUB_REF_NAME" --draft --title "$env:GITHUB_REF_NAME" --generate-notes $exe
+          }
