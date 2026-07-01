@@ -62,6 +62,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::proxy_status,
+            commands::bound_addr,
             commands::start_proxy,
             commands::restart_proxy,
             commands::stop_proxy,

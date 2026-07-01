@@ -586,8 +586,8 @@ export function App() {
 
         <StatusBar
           running={s.proxy.running}
-          port={s.proxy.boundPort ?? s.settings.settings.port}
-          allowRemote={s.settings.settings.allowRemote}
+          port={s.proxy.listenPort}
+          allowRemote={s.proxy.listenAllowRemote}
           flowCount={s.flowStore.orderRef.current.length}
           activeScenario={s.activeScenario}
           paletteAccel={prettyShortcut(s.shortcuts.palette)}
@@ -611,8 +611,12 @@ export function App() {
             autoLayout: s.autoLayout,
             onAutoLayoutChange: s.setAutoLayout,
             running: s.proxy.running,
+            portError: s.proxy.listenerError,
             onCaChanged: s.refreshCa,
-            onClose: () => s.settings.setSettingsOpen(false),
+            onClose: () => {
+              s.settings.setSettingsOpen(false);
+              s.proxy.clearListenerError();
+            },
           }}
         />
 

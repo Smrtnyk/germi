@@ -19,17 +19,24 @@ const DURATION: Record<ToastKind, number> = {
 
 const MAX_VISIBLE = 4;
 
-function friendlyError(raw: string): string {
+export function friendlyError(raw: string): string {
   const s = raw.replace(/^(?:Error:\s*)+/i, "").trim();
   const low = s.toLowerCase();
   if (low.includes("in use") || low.includes("os error 98") || low.includes("os error 10048")) {
     return "That port is already in use — pick another in Settings → Connections.";
   }
-  if (low.includes("permission denied") || low.includes("os error 13")) {
-    return `Permission denied — ${s}`;
-  }
+  // Windows WSAEACCES on a bind: the port is OS-reserved (a high port too, not
+  // just <1024 — e.g. an excluded port range) or held by a privileged service.
   if (low.includes("os error 10013") || (low.includes("access") && low.includes("permitted"))) {
-    return "Port not permitted — ports below 1024 may need elevated rights. Try a higher port.";
+    return "That port isn't available — it may be reserved by the OS or another app (ports under 1024 also need elevated rights). Pick a different port.";
+  }
+  // EACCES: a bind (proxy-core tags these "failed to bind") is a privileged/
+  // restricted port; a bare permission-denied (e.g. a file write) stays neutral.
+  if (low.includes("permission denied") || low.includes("os error 13")) {
+    if (low.includes("failed to bind")) {
+      return "That port needs elevated rights (ports under 1024 are privileged) or is otherwise restricted. Pick a higher port.";
+    }
+    return `Permission denied — ${s}`;
   }
   if (low.includes("no such file") || low.includes("not found")) {
     return s;
