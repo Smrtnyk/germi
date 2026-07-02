@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  changedSpanMap,
+  changedSpans,
   diffLines,
   diffStats,
   foldContext,
@@ -130,6 +132,40 @@ describe("foldSplit", () => {
     const rows = foldSplit(splitRows(diffLines(`changed\n${body}`, `CHANGED\n${body}`)), 3);
     expect(rows[0]).toMatchObject({ kind: "pair" });
     expect(rows[rows.length - 1]).toMatchObject({ kind: "fold", count: 17 });
+  });
+});
+
+describe("changedSpans", () => {
+  it("isolates the changed middle of two near-identical lines", () => {
+    const spans = changedSpans("X-Feature-Flags: checkout-v2", "X-Feature-Flags: checkout-v3");
+    expect(spans?.left).toEqual({ start: 27, end: 28 });
+    expect(spans?.right).toEqual({ start: 27, end: 28 });
+  });
+
+  it("marks an insertion as an empty span on the shorter side", () => {
+    const spans = changedSpans("a=1&b=2", "a=1&x=9&b=2");
+    expect(spans?.left.start).toBe(spans?.left.end);
+    const right = spans?.right;
+    expect("a=1&x=9&b=2".slice(right?.start, right?.end)).toBe("x=9&");
+  });
+
+  it("returns null for equal lines and for lines that differ almost everywhere", () => {
+    expect(changedSpans("same", "same")).toBeNull();
+    expect(changedSpans("completely different content", "nothing shared here at all!")).toBeNull();
+  });
+
+  it("keys marks to both sides of every del/add pair in a diff", () => {
+    const lines = diffLines("keep\nvalue: old\ntail", "keep\nvalue: new\ntail");
+    const spans = changedSpanMap(lines);
+    const del = lines.find((l) => l.kind === "del");
+    const add = lines.find((l) => l.kind === "add");
+    expect(del && spans.get(del)).toEqual({ start: 7, end: 10 });
+    expect(add && spans.get(add)).toEqual({ start: 7, end: 10 });
+  });
+
+  it("leaves pure insertions and deletions unmarked", () => {
+    const lines = diffLines("a", "a\nadded");
+    expect(changedSpanMap(lines).size).toBe(0);
   });
 });
 

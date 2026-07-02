@@ -36,6 +36,20 @@ describe("DiffBlock", () => {
     expect(newCell?.classList.contains("add")).toBe(true);
     expect(oldCell?.parentElement).toBe(newCell?.parentElement);
   });
+
+  it("marks the exact changed span inside a near-identical line pair", async () => {
+    const screen = await render(
+      <DiffBlock
+        title="Request"
+        a="X-Feature-Flags: checkout-v2"
+        b="X-Feature-Flags: checkout-v3"
+        mode="split"
+      />,
+    );
+    const marks = screen.getByText("2", { exact: true });
+    await expect.element(marks).toHaveClass("diff-chg");
+    await expect.element(screen.getByText("3", { exact: true })).toHaveClass("diff-chg");
+  });
 });
 
 describe("DiffRows", () => {

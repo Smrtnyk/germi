@@ -32,6 +32,8 @@
   --banner-warn-line: #5b4a1e;
   --diff-add-bg: rgba(52, 211, 153, 0.09);
   --diff-del-bg: rgba(248, 113, 113, 0.1);
+  --diff-add-hl: rgba(52, 211, 153, 0.28); /* intra-line changed span */
+  --diff-del-hl: rgba(248, 113, 113, 0.3);
   --match-a-bg: rgba(45, 212, 191, 0.08); /* left compare pane: good match tint */
   --match-b-bg: rgba(96, 165, 250, 0.09); /* right compare pane: good match tint */
 
@@ -3386,6 +3388,16 @@ kbd {
   min-width: 0;
   white-space: pre-wrap;
   word-break: break-all;
+}
+.diff-line.del .diff-chg,
+.diff-cell.del .diff-chg {
+  background: var(--diff-del-hl);
+  border-radius: 2px;
+}
+.diff-line.add .diff-chg,
+.diff-cell.add .diff-chg {
+  background: var(--diff-add-hl);
+  border-radius: 2px;
 }
 .diff-srow {
   display: grid;

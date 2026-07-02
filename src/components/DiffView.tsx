@@ -1,11 +1,13 @@
 import { useMemo, useState } from "react";
 
 import {
+  changedSpanMap,
   diffLines,
   diffStats,
   foldContext,
   foldSplit,
   splitRows,
+  type CharSpan,
   type DiffLine,
   type SplitPair,
 } from "../diff";
@@ -30,13 +32,30 @@ function clipLine(text: string): string {
 
 const SIGNS = { same: " ", del: "-", add: "+" } as const;
 
-function DiffLineRow({ line }: { line: DiffLine }) {
+/** Line text with the changed middle marked (issue #86 feedback: near-identical
+ *  long lines must show the exact change, not just a colored row). */
+function MarkedText({ text, span }: { text: string; span?: CharSpan }) {
+  const clipped = clipLine(text);
+  if (!span || span.start >= clipped.length || span.end <= span.start) return <>{clipped}</>;
+  const end = Math.min(span.end, clipped.length);
+  return (
+    <>
+      {clipped.slice(0, span.start)}
+      <span className="diff-chg">{clipped.slice(span.start, end)}</span>
+      {clipped.slice(end)}
+    </>
+  );
+}
+
+function DiffLineRow({ line, span }: { line: DiffLine; span?: CharSpan }) {
   return (
     <div className={`diff-line ${line.kind}`}>
       <span className="diff-ln">{line.left ?? ""}</span>
       <span className="diff-ln">{line.right ?? ""}</span>
       <span className="diff-sign">{SIGNS[line.kind]}</span>
-      <span className="diff-text">{clipLine(line.text)}</span>
+      <span className="diff-text">
+        <MarkedText text={line.text} span={span} />
+      </span>
     </div>
   );
 }
@@ -82,13 +101,14 @@ function TailNote({ hidden }: { hidden: number }) {
 function UnifiedDiffRows({ lines }: { lines: DiffLine[] }) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const rows = useMemo(() => renderRows(lines, expanded), [lines, expanded]);
+  const spans = useMemo(() => changedSpanMap(lines), [lines]);
   const shown = rows.slice(0, MAX_RENDERED_ROWS);
   const expand = (index: number) => setExpanded((prev) => new Set(prev).add(index));
   return (
     <div className="diff-rows">
       {shown.map((row) =>
         row.kind === "line" ? (
-          <DiffLineRow key={row.key} line={row.line} />
+          <DiffLineRow key={row.key} line={row.line} span={spans.get(row.line)} />
         ) : (
           <FoldButton key={row.key} count={row.count} onExpand={() => expand(row.index)} />
         ),
@@ -98,13 +118,23 @@ function UnifiedDiffRows({ lines }: { lines: DiffLine[] }) {
   );
 }
 
-function SplitCell({ line, side }: { line: DiffLine | null; side: "left" | "right" }) {
+function SplitCell({
+  line,
+  side,
+  span,
+}: {
+  line: DiffLine | null;
+  side: "left" | "right";
+  span?: CharSpan;
+}) {
   if (line === null) return <div className="diff-cell void" />;
   return (
     <div className={`diff-cell ${line.kind}`}>
       <span className="diff-ln">{(side === "left" ? line.left : line.right) ?? ""}</span>
       <span className="diff-sign">{SIGNS[line.kind]}</span>
-      <span className="diff-text">{clipLine(line.text)}</span>
+      <span className="diff-text">
+        <MarkedText text={line.text} span={span} />
+      </span>
     </div>
   );
 }
@@ -134,6 +164,7 @@ function renderSplit(pairs: SplitPair[], expanded: Set<number>): SplitRenderRow[
 function SplitDiffRows({ lines }: { lines: DiffLine[] }) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const pairs = useMemo(() => splitRows(lines), [lines]);
+  const spans = useMemo(() => changedSpanMap(lines), [lines]);
   const rows = useMemo(() => renderSplit(pairs, expanded), [pairs, expanded]);
   const shown = rows.slice(0, MAX_RENDERED_ROWS);
   const expand = (index: number) => setExpanded((prev) => new Set(prev).add(index));
@@ -142,8 +173,16 @@ function SplitDiffRows({ lines }: { lines: DiffLine[] }) {
       {shown.map((row) =>
         row.kind === "pair" ? (
           <div key={row.key} className="diff-srow">
-            <SplitCell line={row.pair.left} side="left" />
-            <SplitCell line={row.pair.right} side="right" />
+            <SplitCell
+              line={row.pair.left}
+              side="left"
+              span={row.pair.left ? spans.get(row.pair.left) : undefined}
+            />
+            <SplitCell
+              line={row.pair.right}
+              side="right"
+              span={row.pair.right ? spans.get(row.pair.right) : undefined}
+            />
           </div>
         ) : (
           <FoldButton key={row.key} count={row.count} onExpand={() => expand(row.index)} />
