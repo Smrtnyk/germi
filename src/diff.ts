@@ -237,3 +237,51 @@ export function foldSplit(pairs: SplitPair[], context = 3): SplitRow[] {
   }
   return rows;
 }
+
+/** A changed character range (`[start, end)`) within a line's text. */
+export interface CharSpan {
+  start: number;
+  end: number;
+}
+
+/** Coverage of the whole line beyond which an intra-line mark says nothing
+ *  ("everything changed") and is dropped. */
+const MAX_SPAN_COVERAGE = 0.9;
+
+function spanTooBroad(span: CharSpan, text: string): boolean {
+  return text.length > 0 && (span.end - span.start) / text.length > MAX_SPAN_COVERAGE;
+}
+
+/** The changed middle of two versions of a line (common prefix/suffix trimmed
+ *  away) — the "show the exact change" mark for a paired del/add row. Null when
+ *  the lines are equal or differ almost everywhere (a mark would just shout). */
+export function changedSpans(a: string, b: string): { left: CharSpan; right: CharSpan } | null {
+  if (a === b) return null;
+  let prefix = 0;
+  const max = Math.min(a.length, b.length);
+  while (prefix < max && a[prefix] === b[prefix]) prefix++;
+  let endA = a.length;
+  let endB = b.length;
+  while (endA > prefix && endB > prefix && a[endA - 1] === b[endB - 1]) {
+    endA--;
+    endB--;
+  }
+  const left = { start: prefix, end: endA };
+  const right = { start: prefix, end: endB };
+  if (spanTooBroad(left, a) && spanTooBroad(right, b)) return null;
+  return { left, right };
+}
+
+/** Intra-line change marks for every del/add pair in a diff, keyed by the line
+ *  object (shared by the unified and split renderers). */
+export function changedSpanMap(lines: DiffLine[]): Map<DiffLine, CharSpan> {
+  const map = new Map<DiffLine, CharSpan>();
+  for (const pair of splitRows(lines)) {
+    if (!pair.left || !pair.right || pair.left === pair.right) continue;
+    const spans = changedSpans(pair.left.text, pair.right.text);
+    if (!spans) continue;
+    map.set(pair.left, spans.left);
+    map.set(pair.right, spans.right);
+  }
+  return map;
+}
