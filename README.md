@@ -77,14 +77,18 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   and keeps only the imported reference (undoable). Filter with `is:imported` / `is:captured`.
 - **Compare & diff** — select requests → right-click **Compare** (or select exactly two
   → **Diff the 2 selected**): opens a separate **compare window** (the traffic list
-  stays visible and keeps capturing alongside) with a two-pane picker where each row
-  shows how closely its **URL matches** the other side's selection (structural — path
-  segments and query parameters, so a random id/timestamp still scores high). Move
-  rows across with **→/←** or load a HAR/SAZ/`.germi` into the right side, then
-  **Enter** opens a git-style **raw-HTTP diff** of request and response. Bodies are
-  compared (decoded, backend-side) but stay collapsed — a **Show body diff** button
-  (or **B**) reveals the hunks. **Esc** steps back / closes the window; invoking
-  Compare again re-seeds the open window from the new selection.
+  stays visible and keeps capturing alongside) with a two-pane picker. Each pane is a
+  little traffic list of its own — a token **filter**, the **type chips**, sortable
+  **columns**, and **shift/ctrl multi-select** — and each row shows how closely its
+  **URL matches** the other side's selection (structural — path segments and query
+  parameters, so a random id/timestamp still scores high; good matches get a
+  full-row tint, a different color per side, and the Match column sorts them to the
+  top). Move the selection across with **→/←** or load a HAR/SAZ/`.germi` into the
+  right side, then **Enter** opens a **side-by-side raw-HTTP diff** of request and
+  response (a toggle switches to unified). Bodies are compared (decoded,
+  backend-side) but stay collapsed — a **Show body diff** button (or **B**) reveals
+  the hunks. **Esc** steps back / closes the window; invoking Compare again re-seeds
+  the open window from the new selection.
 - **Filtering** — highlights matches in place (Fiddler-style) with an `N of M` count:
   type/status chips, a token filter (`host: status:4xx kind:xhr is:imported -neg /regex/` —
   see the `?` popover), and backend `body:` / `req-body:` / `resp-body:` content search.

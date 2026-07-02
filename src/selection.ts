@@ -17,6 +17,24 @@ export function nextIdAfterDelete(
   return null;
 }
 
+/** A copy of `prev` with `item` toggled in or out. */
+export function toggledSet<T>(prev: Set<T>, item: T): Set<T> {
+  const next = new Set(prev);
+  if (next.has(item)) next.delete(item);
+  else next.add(item);
+  return next;
+}
+
+/** All ids between `anchor` and `id` (inclusive) in display order, or null when
+ *  either end is gone (the caller re-anchors). */
+export function rangeSelection(ids: string[], anchor: string, id: string): Set<string> | null {
+  const a = ids.indexOf(anchor);
+  const b = ids.indexOf(id);
+  if (a === -1 || b === -1) return null;
+  const [lo, hi] = a < b ? [a, b] : [b, a];
+  return new Set(ids.slice(lo, hi + 1));
+}
+
 export interface SelectionPatch {
   selectedIds: Set<string>;
   selectedId: string | null;

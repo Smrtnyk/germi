@@ -1,11 +1,22 @@
 import { useMemo, useState } from "react";
 
-import { diffLines, diffStats, foldContext, type DiffLine } from "../diff";
+import {
+  diffLines,
+  diffStats,
+  foldContext,
+  foldSplit,
+  splitRows,
+  type DiffLine,
+  type SplitPair,
+} from "../diff";
 import type { MessageDetail } from "../types";
 
 // Pure renderers for the compare view's diff screen (issue #86). No IPC — the
 // data-fetching container lives in CompareDiff.tsx, so these stay browser-
 // testable (see DiffView.test.tsx).
+
+/** How a diff is laid out: side-by-side cells or a unified +/- column. */
+export type DiffMode = "split" | "unified";
 
 /** Diffs longer than this render a tail note instead of more rows. */
 const MAX_RENDERED_ROWS = 1500;
@@ -50,8 +61,25 @@ function renderRows(lines: DiffLine[], expanded: Set<number>): RenderRow[] {
   return rows;
 }
 
-/** Unified diff rows with git-like folded context; folds expand on click. */
-export function DiffRows({ lines }: { lines: DiffLine[] }) {
+function FoldButton({ count, onExpand }: { count: number; onExpand: () => void }) {
+  return (
+    <button
+      type="button"
+      className="diff-fold"
+      onClick={onExpand}
+      title="Show these unchanged lines"
+    >
+      ··· {count} unchanged lines ···
+    </button>
+  );
+}
+
+function TailNote({ hidden }: { hidden: number }) {
+  if (hidden <= 0) return null;
+  return <div className="diff-tail muted">… {hidden} more rows not shown</div>;
+}
+
+function UnifiedDiffRows({ lines }: { lines: DiffLine[] }) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const rows = useMemo(() => renderRows(lines, expanded), [lines, expanded]);
   const shown = rows.slice(0, MAX_RENDERED_ROWS);
@@ -62,26 +90,88 @@ export function DiffRows({ lines }: { lines: DiffLine[] }) {
         row.kind === "line" ? (
           <DiffLineRow key={row.key} line={row.line} />
         ) : (
-          <button
-            key={row.key}
-            type="button"
-            className="diff-fold"
-            onClick={() => expand(row.index)}
-            title="Show these unchanged lines"
-          >
-            ··· {row.count} unchanged lines ···
-          </button>
+          <FoldButton key={row.key} count={row.count} onExpand={() => expand(row.index)} />
         ),
       )}
-      {rows.length > shown.length && (
-        <div className="diff-tail muted">… {rows.length - shown.length} more rows not shown</div>
-      )}
+      <TailNote hidden={rows.length - shown.length} />
     </div>
   );
 }
 
+function SplitCell({ line, side }: { line: DiffLine | null; side: "left" | "right" }) {
+  if (line === null) return <div className="diff-cell void" />;
+  return (
+    <div className={`diff-cell ${line.kind}`}>
+      <span className="diff-ln">{(side === "left" ? line.left : line.right) ?? ""}</span>
+      <span className="diff-sign">{SIGNS[line.kind]}</span>
+      <span className="diff-text">{clipLine(line.text)}</span>
+    </div>
+  );
+}
+
+type SplitRenderRow =
+  | { key: string; kind: "pair"; pair: SplitPair }
+  | { key: string; kind: "fold"; index: number; count: number };
+
+function renderSplit(pairs: SplitPair[], expanded: Set<number>): SplitRenderRow[] {
+  const rows: SplitRenderRow[] = [];
+  for (const [index, row] of foldSplit(pairs).entries()) {
+    if (row.kind === "pair") {
+      rows.push({ key: `p${index}`, kind: "pair", pair: row });
+    } else if (expanded.has(index)) {
+      rows.push(
+        ...row.pairs.map(
+          (pair, i): SplitRenderRow => ({ key: `p${index}.${i}`, kind: "pair", pair }),
+        ),
+      );
+    } else {
+      rows.push({ key: `f${index}`, kind: "fold", index, count: row.count });
+    }
+  }
+  return rows;
+}
+
+function SplitDiffRows({ lines }: { lines: DiffLine[] }) {
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const pairs = useMemo(() => splitRows(lines), [lines]);
+  const rows = useMemo(() => renderSplit(pairs, expanded), [pairs, expanded]);
+  const shown = rows.slice(0, MAX_RENDERED_ROWS);
+  const expand = (index: number) => setExpanded((prev) => new Set(prev).add(index));
+  return (
+    <div className="diff-rows">
+      {shown.map((row) =>
+        row.kind === "pair" ? (
+          <div key={row.key} className="diff-srow">
+            <SplitCell line={row.pair.left} side="left" />
+            <SplitCell line={row.pair.right} side="right" />
+          </div>
+        ) : (
+          <FoldButton key={row.key} count={row.count} onExpand={() => expand(row.index)} />
+        ),
+      )}
+      <TailNote hidden={rows.length - shown.length} />
+    </div>
+  );
+}
+
+/** Diff rows with git-like folded context; folds expand on click. Side-by-side
+ *  by default (the compare window's preference), unified on request. */
+export function DiffRows({ lines, mode = "unified" }: { lines: DiffLine[]; mode?: DiffMode }) {
+  return mode === "split" ? <SplitDiffRows lines={lines} /> : <UnifiedDiffRows lines={lines} />;
+}
+
 /** One diffed text block (request head or response head) with a change badge. */
-export function DiffBlock({ title, a, b }: { title: string; a: string; b: string }) {
+export function DiffBlock({
+  title,
+  a,
+  b,
+  mode,
+}: {
+  title: string;
+  a: string;
+  b: string;
+  mode?: DiffMode;
+}) {
   const lines = useMemo(() => diffLines(a, b), [a, b]);
   const stats = diffStats(lines);
   const changed = stats.added + stats.removed > 0;
@@ -98,7 +188,7 @@ export function DiffBlock({ title, a, b }: { title: string; a: string; b: string
           <span className="diff-stats muted">identical</span>
         )}
       </div>
-      <DiffRows lines={lines} />
+      <DiffRows lines={lines} mode={mode} />
     </section>
   );
 }
@@ -116,7 +206,15 @@ function bodyVerdict(equal: boolean | null, aSize: number, bSize: number): strin
   return `${sizeLabel(aSize)} vs ${sizeLabel(bSize)}`;
 }
 
-function BodyHunks({ a, b }: { a: MessageDetail | null; b: MessageDetail | null }) {
+function BodyHunks({
+  a,
+  b,
+  mode,
+}: {
+  a: MessageDetail | null;
+  b: MessageDetail | null;
+  mode?: DiffMode;
+}) {
   const truncated = !!(a?.truncated || b?.truncated);
   return (
     <div className="diff-body-hunks">
@@ -125,7 +223,7 @@ function BodyHunks({ a, b }: { a: MessageDetail | null; b: MessageDetail | null 
           diff of the first 512 KB per side — fetch is capped for display
         </div>
       )}
-      <DiffRows lines={diffLines(a?.bodyText ?? "", b?.bodyText ?? "")} />
+      <DiffRows lines={diffLines(a?.bodyText ?? "", b?.bodyText ?? "")} mode={mode} />
     </div>
   );
 }
@@ -138,6 +236,7 @@ export interface BodyDiffSectionProps {
   equal: boolean | null;
   shown: boolean;
   onToggle: () => void;
+  mode?: DiffMode;
 }
 
 /**
@@ -145,7 +244,15 @@ export interface BodyDiffSectionProps {
  * verdict and sizes, and only an explicit toggle renders the hunks. Binary
  * bodies never render as a text diff.
  */
-export function BodyDiffSection({ label, a, b, equal, shown, onToggle }: BodyDiffSectionProps) {
+export function BodyDiffSection({
+  label,
+  a,
+  b,
+  equal,
+  shown,
+  onToggle,
+  mode,
+}: BodyDiffSectionProps) {
   const aSize = a?.size ?? 0;
   const bSize = b?.size ?? 0;
   if (aSize === 0 && bSize === 0) {
@@ -169,7 +276,7 @@ export function BodyDiffSection({ label, a, b, equal, shown, onToggle }: BodyDif
           {shown ? "Hide body diff" : "Show body diff"}
         </button>
       )}
-      {shown && !binary && <BodyHunks a={a} b={b} />}
+      {shown && !binary && <BodyHunks a={a} b={b} mode={mode} />}
     </div>
   );
 }

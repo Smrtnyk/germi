@@ -141,34 +141,99 @@ export function diffStats(lines: DiffLine[]): DiffStats {
   return { added, removed };
 }
 
-/**
- * Collapse long unchanged runs into fold rows, keeping `context` unchanged
- * lines around every change (the git hunk look). Runs of at most
- * `MIN_FOLD_RUN` hidden lines stay inline — a one-line fold is worse than the
- * line itself.
- */
-export function foldContext(lines: DiffLine[], context = 3): DiffRow[] {
-  const keep = new Array<boolean>(lines.length).fill(false);
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].kind === "same") continue;
+interface ContextRun<T> {
+  hidden: boolean;
+  items: T[];
+}
+
+/** Split `items` into alternating shown/hidden runs: everything within
+ *  `context` of a change is shown, and hidden runs of at most `MIN_FOLD_RUN`
+ *  are shown anyway — a one-line fold is worse than the line itself. */
+function contextRuns<T>(
+  items: T[],
+  isChange: (item: T) => boolean,
+  context: number,
+): ContextRun<T>[] {
+  const keep = new Array<boolean>(items.length).fill(false);
+  for (let i = 0; i < items.length; i++) {
+    if (!isChange(items[i])) continue;
     const from = Math.max(0, i - context);
-    const to = Math.min(lines.length - 1, i + context);
+    const to = Math.min(items.length - 1, i + context);
     for (let k = from; k <= to; k++) keep[k] = true;
   }
+  const runs: ContextRun<T>[] = [];
+  let i = 0;
+  while (i < items.length) {
+    let j = i;
+    while (j < items.length && keep[j] === keep[i]) j++;
+    const chunk = items.slice(i, j);
+    runs.push({ hidden: !keep[i] && chunk.length > MIN_FOLD_RUN, items: chunk });
+    i = j;
+  }
+  return runs;
+}
+
+/**
+ * Collapse long unchanged runs into fold rows, keeping `context` unchanged
+ * lines around every change (the git hunk look).
+ */
+export function foldContext(lines: DiffLine[], context = 3): DiffRow[] {
   const rows: DiffRow[] = [];
+  for (const run of contextRuns(lines, (l) => l.kind !== "same", context)) {
+    if (run.hidden) rows.push({ kind: "fold", count: run.items.length, lines: run.items });
+    else rows.push(...run.items);
+  }
+  return rows;
+}
+
+/** One side-by-side row: the aligned old/new lines, either possibly absent
+ *  (a pure insertion or deletion leaves the other cell empty). */
+export interface SplitPair {
+  kind: "pair";
+  left: DiffLine | null;
+  right: DiffLine | null;
+}
+
+/** A collapsed run of unchanged side-by-side rows. */
+export interface SplitFold {
+  kind: "fold";
+  count: number;
+  pairs: SplitPair[];
+}
+
+export type SplitRow = SplitPair | SplitFold;
+
+/**
+ * Pair unified lines into side-by-side rows: an unchanged line pairs with
+ * itself, and each deletion run aligns index-wise with the addition run that
+ * follows it (the classic split-diff layout).
+ */
+export function splitRows(lines: DiffLine[]): SplitPair[] {
+  const pairs: SplitPair[] = [];
   let i = 0;
   while (i < lines.length) {
-    if (keep[i]) {
-      rows.push(lines[i]);
+    if (lines[i].kind === "same") {
+      pairs.push({ kind: "pair", left: lines[i], right: lines[i] });
       i++;
       continue;
     }
-    let j = i;
-    while (j < lines.length && !keep[j]) j++;
-    const hidden = lines.slice(i, j);
-    if (hidden.length <= MIN_FOLD_RUN) rows.push(...hidden);
-    else rows.push({ kind: "fold", count: hidden.length, lines: hidden });
-    i = j;
+    const dels: DiffLine[] = [];
+    while (i < lines.length && lines[i].kind === "del") dels.push(lines[i++]);
+    const adds: DiffLine[] = [];
+    while (i < lines.length && lines[i].kind === "add") adds.push(lines[i++]);
+    for (let k = 0; k < Math.max(dels.length, adds.length); k++) {
+      pairs.push({ kind: "pair", left: dels[k] ?? null, right: adds[k] ?? null });
+    }
+  }
+  return pairs;
+}
+
+/** `foldContext` for side-by-side rows. */
+export function foldSplit(pairs: SplitPair[], context = 3): SplitRow[] {
+  const rows: SplitRow[] = [];
+  for (const run of contextRuns(pairs, (p) => p.left?.kind !== "same", context)) {
+    if (run.hidden) rows.push({ kind: "fold", count: run.items.length, pairs: run.items });
+    else rows.push(...run.items);
   }
   return rows;
 }
