@@ -328,3 +328,12 @@ export const STATUS_CHIPS = ["2xx", "3xx", "4xx", "5xx", "pending"] as const;
 export function statusClass(status: number | null): string {
   return status == null ? "pending" : `${Math.floor(status / 100)}xx`;
 }
+
+/** Tone class (`s2`…`s5` / `pending`) coloring a status code in dense lists. */
+export function statusCls(status: number | null): string {
+  if (status === null) return "pending";
+  if (status >= 500) return "s5";
+  if (status >= 400) return "s4";
+  if (status >= 300) return "s3";
+  return "s2";
+}

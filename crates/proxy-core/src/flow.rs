@@ -351,6 +351,20 @@ impl MessageDetail {
     }
 }
 
+/// Body-equality verdict for the compare/diff view (issue #86). Computed
+/// store-side on the *decoded* bodies (matching what the inspector and the diff
+/// show) so multi-MB payloads never cross the IPC bridge just to answer "same
+/// or different?".
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BodyComparison {
+    /// Whether the two requests' decoded bodies are byte-identical.
+    pub request_equal: bool,
+    /// Whether the two responses' decoded bodies are byte-identical; `None`
+    /// when either flow has no response to compare.
+    pub response_equal: Option<bool>,
+}
+
 /// Full exchange detail, fetched on demand when a row is selected.
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]

@@ -86,6 +86,15 @@ export interface FlowDetail {
   timestampMs: number;
 }
 
+/** Body-equality verdict for the compare view (mirrors `BodyComparison` in
+ *  `flow.rs`): computed backend-side on the decoded bodies so large payloads
+ *  never cross IPC just to answer "same or different?". */
+export interface BodyComparison {
+  requestEqual: boolean;
+  /** Null when either flow has no response to compare. */
+  responseEqual: boolean | null;
+}
+
 export type FlowEvent =
   | { type: "new"; summary: FlowSummary }
   | { type: "completed"; summary: FlowSummary }

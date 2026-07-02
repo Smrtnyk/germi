@@ -1552,6 +1552,38 @@ function useViewerMode(notify: Notify, setError: SetError) {
   return { viewer, setViewer, launchViewer };
 }
 
+/** The compare view's seed (issue #86): a snapshot of the selection taken when
+ *  it opens — null while closed. Exactly two selected rows prefill both sides
+ *  (the pair is one Enter away from a diff); otherwise everything selected
+ *  lands on the left, to be paired against moved rows or a loaded file. */
+interface CompareSeed {
+  left: FlowSummary[];
+  right: FlowSummary[];
+}
+
+function useCompare(selectedSummaries: FlowSummary[], notify: Notify) {
+  const [compare, setCompare] = useState<CompareSeed | null>(null);
+  // Ref-read so openCompare snapshots the selection at call time, not at the
+  // render that created the callback.
+  const selectedRef = useRef(selectedSummaries);
+  selectedRef.current = selectedSummaries;
+
+  function openCompare() {
+    const selected = selectedRef.current;
+    if (selected.length === 0) {
+      notify("info", "Select one or more requests to compare first");
+      return;
+    }
+    setCompare(
+      selected.length === 2
+        ? { left: [selected[0]], right: [selected[1]] }
+        : { left: selected, right: [] },
+    );
+  }
+
+  return { compare, openCompare, closeCompare: () => setCompare(null) };
+}
+
 export function useAppState() {
   const toasts = useToasts();
   const notify = toasts.notify;
@@ -1608,6 +1640,7 @@ export function useAppState() {
     notify,
     setError,
   );
+  const compare = useCompare(selectedSummaries, notify);
 
   // Deferred selection after delete: we don't move the selection until the
   // deleted rows have actually been pruned by the backend's `removed` event,
@@ -1898,6 +1931,9 @@ export function useAppState() {
     copyFlowAsCurl,
     copyFlowBody,
     copySelectedUrl,
+    compare: compare.compare,
+    openCompare: compare.openCompare,
+    closeCompare: compare.closeCompare,
     focusMockBody,
     clearTraffic,
     deleteSelected,

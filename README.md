@@ -75,6 +75,14 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   **Origin** column) so they stand out from live captures. While replaying through the
   auto-responder, captured traffic piles up — one **Delete captured** click prunes it
   and keeps only the imported reference (undoable). Filter with `is:imported` / `is:captured`.
+- **Compare & diff** — select requests → right-click **Compare** (or select exactly two
+  → **Diff the 2 selected**): a two-pane picker where each row shows how closely its
+  **URL matches** the other side's selection (structural — path segments and query
+  parameters, so a random id/timestamp still scores high). Move rows across with
+  **→/←** or load a HAR/SAZ/`.germi` into the right side, then **Enter** opens a
+  git-style **raw-HTTP diff** of request and response. Bodies are compared (decoded,
+  backend-side) but stay collapsed — a **Show body diff** button (or **B**) reveals
+  the hunks. **Esc** steps back / closes.
 - **Filtering** — highlights matches in place (Fiddler-style) with an `N of M` count:
   type/status chips, a token filter (`host: status:4xx kind:xhr is:imported -neg /regex/` —
   see the `?` popover), and backend `body:` / `req-body:` / `resp-body:` content search.

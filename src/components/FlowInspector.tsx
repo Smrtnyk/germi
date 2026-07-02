@@ -14,6 +14,7 @@ import { countBy, sumBy } from "es-toolkit";
 
 import type { Availability, FlowDetail, FlowSummary, MessageDetail } from "../types";
 import { availabilityLabel } from "../availability";
+import { statusCls } from "../filter";
 import { useToast } from "../toast";
 import { useCopy } from "../useCopy";
 import { useResizable } from "../useResizable";
@@ -24,6 +25,7 @@ import {
   IconArrowDown,
   IconArrowUp,
   IconClose,
+  IconCompare,
   IconCopy,
   IconExternal,
   IconMaximize,
@@ -397,6 +399,7 @@ interface Props extends SingleProps {
   selectedSummaries: FlowSummary[];
   onSelectOne: (id: string) => void;
   onMockMany: (ids: string[]) => void;
+  onCompare: () => void;
   onClearSelection: () => void;
 }
 
@@ -1137,14 +1140,6 @@ function AvailabilityPanel({ availability, url }: { availability: Availability; 
   );
 }
 
-function statusCls(status: number | null): string {
-  if (status === null) return "pending";
-  if (status >= 500) return "s5";
-  if (status >= 400) return "s4";
-  if (status >= 300) return "s3";
-  return "s2";
-}
-
 const STATUS_ORDER: { cls: string; label: string }[] = [
   { cls: "s2", label: "2xx" },
   { cls: "s3", label: "3xx" },
@@ -1164,12 +1159,14 @@ function MultiSelectView({
   flows,
   onSelectOne,
   onMockMany,
+  onCompare,
   onClearSelection,
   viewer,
 }: {
   flows: FlowSummary[];
   onSelectOne: (id: string) => void;
   onMockMany: (ids: string[]) => void;
+  onCompare: () => void;
   onClearSelection: () => void;
   viewer: boolean;
 }) {
@@ -1203,6 +1200,17 @@ function MultiSelectView({
                 <IconMock /> Mock all
               </button>
             )}
+            <button
+              className="btn ghost"
+              onClick={onCompare}
+              title={
+                flows.length === 2
+                  ? "Diff these two requests"
+                  : "Open the compare view with this selection"
+              }
+            >
+              <IconCompare /> Compare
+            </button>
             <button className="btn ghost" onClick={copyUrls}>
               Copy URLs
             </button>
@@ -1509,6 +1517,7 @@ export function FlowInspector(props: Props) {
         flows={props.selectedSummaries}
         onSelectOne={props.onSelectOne}
         onMockMany={props.onMockMany}
+        onCompare={props.onCompare}
         onClearSelection={props.onClearSelection}
         viewer={props.viewer}
       />

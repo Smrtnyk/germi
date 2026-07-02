@@ -50,8 +50,8 @@ use tokio::task::{JoinHandle, JoinSet};
 
 pub use ca::CertAuthority;
 pub use flow::{
-    Availability, AvailabilityVerdict, FlowDetail, FlowEvent, FlowSummary, MessageDetail,
-    ResourceKind,
+    Availability, AvailabilityVerdict, BodyComparison, FlowDetail, FlowEvent, FlowSummary,
+    MessageDetail, ResourceKind,
 };
 pub use history::{HistoryEntryView, HistoryKind, HistoryTag, HistoryView};
 pub use rules::{
@@ -430,6 +430,29 @@ impl ProxyController {
         })
     }
 
+    /// Whether two flows' bodies are byte-identical, per side, for the compare
+    /// view (issue #86). Bodies are compared in decoded form — the same
+    /// projection the inspector and the diff display — with an undecodable body
+    /// falling back to its raw bytes, so a gzip response and an identity
+    /// response with the same content compare equal (the Content-Encoding
+    /// header difference still shows in the headers diff). `None` when either
+    /// id is unknown.
+    pub fn compare_bodies(&self, id_a: &str, id_b: &str) -> Option<BodyComparison> {
+        let store = self.shared.store.lock().ok()?;
+        let a = store.get(id_a)?;
+        let b = store.get(id_b)?;
+        let request_equal = body::decoded_or_raw(&a.request.headers, &a.request.body)
+            == body::decoded_or_raw(&b.request.headers, &b.request.body);
+        let response_equal = match (&a.response, &b.response) {
+            (Some(ra), Some(rb)) => Some(
+                body::decoded_or_raw(&ra.headers, &ra.body)
+                    == body::decoded_or_raw(&rb.headers, &rb.body),
+            ),
+            _ => None,
+        };
+        Some(BodyComparison { request_equal, response_equal })
+    }
+
     /// Shared scan core for body/header content search. `extract` projects a
     /// message (body + headers) to the searchable text, or `None` to skip that
     /// message (e.g. a binary body). Per flow the request side wins first, then
@@ -493,20 +516,34 @@ impl ProxyController {
 
     // ---- capture files: open (.germi / .har / .saz) + session export ----
 
-    /// Open a capture file — a `.germi` session, a HAR, or a Fiddler SAZ
-    /// archive, dispatched on the lowercased `ext` — REPLACING the current
-    /// traffic. Returns the number of flows loaded. The file is fully parsed
-    /// before anything is cleared, so a malformed file leaves traffic intact.
-    pub fn open_capture(&self, bytes: &[u8], ext: &str) -> Result<usize> {
-        let flows = match ext {
-            "germi" => session::import_session(bytes)?,
-            "har" => import::parse_har(bytes)?,
-            "saz" => import::parse_saz(bytes)?,
+    /// Parse a capture file — a `.germi` session, a HAR, or a Fiddler SAZ
+    /// archive — into flows, dispatched on the lowercased `ext`.
+    fn parse_capture(bytes: &[u8], ext: &str) -> Result<Vec<crate::flow::Flow>> {
+        match ext {
+            "germi" => session::import_session(bytes),
+            "har" => import::parse_har(bytes),
+            "saz" => import::parse_saz(bytes),
             other => bail!("Unsupported file type: .{other}"),
-        };
+        }
+    }
+
+    /// Open a capture file, REPLACING the current traffic. Returns the number
+    /// of flows loaded. The file is fully parsed before anything is cleared,
+    /// so a malformed file leaves traffic intact.
+    pub fn open_capture(&self, bytes: &[u8], ext: &str) -> Result<usize> {
+        let flows = Self::parse_capture(bytes, ext)?;
         self.clear_flows();
         self.shared.reset_seq();
-        Ok(self.import_flows(flows))
+        Ok(self.import_flows(flows).len())
+    }
+
+    /// Append a capture file to the current traffic WITHOUT clearing it — for
+    /// loading a reference session into the compare view's right side (issue
+    /// #86). Appended flows carry the `imported` marker and request numbering
+    /// continues (only a replacing open renumbers from 1). Returns the new
+    /// flows' summaries in file order, so the caller can address exactly them.
+    pub fn append_capture(&self, bytes: &[u8], ext: &str) -> Result<Vec<FlowSummary>> {
+        Ok(self.import_flows(Self::parse_capture(bytes, ext)?))
     }
 
     /// Serialize the current traffic to a `.germi` session (JSON bytes).
@@ -561,15 +598,16 @@ impl ProxyController {
     }
 
     /// Insert imported flows (assigning ids) and stream them to the UI.
-    fn import_flows(&self, flows: Vec<crate::flow::Flow>) -> usize {
-        let mut count = 0;
+    /// Returns their summaries in insertion order.
+    fn import_flows(&self, flows: Vec<crate::flow::Flow>) -> Vec<FlowSummary> {
+        let mut summaries = Vec::with_capacity(flows.len());
         for mut flow in flows {
             flow.id = self.shared.next_id();
             flow.seq = self.shared.next_seq();
+            summaries.push(flow.summary());
             self.shared.record_imported(flow);
-            count += 1;
         }
-        count
+        summaries
     }
 
     // ---- autoresponder (scenarios) access ----
@@ -1638,6 +1676,123 @@ mod tests {
             1,
             "a rejected open must leave existing traffic untouched"
         );
+    }
+
+    #[test]
+    fn append_capture_adds_to_existing_traffic_and_returns_the_new_summaries() {
+        let c = controller();
+        c.shared.record_new(flow("live"));
+        let har = br#"{"log":{"entries":[
+          {"request":{"url":"https://a/1"},"response":{"status":200,"headers":[{"name":"x","value":"1"}],"content":{}}},
+          {"request":{"url":"https://a/2"},"response":{"status":201,"headers":[{"name":"x","value":"1"}],"content":{}}}
+        ]}}"#;
+        let appended = c.append_capture(har, "har").expect("append har");
+        assert_eq!(appended.len(), 2);
+        assert!(
+            appended.iter().all(|s| s.imported),
+            "appended flows carry the imported marker"
+        );
+        assert_eq!(
+            appended.iter().map(|s| s.path.as_str()).collect::<Vec<_>>(),
+            vec!["/1", "/2"],
+            "summaries come back in file order"
+        );
+        let store = c.shared.store.lock().expect("lock store");
+        assert_eq!(store.len(), 3, "append adds to the traffic instead of replacing it");
+        assert!(store.get("live").is_some(), "existing traffic survives the append");
+    }
+
+    #[test]
+    fn append_capture_continues_request_numbering() {
+        let c = controller();
+        let mut live = flow("live");
+        live.seq = c.shared.next_seq();
+        c.shared.record_new(live);
+        let bytes = crate::session::export_session(&[flow("x")]);
+        let appended = c.append_capture(&bytes, "germi").expect("append germi");
+        assert_eq!(
+            appended[0].seq, 2,
+            "an appended reference session continues numbering, it never renumbers from 1"
+        );
+    }
+
+    #[test]
+    fn append_capture_rejects_unsupported_extension_without_touching_traffic() {
+        let c = controller();
+        c.shared.record_new(flow("keep"));
+        assert!(c.append_capture(b"irrelevant", "txt").is_err());
+        assert_eq!(c.shared.store.lock().expect("lock store").len(), 1);
+    }
+
+    fn flow_with_bodies(
+        id: &str,
+        req_body: &[u8],
+        resp_headers: &[(&str, &str)],
+        resp_body: &[u8],
+    ) -> crate::flow::Flow {
+        let mut f = flow(id);
+        f.request.body = req_body.to_vec();
+        f.response = Some(CapturedResponse {
+            status: 200,
+            version: "HTTP/1.1".to_string(),
+            headers: resp_headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: resp_body.to_vec(),
+            timestamp_ms: 1,
+        });
+        f
+    }
+
+    fn gzipped(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(bytes).expect("gzip write");
+        enc.finish().expect("gzip finish")
+    }
+
+    #[test]
+    fn compare_bodies_matches_decoded_content_across_encodings() {
+        let c = controller();
+        c.shared.record_new(flow_with_bodies("plain", b"ask", &[], b"same payload"));
+        c.shared.record_new(flow_with_bodies(
+            "gz",
+            b"ask",
+            &[("content-encoding", "gzip")],
+            &gzipped(b"same payload"),
+        ));
+        let cmp = c.compare_bodies("plain", "gz").expect("both flows exist");
+        assert!(cmp.request_equal);
+        assert_eq!(
+            cmp.response_equal,
+            Some(true),
+            "a gzip body and an identity body with the same content compare equal"
+        );
+    }
+
+    #[test]
+    fn compare_bodies_detects_differing_sides_independently() {
+        let c = controller();
+        c.shared.record_new(flow_with_bodies("a", b"same-req", &[], b"payload-a"));
+        c.shared.record_new(flow_with_bodies("b", b"same-req", &[], b"payload-b"));
+        let cmp = c.compare_bodies("a", "b").expect("both flows exist");
+        assert!(cmp.request_equal, "identical request bodies compare equal");
+        assert_eq!(cmp.response_equal, Some(false), "differing response bodies are reported");
+    }
+
+    #[test]
+    fn compare_bodies_is_none_per_side_without_a_response_and_overall_for_unknown_ids() {
+        let c = controller();
+        c.shared.record_new(flow("pending"));
+        c.shared.record_new(completed_flow("done"));
+        let cmp = c.compare_bodies("pending", "done").expect("both flows exist");
+        assert_eq!(
+            cmp.response_equal, None,
+            "a missing response on either side yields no response verdict"
+        );
+        assert!(c.compare_bodies("pending", "ghost").is_none());
+        assert!(c.compare_bodies("ghost", "done").is_none());
     }
 
     #[test]

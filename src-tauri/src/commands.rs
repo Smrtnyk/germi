@@ -9,9 +9,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use proxy_core::{
-    AutoResponderSummary, FlowDetail, FlowEvent, FlowSummary, HistoryStep, HistoryTag, MockResult,
-    ProxySettings, Rule, RuleSearchScope, RuleSummary, Scenario, ScenarioSummary, SearchSide,
-    TestInput, TestResult,
+    AutoResponderSummary, BodyComparison, FlowDetail, FlowEvent, FlowSummary, HistoryStep,
+    HistoryTag, MockResult, ProxySettings, Rule, RuleSearchScope, RuleSummary, Scenario,
+    ScenarioSummary, SearchSide, TestInput, TestResult,
 };
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -742,14 +742,9 @@ pub async fn save_session(
     Ok(true)
 }
 
-/// Open a capture file — a `.germi` session, a HAR, or a Fiddler SAZ archive —
-/// REPLACING the current traffic. Dispatches on the file extension. Returns the
-/// number of flows loaded, or `None` if the user cancels the picker.
-#[tauri::command]
-pub async fn open_capture(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Option<usize>, String> {
+/// Show the capture-file picker (.germi / .har / .saz) and read the chosen
+/// file. Returns the bytes + lowercased extension, or `None` if cancelled.
+fn pick_capture_file(app: &tauri::AppHandle) -> Result<Option<(Vec<u8>, String)>, String> {
     let Some(picked) = app
         .dialog()
         .file()
@@ -765,11 +760,58 @@ pub async fn open_capture(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    Ok(Some((bytes, ext)))
+}
+
+/// Open a capture file — a `.germi` session, a HAR, or a Fiddler SAZ archive —
+/// REPLACING the current traffic. Dispatches on the file extension. Returns the
+/// number of flows loaded, or `None` if the user cancels the picker.
+#[tauri::command]
+pub async fn open_capture(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<usize>, String> {
+    let Some((bytes, ext)) = pick_capture_file(&app)? else {
+        return Ok(None);
+    };
     state
         .controller
         .open_capture(&bytes, &ext)
         .map(Some)
         .map_err(|e| e.to_string())
+}
+
+/// Append a capture file to the current traffic WITHOUT replacing it — loads a
+/// reference session into the compare view's right side (issue #86). Returns
+/// the appended flows' summaries, or `None` if the user cancels the picker.
+#[tauri::command]
+pub async fn append_capture(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<Vec<FlowSummary>>, String> {
+    let Some((bytes, ext)) = pick_capture_file(&app)? else {
+        return Ok(None);
+    };
+    state
+        .controller
+        .append_capture(&bytes, &ext)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// Byte-equality of two flows' decoded bodies, per side, for the compare view
+/// (issue #86) — computed store-side so large bodies never cross the IPC bridge.
+#[tauri::command]
+pub async fn compare_flow_bodies(
+    state: State<'_, AppState>,
+    id_a: String,
+    id_b: String,
+) -> Result<Option<BodyComparison>, String> {
+    // Decoding two up-to-64 MB bodies is heavy; keep it off the IPC thread.
+    let controller = state.controller.clone();
+    tauri::async_runtime::spawn_blocking(move || controller.compare_bodies(&id_a, &id_b))
+        .await
+        .map_err(|e| format!("body compare task failed: {e}"))
 }
 
 /// Export autoresponder scenarios to a `.germi-rules` file. With `scenario_id`

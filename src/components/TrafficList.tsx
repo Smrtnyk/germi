@@ -23,6 +23,7 @@ import { ContextMenu, type MenuItem } from "./ContextMenu";
 import {
   availabilityToneIcon,
   IconArrowDown,
+  IconCompare,
   IconMock,
   IconSortAsc,
   IconSortDesc,
@@ -48,6 +49,7 @@ interface Props {
   onExcludeHost: (host: string) => void;
   onCopyCurl: (id: string) => void;
   onCopyBody: (id: string) => void;
+  onCompareSelected: () => void;
   /** Viewer mode disables the autoresponder, so the "Mock" action is hidden. */
   viewer: boolean;
 }
@@ -483,6 +485,7 @@ interface MenuActions {
   onExcludeHost: (host: string) => void;
   onCopyCurl: (id: string) => void;
   onCopyBody: (id: string) => void;
+  onCompareSelected: () => void;
   onDeleteSelected: () => void;
 }
 
@@ -506,6 +509,15 @@ function menuItemsFor(
         ]
       : []),
     { label: "Add note", onClick: () => a.beginEdit(f) },
+    {
+      label: (
+        <>
+          <IconCompare />{" "}
+          {selectedCount === 2 ? "Diff the 2 selected…" : `Compare ${selectedCount} selected…`}
+        </>
+      ),
+      onClick: () => a.onCompareSelected(),
+    },
     { label: "", sep: true, onClick: () => {} },
     {
       label: "Copy URL",
@@ -765,6 +777,7 @@ export function TrafficList({
   onExcludeHost,
   onCopyCurl,
   onCopyBody,
+  onCompareSelected,
   viewer,
 }: Props) {
   const headerRef = useRef<HTMLDivElement>(null);
@@ -779,6 +792,7 @@ export function TrafficList({
     onExcludeHost,
     onCopyCurl,
     onCopyBody,
+    onCompareSelected,
     onDeleteSelected,
   });
 

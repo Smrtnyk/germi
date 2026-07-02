@@ -20,6 +20,7 @@ import { SettingsDialog, type SettingsDialogProps } from "./components/SettingsD
 import { StatusBar } from "./components/StatusBar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
+import { CompareView } from "./components/CompareView";
 import { IconPanelCollapse, IconPanelExpand, IconSearch, IconSplit } from "./components/icons";
 import { Shortcuts } from "./components/Shortcuts";
 import { ToastHost, ToastProvider } from "./toast";
@@ -86,6 +87,13 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       group: "Traffic",
       label: "Delete selected requests",
       run: s.deleteSelected,
+    },
+    {
+      id: "compare",
+      group: "Traffic",
+      label: "Compare selected requests…",
+      disabled: s.selection.selectedIds.size === 0,
+      run: s.openCompare,
     },
     {
       id: "delete-captured",
@@ -374,6 +382,7 @@ function RightPanel({
     selectedSummaries: FlowSummary[];
     onSelectOne: (id: string) => void;
     onMockMany: (ids: string[]) => void;
+    onCompare: () => void;
     onClearSelection: () => void;
     inspectorFindRef: AppStateValue["inspectorFindRef"];
   };
@@ -568,6 +577,7 @@ export function App() {
               onExcludeHost={s.excludeHost}
               onCopyCurl={s.copyFlowAsCurl}
               onCopyBody={s.copyFlowBody}
+              onCompareSelected={s.openCompare}
               viewer={s.viewer}
             />
           </div>
@@ -607,6 +617,7 @@ export function App() {
                     if (ok) s.selection.clearSelection();
                   });
                 },
+                onCompare: s.openCompare,
                 onClearSelection: s.selection.clearSelection,
                 inspectorFindRef: s.inspectorFindRef,
               }}
@@ -699,6 +710,14 @@ export function App() {
             confirmLabel="Open…"
             onConfirm={s.confirmOpenCapture}
             onCancel={() => s.setConfirmOpen(false)}
+          />
+        )}
+
+        {s.compare && (
+          <CompareView
+            initialLeft={s.compare.left}
+            initialRight={s.compare.right}
+            onClose={s.closeCompare}
           />
         )}
 
