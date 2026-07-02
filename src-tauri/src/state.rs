@@ -17,6 +17,12 @@ pub struct AppState {
     /// future remount) aborts the prior task instead of leaking it.
     pub flow_forwarder: Mutex<Option<JoinHandle<()>>>,
     pub prior_system_proxy: Mutex<Option<sysproxy::Sysproxy>>,
+    /// Hand-off mailbox for the compare window (issue #86): the main window
+    /// stores the seed flow ids here before opening/focusing the `compare`
+    /// window, which reads them back on mount and on every re-seed. Sturdier
+    /// than URL params (no length limit for a select-all seed) and it survives
+    /// a webview reload of the compare window.
+    pub compare_seed: Mutex<Option<crate::commands::CompareSeed>>,
     /// Live XDG `GlobalShortcuts` portal binding (Wayland global hotkey).
     pub portal_hotkey: crate::portal_hotkey::PortalHotkey,
     /// Launched with `--viewer`: the proxy engine is disabled (this instance

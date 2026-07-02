@@ -814,6 +814,32 @@ pub async fn compare_flow_bodies(
         .map_err(|e| format!("body compare task failed: {e}"))
 }
 
+/// Seed for the compare window (issue #86): which flow ids start on each side.
+/// A hand-off mailbox between windows, not engine state — the compare window
+/// resolves the ids to live summaries via `list_flows` when it reads it.
+#[derive(Serialize, serde::Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareSeed {
+    pub left: Vec<String>,
+    pub right: Vec<String>,
+}
+
+/// Store the compare-window seed. The main window calls this right before it
+/// opens (or re-focuses + re-seeds) the `compare` window.
+#[tauri::command]
+pub fn set_compare_seed(state: State<'_, AppState>, seed: CompareSeed) {
+    if let Ok(mut slot) = state.compare_seed.lock() {
+        *slot = Some(seed);
+    }
+}
+
+/// Read the compare-window seed (kept, not taken, so an F5 of the compare
+/// window restores its starting point).
+#[tauri::command]
+pub fn get_compare_seed(state: State<'_, AppState>) -> Option<CompareSeed> {
+    state.compare_seed.lock().ok().and_then(|slot| slot.clone())
+}
+
 /// Export autoresponder scenarios to a `.germi-rules` file. With `scenario_id`
 /// only that scenario is written; otherwise the whole config. Returns false if
 /// the user cancels.

@@ -14,6 +14,7 @@ import { compact, difference, intersection, isEqual } from "es-toolkit";
 
 import { announce } from "./announce";
 import { api, subscribeFlows } from "./ipc";
+import { openOrFocusCompareWindow } from "./compareWindow";
 import {
   currentWindowLabel,
   emitRulesChanged,
@@ -1552,17 +1553,12 @@ function useViewerMode(notify: Notify, setError: SetError) {
   return { viewer, setViewer, launchViewer };
 }
 
-/** The compare view's seed (issue #86): a snapshot of the selection taken when
- *  it opens — null while closed. Exactly two selected rows prefill both sides
- *  (the pair is one Enter away from a diff); otherwise everything selected
- *  lands on the left, to be paired against moved rows or a loaded file. */
-interface CompareSeed {
-  left: FlowSummary[];
-  right: FlowSummary[];
-}
-
+/** Open (or focus + re-seed) the compare window (issue #86) from the current
+ *  selection: exactly two selected rows prefill both sides — one Enter from a
+ *  diff — otherwise everything selected lands on the left. The seed travels
+ *  through the backend mailbox (`set_compare_seed`), so a select-all seed
+ *  never hits URL-length limits and survives a compare-window reload. */
 function useCompare(selectedSummaries: FlowSummary[], notify: Notify) {
-  const [compare, setCompare] = useState<CompareSeed | null>(null);
   // Ref-read so openCompare snapshots the selection at call time, not at the
   // render that created the callback.
   const selectedRef = useRef(selectedSummaries);
@@ -1574,14 +1570,16 @@ function useCompare(selectedSummaries: FlowSummary[], notify: Notify) {
       notify("info", "Select one or more requests to compare first");
       return;
     }
-    setCompare(
-      selected.length === 2
-        ? { left: [selected[0]], right: [selected[1]] }
-        : { left: selected, right: [] },
-    );
+    const ids = selected.map((f) => f.id);
+    const seed =
+      selected.length === 2 ? { left: [ids[0]], right: [ids[1]] } : { left: ids, right: [] };
+    void api
+      .setCompareSeed(seed)
+      .then(openOrFocusCompareWindow)
+      .catch((e) => notify("error", String(e)));
   }
 
-  return { compare, openCompare, closeCompare: () => setCompare(null) };
+  return { openCompare };
 }
 
 export function useAppState() {
@@ -1931,9 +1929,7 @@ export function useAppState() {
     copyFlowAsCurl,
     copyFlowBody,
     copySelectedUrl,
-    compare: compare.compare,
     openCompare: compare.openCompare,
-    closeCompare: compare.closeCompare,
     focusMockBody,
     clearTraffic,
     deleteSelected,

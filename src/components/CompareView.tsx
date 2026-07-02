@@ -1,10 +1,9 @@
-import { useMemo, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../ipc";
 import { flowUrl } from "../flowUrl";
 import { urlSimilarity } from "../urlSimilarity";
 import { useToast, type Notify } from "../toast";
-import { useModalDialog } from "./useModalDialog";
 import { CompareDiff } from "./CompareDiff";
 import { ComparePane } from "./ComparePane";
 import {
@@ -121,17 +120,20 @@ interface CompareKeyActions {
   canDiff: boolean;
   openDiff: () => void;
   closeDiff: () => void;
+  close: () => void;
   moveSelectedRight: () => void;
   moveSelectedLeft: () => void;
   stepActive: (dir: 1 | -1) => void;
 }
 
-function handleCompareKeys(e: KeyboardEvent<HTMLDialogElement>, ctx: CompareKeyActions): void {
+/** Esc steps back from the diff, then closes the window — the issue's explicit
+ *  ask — with the picker's list/move/diff keys handled window-wide (the compare
+ *  window has no text inputs to collide with). */
+function handleCompareKeys(e: KeyboardEvent, ctx: CompareKeyActions): void {
   if (e.key === "Escape") {
-    if (ctx.diffOpen) {
-      e.preventDefault();
-      ctx.closeDiff();
-    }
+    e.preventDefault();
+    if (ctx.diffOpen) ctx.closeDiff();
+    else ctx.close();
     return;
   }
   if (ctx.diffOpen) return;
@@ -153,6 +155,16 @@ function handleCompareKeys(e: KeyboardEvent<HTMLDialogElement>, ctx: CompareKeyA
     e.preventDefault();
     run();
   }
+}
+
+function useCompareKeys(actions: CompareKeyActions): void {
+  const ref = useRef(actions);
+  ref.current = actions;
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => handleCompareKeys(e, ref.current);
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 }
 
 function CompareHead({
@@ -230,15 +242,16 @@ export interface CompareViewProps {
 }
 
 /**
- * The compare window (issue #86): pick a request on each side — the opposite
- * side shows how closely each row's URL matches (structural, not textual) —
- * then diff the two as raw HTTP. The right side is fed by moving rows across
- * or by loading a HAR / SAZ / .germi file (appended to the session, so the
- * loaded requests also appear in the traffic list as imported rows).
+ * Content of the compare window (issue #86), a real non-modal OS window so the
+ * traffic list stays visible while comparing: pick a request on each side —
+ * the opposite side shows how closely each row's URL matches (structural, not
+ * textual) — then diff the two as raw HTTP. The right side is fed by moving
+ * rows across or by loading a HAR / SAZ / .germi file (appended to the
+ * session, so the loaded requests also appear in the traffic list as imported
+ * rows).
  */
 export function CompareView({ initialLeft, initialRight, onClose }: CompareViewProps) {
   const notify = useToast();
-  const ref = useModalDialog(onClose);
   const panes = usePanes(initialLeft, initialRight);
   const file = useCompareFile(panes.appendRight, notify);
   const [activeSide, setActiveSide] = useState<Side>("left");
@@ -263,29 +276,25 @@ export function CompareView({ initialLeft, initialRight, onClose }: CompareViewP
     if (next !== null) select(activeSide, next);
   }
 
-  const keyActions: CompareKeyActions = {
+  useCompareKeys({
     diffOpen,
     canDiff,
     openDiff: () => setDiffOpen(true),
     closeDiff: () => setDiffOpen(false),
+    close: onClose,
     moveSelectedRight: () => panes.moveRight(left.selected),
     moveSelectedLeft: () => panes.moveLeft(right.selected),
     stepActive,
-  };
+  });
 
   return (
-    <dialog
-      ref={ref}
-      className="maximize-dialog compare-dialog"
-      onKeyDown={(e) => handleCompareKeys(e, keyActions)}
-      aria-label="Compare requests"
-    >
+    <div className="compare-window">
       <CompareHead
         diffOpen={diffOpen}
         canDiff={canDiff}
         onBack={() => setDiffOpen(false)}
         onDiff={() => setDiffOpen(true)}
-        onClose={() => ref.current?.close()}
+        onClose={onClose}
       />
 
       {diffOpen && leftFlow && rightFlow ? (
@@ -354,6 +363,6 @@ export function CompareView({ initialLeft, initialRight, onClose }: CompareViewP
             : null
         }
       />
-    </dialog>
+    </div>
   );
 }
