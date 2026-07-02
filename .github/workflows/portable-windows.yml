@@ -2,15 +2,18 @@ name: portable-windows
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   portable-exe:
@@ -33,9 +36,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # PR runs restore the main-branch cache but don't save their own, so
+      # per-PR Windows target dirs don't crowd the shared 10 GB cache quota.
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: "."
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
@@ -58,13 +64,26 @@ jobs:
           path: Germi-portable-*.exe
           if-no-files-found: error
 
-      - name: Attach to release (tags)
-        if: github.ref_type == 'tag'
+  # Tag pushes only: attach the exe to the GitHub release (as a draft if the
+  # release doesn't exist yet). Split into its own job so the build job never
+  # carries write permissions on PR runs.
+  release:
+    if: github.ref_type == 'tag'
+    needs: portable-exe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: germi-portable-windows-x64
+
+      - name: Attach to release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          $exe = (Get-Item Germi-portable-*.exe).Name
-          gh release upload "$env:GITHUB_REF_NAME" $exe --clobber
-          if ($LASTEXITCODE -ne 0) {
-            gh release create "$env:GITHUB_REF_NAME" --draft --title "$env:GITHUB_REF_NAME" --generate-notes $exe
-          }
+          exe=$(ls Germi-portable-*.exe)
+          gh release upload "$GITHUB_REF_NAME" "$exe" --clobber ||
+            gh release create "$GITHUB_REF_NAME" --draft --title "$GITHUB_REF_NAME" --generate-notes "$exe"
