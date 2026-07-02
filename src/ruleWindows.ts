@@ -2,6 +2,8 @@ import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 
+import { openOrFocusWindow } from "./windows";
+
 /**
  * Detached rule-editor windows (issue #72). Double-clicking a rule opens its
  * details in a real, non-modal OS window (`rule-<id>`), and several different
@@ -96,27 +98,17 @@ export async function openOrFocusRuleWindow(
   scenarioId: string,
   title: string,
 ): Promise<void> {
-  const label = ruleWindowLabel(ruleId);
-  const existing = await WebviewWindow.getByLabel(label);
-  if (existing) {
-    await existing.setFocus();
-    return;
-  }
   const url = `index.html?rule=${encodeURIComponent(ruleId)}&scenario=${encodeURIComponent(
     scenarioId,
   )}`;
   const size = loadRuleWindowSize();
-  const win = new WebviewWindow(label, {
+  await openOrFocusWindow(ruleWindowLabel(ruleId), {
     url,
     title: title || "Rule",
     width: size.width,
     height: size.height,
     minWidth: MIN_SIZE.width,
     minHeight: MIN_SIZE.height,
-  });
-  await new Promise<void>((resolve, reject) => {
-    void win.once("tauri://created", () => resolve());
-    void win.once("tauri://error", (e) => reject(new Error(String(e.payload))));
   });
 }
 

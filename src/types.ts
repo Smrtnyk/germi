@@ -95,6 +95,14 @@ export interface BodyComparison {
   responseEqual: boolean | null;
 }
 
+/** Seed for the compare window (mirrors `CompareSeed` in `commands.rs`): the
+ *  flow ids that start on each side, handed off through the backend mailbox
+ *  when the window opens or is re-seeded. */
+export interface CompareSeed {
+  left: string[];
+  right: string[];
+}
+
 export type FlowEvent =
   | { type: "new"; summary: FlowSummary }
   | { type: "completed"; summary: FlowSummary }

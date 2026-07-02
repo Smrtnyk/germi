@@ -20,7 +20,6 @@ import { SettingsDialog, type SettingsDialogProps } from "./components/SettingsD
 import { StatusBar } from "./components/StatusBar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
-import { CompareView } from "./components/CompareView";
 import { IconPanelCollapse, IconPanelExpand, IconSearch, IconSplit } from "./components/icons";
 import { Shortcuts } from "./components/Shortcuts";
 import { ToastHost, ToastProvider } from "./toast";
@@ -710,14 +709,6 @@ export function App() {
             confirmLabel="Open…"
             onConfirm={s.confirmOpenCapture}
             onCancel={() => s.setConfirmOpen(false)}
-          />
-        )}
-
-        {s.compare && (
-          <CompareView
-            initialLeft={s.compare.left}
-            initialRight={s.compare.right}
-            onClose={s.closeCompare}
           />
         )}
 

@@ -55,6 +55,7 @@ fn init_app_state(app: &mut tauri::App, viewer: bool) -> Result<(), Box<dyn std:
         ca_dir,
         flow_forwarder: std::sync::Mutex::new(None),
         prior_system_proxy: std::sync::Mutex::new(None),
+        compare_seed: std::sync::Mutex::new(None),
         portal_hotkey: portal_hotkey::PortalHotkey::default(),
         viewer,
     });
@@ -124,6 +125,8 @@ pub fn run() {
             commands::open_capture,
             commands::append_capture,
             commands::compare_flow_bodies,
+            commands::set_compare_seed,
+            commands::get_compare_seed,
             commands::export_rules,
             commands::import_rules,
             commands::history_undo,

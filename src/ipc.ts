@@ -7,6 +7,7 @@ import type {
   BoundAddr,
   BulkMockEvent,
   CaInfo,
+  CompareSeed,
   FlowDetail,
   FlowEvent,
   FlowSummary,
@@ -93,6 +94,8 @@ export const api = {
   appendCapture: () => invoke<FlowSummary[] | null>("append_capture"),
   compareFlowBodies: (idA: string, idB: string) =>
     invoke<BodyComparison | null>("compare_flow_bodies", { idA, idB }),
+  setCompareSeed: (seed: CompareSeed) => invoke<void>("set_compare_seed", { seed }),
+  getCompareSeed: () => invoke<CompareSeed | null>("get_compare_seed"),
   exportRules: (scenarioId: string | null) => invoke<boolean>("export_rules", { scenarioId }),
   importRules: (replace: boolean, historyTag: HistoryTag) =>
     invoke<number>("import_rules", { replace, historyTag }),

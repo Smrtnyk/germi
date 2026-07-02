@@ -3031,7 +3031,14 @@ kbd {
 .rule-item:active {
   filter: brightness(0.9);
 }
-/* ---- compare / diff view (issue #86) ---- */
+/* ---- compare / diff window (issue #86) ---- */
+.compare-window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 0;
+  background: var(--bg-1);
+}
 .compare-head {
   display: flex;
   align-items: center;
