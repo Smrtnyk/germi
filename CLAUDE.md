@@ -192,14 +192,18 @@ in `main.tsx` → `CompareWindow.tsx`; the shared open-or-focus helper lives in
 (`set_compare_seed`/`get_compare_seed` on `AppState` — no URL-length limits,
 survives webview reloads; re-invoking Compare re-seeds the open window via the
 `germi://compare-seed-changed` event). Two-pane picker (`CompareView.tsx`;
-exactly 2 selected prefills both sides) with per-row **URL-match %** badges
-(`urlSimilarity.ts` — structural: host labels / path-segment LCS / query-param
-overlap), move-across via →/← or **Load file…** (`append_capture` — appends a
-HAR/SAZ/.germi to the store WITHOUT clearing, unlike `open_capture`), then a
-git-style raw-HTTP diff (`diff.ts` LCS with folded context, `DiffView.tsx`).
-Bodies are compared decoded in the engine (`compare_bodies` /
-`compare_flow_bodies`) so payloads never cross IPC; hunks render only on an
-explicit toggle and use the display-capped body.
+exactly 2 selected prefills both sides): each pane is a mini traffic list —
+token filter (reuses `parseFilter`), kind chips, sortable columns, shift/ctrl
+multi-select (`comparePane.ts` holds the pure list/selection/move pipeline) —
+with per-row **URL-match %** badges (`urlSimilarity.ts` — structural: host
+labels / path-segment LCS / query-param overlap; ≥80% rows get a per-side
+full-row tint). Move the selection across via →/← or **Load file…**
+(`append_capture` — appends a HAR/SAZ/.germi to the store WITHOUT clearing,
+unlike `open_capture`), then a raw-HTTP diff (`diff.ts` LCS with folded
+context, `DiffView.tsx`) — **side-by-side by default** (`splitRows` pairs
+del/add runs; toggle to unified, persisted). Bodies are compared decoded in
+the engine (`compare_bodies` / `compare_flow_bodies`) so payloads never cross
+IPC; hunks render only on an explicit toggle and use the display-capped body.
 
 Deferred (not started): repeater (edit & resend), breakpoints, WebSocket frame
 editing, HTTP/2, upstream/parent-proxy chaining, SQLite-backed persistent store.

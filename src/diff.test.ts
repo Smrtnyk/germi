@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { diffLines, diffStats, foldContext, lcsLength, type DiffLine } from "./diff";
+import {
+  diffLines,
+  diffStats,
+  foldContext,
+  foldSplit,
+  lcsLength,
+  splitRows,
+  type DiffLine,
+} from "./diff";
 
 function shape(lines: DiffLine[]): string[] {
   return lines.map((l) => `${l.kind === "same" ? " " : l.kind === "del" ? "-" : "+"}${l.text}`);
@@ -79,6 +87,49 @@ describe("foldContext", () => {
   it("folds an entirely-unchanged diff into a single fold row", () => {
     const rows = foldContext(diffLines(body(30), body(30)), 3);
     expect(rows).toEqual([expect.objectContaining({ kind: "fold", count: 30 })]);
+  });
+});
+
+describe("splitRows", () => {
+  it("pairs an unchanged line with itself", () => {
+    const pairs = splitRows(diffLines("a", "a"));
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].left?.text).toBe("a");
+    expect(pairs[0].right?.text).toBe("a");
+  });
+
+  it("aligns a deletion run with the addition run that follows it", () => {
+    const pairs = splitRows(diffLines("keep\nold\ntail", "keep\nnew\ntail"));
+    expect(pairs.map((p) => [p.left?.text ?? null, p.right?.text ?? null])).toEqual([
+      ["keep", "keep"],
+      ["old", "new"],
+      ["tail", "tail"],
+    ]);
+  });
+
+  it("pads the shorter side of an unbalanced change with empty cells", () => {
+    const pairs = splitRows(diffLines("x", "x\nadded1\nadded2"));
+    expect(pairs.map((p) => [p.left?.text ?? null, p.right?.text ?? null])).toEqual([
+      ["x", "x"],
+      [null, "added1"],
+      [null, "added2"],
+    ]);
+  });
+
+  it("carries per-side line numbers into the cells", () => {
+    const pairs = splitRows(diffLines("a\nb", "a\nc"));
+    const changed = pairs[1];
+    expect(changed.left).toMatchObject({ left: 2, right: null });
+    expect(changed.right).toMatchObject({ left: null, right: 2 });
+  });
+});
+
+describe("foldSplit", () => {
+  it("folds long unchanged runs of pairs, keeping context around changes", () => {
+    const body = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
+    const rows = foldSplit(splitRows(diffLines(`changed\n${body}`, `CHANGED\n${body}`)), 3);
+    expect(rows[0]).toMatchObject({ kind: "pair" });
+    expect(rows[rows.length - 1]).toMatchObject({ kind: "fold", count: 17 });
   });
 });
 

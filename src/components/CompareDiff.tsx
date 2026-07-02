@@ -5,12 +5,50 @@ import { headersToText } from "../curl";
 import { requestLine, statusLine } from "../rawHttp";
 import { flowUrl } from "../flowUrl";
 import { statusCls } from "../filter";
-import { BodyDiffSection, DiffBlock } from "./DiffView";
+import { isTypingTarget } from "../hotkey";
+import { BodyDiffSection, DiffBlock, type DiffMode } from "./DiffView";
 import type { BodyComparison, FlowDetail, FlowSummary, MessageDetail } from "../types";
 
-function isTypingTarget(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null;
-  return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+const MODE_KEY = "germi.compareDiffMode";
+
+function loadDiffMode(): DiffMode {
+  try {
+    return localStorage.getItem(MODE_KEY) === "unified" ? "unified" : "split";
+  } catch {
+    return "split";
+  }
+}
+
+function useDiffMode() {
+  const [mode, setMode] = useState<DiffMode>(loadDiffMode);
+  function switchMode(next: DiffMode) {
+    setMode(next);
+    try {
+      localStorage.setItem(MODE_KEY, next);
+    } catch {
+      /* ignore quota / privacy-mode errors */
+    }
+  }
+  return { mode, switchMode };
+}
+
+function DiffModeSwitch({
+  mode,
+  onSwitch,
+}: {
+  mode: DiffMode;
+  onSwitch: (mode: DiffMode) => void;
+}) {
+  return (
+    <div className="seg diff-mode">
+      <button className={mode === "split" ? "on" : ""} onClick={() => onSwitch("split")}>
+        Side by side
+      </button>
+      <button className={mode === "unified" ? "on" : ""} onClick={() => onSwitch("unified")}>
+        Unified
+      </button>
+    </div>
+  );
 }
 
 function requestHead(d: FlowDetail): string {
@@ -97,6 +135,7 @@ export interface CompareDiffProps {
  */
 export function CompareDiff({ left, right }: CompareDiffProps) {
   const { pair, error } = usePair(left.id, right.id);
+  const { mode, switchMode } = useDiffMode();
   const [showReqBody, setShowReqBody] = useState(false);
   const [showRespBody, setShowRespBody] = useState(false);
 
@@ -119,11 +158,15 @@ export function CompareDiff({ left, right }: CompareDiffProps) {
   const { a, b, cmp } = pair;
   return (
     <div className="diff-screen">
-      <div className="diff-sides">
-        <SideChip tag="A" flow={left} />
-        <SideChip tag="B" flow={right} />
+      <div className="diff-top">
+        <div className="diff-sides">
+          <SideChip tag="A" flow={left} />
+          <SideChip tag="B" flow={right} />
+        </div>
+        <div className="spacer" />
+        <DiffModeSwitch mode={mode} onSwitch={switchMode} />
       </div>
-      <DiffBlock title="Request" a={requestHead(a)} b={requestHead(b)} />
+      <DiffBlock title="Request" a={requestHead(a)} b={requestHead(b)} mode={mode} />
       <BodyDiffSection
         label="Request body"
         a={a.request}
@@ -131,8 +174,9 @@ export function CompareDiff({ left, right }: CompareDiffProps) {
         equal={sideEquality(cmp?.requestEqual, a.request, b.request)}
         shown={showReqBody}
         onToggle={() => setShowReqBody((v) => !v)}
+        mode={mode}
       />
-      <DiffBlock title="Response" a={responseHead(a)} b={responseHead(b)} />
+      <DiffBlock title="Response" a={responseHead(a)} b={responseHead(b)} mode={mode} />
       <BodyDiffSection
         label="Response body"
         a={a.response}
@@ -140,6 +184,7 @@ export function CompareDiff({ left, right }: CompareDiffProps) {
         equal={sideEquality(cmp?.responseEqual, a.response, b.response)}
         shown={showRespBody}
         onToggle={() => setShowRespBody((v) => !v)}
+        mode={mode}
       />
     </div>
   );

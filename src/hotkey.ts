@@ -24,3 +24,10 @@ export function accelFromKeyboardEvent(e: ModifierKeys): string | null {
 export function prettyAccel(accel: string): string {
   return accel.replace(/CmdOrCtrl/g, "Ctrl").replace(/Super/g, "Win");
 }
+
+/** Whether a key event originates from a text-entry element, so window-level
+ *  key handling can stay out of the way of typing. */
+export function isTypingTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+}

@@ -24,6 +24,18 @@ describe("DiffBlock", () => {
     );
     await expect.element(screen.getByText("identical")).toBeVisible();
   });
+
+  it("renders aligned side-by-side cells in split mode", async () => {
+    const screen = await render(
+      <DiffBlock title="Request" a={"same\nold"} b={"same\nnew"} mode="split" />,
+    );
+    await expect.element(screen.getByText("old")).toHaveClass("diff-text");
+    const oldCell = screen.getByText("old").element().closest(".diff-cell");
+    const newCell = screen.getByText("new").element().closest(".diff-cell");
+    expect(oldCell?.classList.contains("del")).toBe(true);
+    expect(newCell?.classList.contains("add")).toBe(true);
+    expect(oldCell?.parentElement).toBe(newCell?.parentElement);
+  });
 });
 
 describe("DiffRows", () => {
