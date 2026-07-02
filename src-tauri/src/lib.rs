@@ -122,6 +122,8 @@ pub fn run() {
             commands::search_rules,
             commands::save_session,
             commands::open_capture,
+            commands::append_capture,
+            commands::compare_flow_bodies,
             commands::export_rules,
             commands::import_rules,
             commands::history_undo,

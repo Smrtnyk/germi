@@ -1,4 +1,30 @@
-import type { FlowDetail, MessageDetail } from "./types";
+import type { FlowDetail, FlowSummary, MessageDetail } from "./types";
+
+/** Build a `FlowSummary` for tests, overriding only the fields that matter. */
+export function summary(overrides: Partial<FlowSummary> = {}): FlowSummary {
+  return {
+    id: "1",
+    seq: 1,
+    method: "GET",
+    host: "example.com",
+    path: "/",
+    scheme: "https",
+    status: 200,
+    mime: null,
+    kind: "doc",
+    reqSize: 0,
+    respSize: 0,
+    durationMs: null,
+    ttfbMs: null,
+    matchedRule: null,
+    timestampMs: 0,
+    comment: null,
+    availability: null,
+    imported: false,
+    extra: {},
+    ...overrides,
+  };
+}
 
 /** Build a `MessageDetail` for tests, overriding only the fields that matter. */
 export function message(overrides: Partial<MessageDetail> = {}): MessageDetail {

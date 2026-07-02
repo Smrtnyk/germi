@@ -1,0 +1,91 @@
+import { describe, expect, it } from "vitest";
+import { diffLines, diffStats, foldContext, lcsLength, type DiffLine } from "./diff";
+
+function shape(lines: DiffLine[]): string[] {
+  return lines.map((l) => `${l.kind === "same" ? " " : l.kind === "del" ? "-" : "+"}${l.text}`);
+}
+
+describe("diffLines", () => {
+  it("marks identical inputs as all-same with paired line numbers", () => {
+    const lines = diffLines("a\nb", "a\nb");
+    expect(shape(lines)).toEqual([" a", " b"]);
+    expect(lines[1]).toMatchObject({ left: 2, right: 2 });
+  });
+
+  it("diffs empty against empty to nothing", () => {
+    expect(diffLines("", "")).toEqual([]);
+  });
+
+  it("treats a fully-added and fully-removed text as adds/dels", () => {
+    expect(shape(diffLines("", "x\ny"))).toEqual(["+x", "+y"]);
+    expect(shape(diffLines("x\ny", ""))).toEqual(["-x", "-y"]);
+  });
+
+  it("puts the deletion before the addition in a changed block", () => {
+    expect(shape(diffLines("keep\nold\ntail", "keep\nnew\ntail"))).toEqual([
+      " keep",
+      "-old",
+      "+new",
+      " tail",
+    ]);
+  });
+
+  it("aligns around an inserted line instead of cascading changes", () => {
+    expect(shape(diffLines("Host: a\nAccept: */*", "Host: a\nX-New: 1\nAccept: */*"))).toEqual([
+      " Host: a",
+      "+X-New: 1",
+      " Accept: */*",
+    ]);
+  });
+
+  it("numbers each side independently", () => {
+    const lines = diffLines("a\nb", "a\nc\nb");
+    expect(lines.find((l) => l.kind === "add")).toMatchObject({ left: null, right: 2 });
+    expect(lines[lines.length - 1]).toMatchObject({ left: 2, right: 3 });
+  });
+
+  it("survives inputs too large for LCS alignment via the plain fallback", () => {
+    const a = Array.from({ length: 2100 }, (_, i) => `left ${i}`).join("\n");
+    const b = Array.from({ length: 2100 }, (_, i) => `right ${i}`).join("\n");
+    const stats = diffStats(diffLines(a, b));
+    expect(stats).toEqual({ added: 2100, removed: 2100 });
+  });
+});
+
+describe("diffStats", () => {
+  it("counts added and removed lines", () => {
+    expect(diffStats(diffLines("a\nb\nc", "a\nx\ny\nc"))).toEqual({ added: 2, removed: 1 });
+  });
+});
+
+describe("foldContext", () => {
+  const body = (n: number) => Array.from({ length: n }, (_, i) => `line ${i}`).join("\n");
+
+  it("collapses a long unchanged run into a fold, keeping context around changes", () => {
+    const left = `changed\n${body(20)}`;
+    const right = `CHANGED\n${body(20)}`;
+    const rows = foldContext(diffLines(left, right), 3);
+    expect(rows.slice(0, 2).map((r) => r.kind)).toEqual(["del", "add"]);
+    const fold = rows[rows.length - 1];
+    expect(fold).toMatchObject({ kind: "fold", count: 17 });
+    expect(rows).toHaveLength(2 + 3 + 1);
+  });
+
+  it("keeps short unchanged runs inline instead of folding them", () => {
+    const rows = foldContext(diffLines(`x\n${body(4)}\ny`, `X\n${body(4)}\nY`), 1);
+    expect(rows.every((r) => r.kind !== "fold")).toBe(true);
+  });
+
+  it("folds an entirely-unchanged diff into a single fold row", () => {
+    const rows = foldContext(diffLines(body(30), body(30)), 3);
+    expect(rows).toEqual([expect.objectContaining({ kind: "fold", count: 30 })]);
+  });
+});
+
+describe("lcsLength", () => {
+  it("measures the longest common subsequence of token lists", () => {
+    expect(lcsLength(["api", "users"], ["api", "v2", "users"])).toBe(2);
+    expect(lcsLength([], ["a"])).toBe(0);
+    expect(lcsLength(["a", "b"], ["a", "b"])).toBe(2);
+  });
+});

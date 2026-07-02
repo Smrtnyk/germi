@@ -3,6 +3,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import type {
   AutoResponderSummary,
   AvailabilityProgress,
+  BodyComparison,
   BoundAddr,
   BulkMockEvent,
   CaInfo,
@@ -89,6 +90,9 @@ export const api = {
   fileExists: (path: string) => invoke<boolean>("file_exists", { path }),
   saveSession: () => invoke<boolean>("save_session"),
   openCapture: () => invoke<number | null>("open_capture"),
+  appendCapture: () => invoke<FlowSummary[] | null>("append_capture"),
+  compareFlowBodies: (idA: string, idB: string) =>
+    invoke<BodyComparison | null>("compare_flow_bodies", { idA, idB }),
   exportRules: (scenarioId: string | null) => invoke<boolean>("export_rules", { scenarioId }),
   importRules: (replace: boolean, historyTag: HistoryTag) =>
     invoke<number>("import_rules", { replace, historyTag }),

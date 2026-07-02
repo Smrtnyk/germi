@@ -10,6 +10,8 @@ import {
 } from "react-icons/fc";
 import {
   LuArrowDown,
+  LuArrowLeft,
+  LuArrowRight,
   LuArrowUp,
   LuBan,
   LuCheck,
@@ -24,6 +26,8 @@ import {
   LuCopy,
   LuExternalLink,
   LuEye,
+  LuFileDiff,
+  LuGitCompareArrows,
   LuGripVertical,
   LuInfo,
   LuLogIn,
@@ -73,6 +77,11 @@ export const IconPanelCollapse = make(LuPanelRightClose);
 export const IconPanelExpand = make(LuPanelRightOpen);
 export const IconGrip = make(LuGripVertical, { size: 14 });
 export const IconPower = make(LuPower, { size: 14 });
+
+export const IconCompare = make(LuGitCompareArrows, { color: "var(--s3)", size: 14 });
+export const IconDiff = make(LuFileDiff, { size: 14 });
+export const IconArrowLeft = make(LuArrowLeft, { size: 14 });
+export const IconArrowRight = make(LuArrowRight, { size: 14 });
 
 export const IconSortAsc = make(LuChevronUp, { size: 14 });
 export const IconSortDesc = make(LuChevronDown, { size: 14 });

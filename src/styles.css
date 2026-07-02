@@ -30,6 +30,8 @@
   --chip-on-bg: #112e2e;
   --banner-warn-bg: #2a2410;
   --banner-warn-line: #5b4a1e;
+  --diff-add-bg: rgba(52, 211, 153, 0.09);
+  --diff-del-bg: rgba(248, 113, 113, 0.1);
 
   /* radius scale */
   --radius-xs: 4px;
@@ -3029,6 +3031,321 @@ kbd {
 .rule-item:active {
   filter: brightness(0.9);
 }
+/* ---- compare / diff view (issue #86) ---- */
+.compare-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--line);
+}
+.compare-title {
+  font-weight: 600;
+  font-size: var(--fs-sm);
+}
+.compare-subtitle {
+  font-size: var(--fs-sm);
+}
+.compare-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px minmax(0, 1fr);
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+.compare-gutter {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-4);
+}
+.compare-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+  overflow: hidden;
+}
+.compare-pane.active {
+  border-color: var(--accent-dim);
+}
+.compare-pane-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-1);
+}
+.compare-pane-title {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.compare-pane.active .compare-pane-title {
+  color: var(--accent);
+}
+.compare-count {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+.compare-empty {
+  display: grid;
+  place-items: center;
+  flex: 1;
+  padding: var(--space-8);
+  text-align: center;
+  font-size: var(--fs-sm);
+}
+.compare-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+}
+.compare-canvas {
+  position: relative;
+  width: 100%;
+}
+.compare-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 var(--space-6);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  border-bottom: 1px solid #1a212a;
+  cursor: pointer;
+}
+.compare-row:hover {
+  background: var(--bg-1);
+}
+.compare-row:active {
+  filter: brightness(0.9);
+}
+.compare-row.selected {
+  background: var(--sel-bg);
+}
+.compare-row .badge {
+  flex: none;
+}
+.compare-host {
+  flex: none;
+  max-width: 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.compare-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.compare-match {
+  flex: none;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+}
+.compare-match.high {
+  color: var(--s2);
+  background: var(--chip-on-bg);
+}
+.compare-match.mid {
+  color: var(--s4);
+}
+.compare-match.low {
+  color: var(--muted);
+}
+.compare-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-6);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-xs);
+}
+.compare-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  color: var(--text);
+}
+.compare-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-6);
+}
+
+/* ---- compare: the diff screen ---- */
+.diff-status {
+  padding: var(--space-8);
+  text-align: center;
+}
+.diff-screen {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+.diff-sides {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.diff-side-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+.diff-side-tag {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  font-weight: 700;
+  color: var(--accent);
+}
+.diff-side-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diff-section {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--bg);
+}
+.diff-section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line);
+}
+.diff-section-title,
+.diff-body-label {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.diff-stats {
+  display: inline-flex;
+  gap: var(--space-3);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+}
+.diff-added {
+  color: var(--s2);
+}
+.diff-removed {
+  color: var(--s5);
+}
+.diff-rows {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
+.diff-line {
+  display: flex;
+  line-height: 1.5;
+}
+.diff-line.del {
+  background: var(--diff-del-bg);
+}
+.diff-line.add {
+  background: var(--diff-add-bg);
+}
+.diff-ln {
+  flex: none;
+  width: 40px;
+  padding-right: var(--space-3);
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+}
+.diff-sign {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  user-select: none;
+}
+.diff-line.del .diff-sign {
+  color: var(--s5);
+  font-weight: 700;
+}
+.diff-line.add .diff-sign {
+  color: var(--s2);
+  font-weight: 700;
+}
+.diff-text {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.diff-fold {
+  display: block;
+  width: 100%;
+  border: none;
+  background: var(--bg-1);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  padding: var(--space-1) 0;
+  cursor: pointer;
+  text-align: center;
+}
+.diff-fold:hover {
+  color: var(--text);
+  background: var(--bg-2);
+}
+.diff-tail {
+  padding: var(--space-2) var(--space-6);
+  font-size: var(--fs-xs);
+}
+.diff-body {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+  flex-wrap: wrap;
+}
+.diff-verdict {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
+.diff-verdict.changed {
+  color: var(--s4);
+}
+.diff-body-hunks {
+  flex-basis: 100%;
+  border-top: 1px solid var(--line);
+  margin-top: var(--space-2);
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --dur-fast: 0s;

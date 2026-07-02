@@ -185,5 +185,15 @@ left-bar + optional **Origin** column, filterable with `is:imported`/`is:capture
 with a **Delete captured** action (`remove_captured_flows`) that prunes live
 traffic while keeping the imported reference (issue #49).
 
+**Compare & diff** (issue #86): select rows → Compare opens a full-screen
+two-pane picker (`CompareView.tsx`; exactly 2 selected prefills both sides) with
+per-row **URL-match %** badges (`urlSimilarity.ts` — structural: host labels /
+path-segment LCS / query-param overlap), move-across via →/← or **Load file…**
+(`append_capture` — appends a HAR/SAZ/.germi to the store WITHOUT clearing,
+unlike `open_capture`), then a git-style raw-HTTP diff (`diff.ts` LCS with
+folded context, `DiffView.tsx`). Bodies are compared decoded in the engine
+(`compare_bodies` / `compare_flow_bodies`) so payloads never cross IPC; hunks
+render only on an explicit toggle and use the display-capped body.
+
 Deferred (not started): repeater (edit & resend), breakpoints, WebSocket frame
 editing, HTTP/2, upstream/parent-proxy chaining, SQLite-backed persistent store.

@@ -105,6 +105,18 @@ pub fn decode_body(headers: &[(String, String)], body: &[u8]) -> Option<(Vec<u8>
     Some((data, truncated))
 }
 
+/// A message body in its decoded form when a `Content-Encoding` chain decodes,
+/// borrowing the raw bytes otherwise (identity bodies allocate nothing).
+pub(crate) fn decoded_or_raw<'m>(
+    headers: &[(String, String)],
+    body: &'m [u8],
+) -> std::borrow::Cow<'m, [u8]> {
+    match decode_body(headers, body) {
+        Some((decoded, _truncated)) => std::borrow::Cow::Owned(decoded),
+        None => std::borrow::Cow::Borrowed(body),
+    }
+}
+
 /// Decompress `body` per `encoding` (gzip / deflate / br). Returns `None` if the
 /// encoding is unknown or decompression fails (e.g. the body isn't actually
 /// compressed) — callers fall back to the raw bytes. Output is truncated to
