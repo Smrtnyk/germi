@@ -3068,8 +3068,22 @@ kbd {
 .compare-gutter {
   display: flex;
   flex-direction: column;
-  justify-content: center;
   gap: var(--space-4);
+}
+.compare-gutter-filters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.compare-gutter-filters .btn.on {
+  color: var(--accent);
+  background: var(--bg-2);
+}
+.compare-gutter-move {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: auto 0;
 }
 .compare-pane {
   display: flex;

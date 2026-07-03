@@ -197,7 +197,12 @@ token filter (reuses `parseFilter`), kind chips, sortable columns, shift/ctrl
 multi-select (`comparePane.ts` holds the pure list/selection/move pipeline) —
 with per-row **URL-match %** badges (`urlSimilarity.ts` — structural: host
 labels / path-segment LCS / query-param overlap; ≥80% rows get a per-side
-full-row tint). Move the selection across via →/← or **Load file…**
+full-row tint). Pane filters are **linked** by default (issue #88): text/kind
+edits mirror to both sides (sort stays per-pane), with an unlink toggle +
+copy-across buttons atop the gutter (`CompareGutter.tsx`); re-linking keeps
+the only filled-in filter, preferring the left (`linkSourceSide` /
+`copyPaneFilter` in `comparePane.ts`). Move the selection across via →/← or
+**Load file…**
 (`append_capture` — appends a HAR/SAZ/.germi to the store WITHOUT clearing,
 unlike `open_capture`), then a raw-HTTP diff (`diff.ts` LCS with folded
 context, `DiffView.tsx`) — **side-by-side by default** (`splitRows` pairs

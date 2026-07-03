@@ -11,7 +11,9 @@ import {
 import {
   LuArrowDown,
   LuArrowLeft,
+  LuArrowLeftToLine,
   LuArrowRight,
+  LuArrowRightToLine,
   LuArrowUp,
   LuBan,
   LuCheck,
@@ -30,6 +32,7 @@ import {
   LuGitCompareArrows,
   LuGripVertical,
   LuInfo,
+  LuLink,
   LuLogIn,
   LuMaximize2,
   LuMinimize2,
@@ -39,6 +42,7 @@ import {
   LuSave,
   LuSquare,
   LuTriangleAlert,
+  LuUnlink,
   LuX,
   LuZap,
 } from "react-icons/lu";
@@ -82,6 +86,10 @@ export const IconCompare = make(LuGitCompareArrows, { color: "var(--s3)", size: 
 export const IconDiff = make(LuFileDiff, { size: 14 });
 export const IconArrowLeft = make(LuArrowLeft, { size: 14 });
 export const IconArrowRight = make(LuArrowRight, { size: 14 });
+export const IconLink = make(LuLink, { size: 13 });
+export const IconUnlink = make(LuUnlink, { size: 13 });
+export const IconArrowToLeft = make(LuArrowLeftToLine, { size: 13 });
+export const IconArrowToRight = make(LuArrowRightToLine, { size: 13 });
 
 export const IconSortAsc = make(LuChevronUp, { size: 14 });
 export const IconSortDesc = make(LuChevronDown, { size: 14 });
