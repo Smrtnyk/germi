@@ -38,10 +38,13 @@ jobs:
 
       # PR runs restore the main-branch cache but don't save their own, so
       # per-PR Windows target dirs don't crowd the shared 10 GB cache quota.
+      # cache-on-failure: a red main run must still save the dependency cache,
+      # or every later run pays the full cold compile again.
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: "."
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
