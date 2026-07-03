@@ -20,7 +20,7 @@ dist-ssr
 .fallow/
 
 # Vitest browser-mode artifacts (failure screenshots + attachments)
-.vitest-attachments/
+.vitest/
 **/__screenshots__/
 
 # Logs / OS
