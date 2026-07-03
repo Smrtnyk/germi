@@ -16,6 +16,7 @@ import { useHotkeyMode } from "../useHotkeyMode";
 import type { AutoLayout } from "../appState";
 import type { ProxySettings } from "../types";
 import { useToast } from "../toast";
+import { AppearanceSettings } from "./AppearanceSettings";
 import { ColumnsSettings } from "./ColumnsSettings";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { IconClose, IconWarn } from "./icons";
@@ -132,6 +133,11 @@ const SECTIONS: Section[] = [
     id: "autoresponder",
     label: "Autoresponder",
     render: (c) => <AutoresponderSection layout={c.autoLayout} onChange={c.onAutoLayoutChange} />,
+  },
+  {
+    id: "appearance",
+    label: "Appearance",
+    render: (c) => <AppearanceSettings settings={c.settings} onChange={c.onChange} />,
   },
   {
     id: "shortcuts",
@@ -811,7 +817,7 @@ export function SettingsDialog({
       {pendingImport && (
         <ConfirmDialog
           title="Import settings?"
-          message="This overwrites all current proxy settings (port, exclusions, capture filter, throttling, columns) with the contents of the file you pick. This can't be undone."
+          message="This overwrites all current proxy settings (port, exclusions, capture filter, throttling, columns, highlight colors) with the contents of the file you pick. This can't be undone."
           confirmLabel="Choose file & import"
           onConfirm={importSettings}
           onCancel={() => setPendingImport(false)}

@@ -208,6 +208,10 @@ export interface ProxySettings {
   responseDelayMs: number;
   // Shortcuts
   systemProxyHotkey: string;
+  // Appearance
+  /** Highlight-color overrides keyed by semantic name (see `theme.ts`),
+   *  values `#rrggbbaa`. Sparse — absent keys use the stylesheet default. */
+  highlightColors: Record<string, string>;
 }
 
 export interface CaInfo {

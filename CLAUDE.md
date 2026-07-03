@@ -210,5 +210,16 @@ del/add runs; toggle to unified, persisted). Bodies are compared decoded in
 the engine (`compare_bodies` / `compare_flow_bodies`) so payloads never cross
 IPC; hunks render only on an explicit toggle and use the display-capped body.
 
+**Configurable highlight colors** (issue #93): every row/diff highlight is a
+`:root` token; Settings → Appearance edits them as color+opacity pairs. The
+sparse override map lives in `ProxySettings.highlight_colors` (rides
+persistence + import/export), the registry/parse/apply logic in `src/theme.ts`
+(specs carry `defaultValue` mirroring `:root` — guarded by a browser test —
+and the diff specs derive their `-hl` intra-line mark at 3× alpha).
+`main.tsx` applies overrides in every window via `initHighlightColorSync`
+(`themeSync.ts`), re-applying on the frontend-emitted
+`germi://settings-changed` event; the Appearance section previews by writing
+the custom properties live and commits once per interaction (native `change`).
+
 Deferred (not started): repeater (edit & resend), breakpoints, WebSocket frame
 editing, HTTP/2, upstream/parent-proxy chaining, SQLite-backed persistent store.
