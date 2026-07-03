@@ -101,7 +101,8 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   record-only filter, capture-on-start), Throttling (response delay), Appearance
   (**configurable highlight colors** — selected/multi-selected rows, filter matches,
   mocked/imported tints, compare-pane match tints, diff added/removed — each a
-  color + opacity pair with live preview and per-row reset). Import/export as JSON.
+  color + opacity pair with direct hex entry, live preview, per-row reset, and
+  drag-a-swatch-onto-another-row to copy a hue). Import/export as JSON.
 - **Sessions** — traffic is **not** auto-persisted (privacy). **Save** a lossless
   `.germi` file; one **Open** loads any supported capture — `.germi`, HAR, or SAZ —
   replacing the current traffic (it confirms first when traffic is present).

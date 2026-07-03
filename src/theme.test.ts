@@ -6,6 +6,7 @@ import {
   HIGHLIGHT_COLORS,
   joinHex8,
   normalizeHex8,
+  parseHexEntry,
   splitHex8,
   withOverride,
 } from "./theme";
@@ -52,6 +53,25 @@ describe("splitHex8 / joinHex8", () => {
     expect(splitHex8("#173a3600").alphaPct).toBe(0);
     expect(joinHex8({ hex: "#173A36", alphaPct: 250 })).toBe("#173a36ff");
     expect(joinHex8({ hex: "#173a36", alphaPct: -4 })).toBe("#173a3600");
+  });
+});
+
+describe("parseHexEntry", () => {
+  it("keeps the fallback alpha for a 6-digit hex, with or without #", () => {
+    expect(parseHexEntry("#FF8800", 13)).toEqual({ hex: "#ff8800", alphaPct: 13 });
+    expect(parseHexEntry("ff8800", 9)).toEqual({ hex: "#ff8800", alphaPct: 9 });
+    expect(parseHexEntry("  #ff8800  ", 5)).toEqual({ hex: "#ff8800", alphaPct: 5 });
+  });
+
+  it("takes alpha from an explicit 8-digit hex", () => {
+    expect(parseHexEntry("#ff880066", 13)).toEqual({ hex: "#ff8800", alphaPct: 40 });
+    expect(parseHexEntry("11223380", 100)).toEqual({ hex: "#112233", alphaPct: 50 });
+  });
+
+  it("rejects everything else", () => {
+    for (const bad of ["", "#fff", "#12345", "chartreuse", "rgba(1,2,3,0.5)", "#ff88zz"]) {
+      expect(parseHexEntry(bad, 50), bad).toBeNull();
+    }
   });
 });
 

@@ -89,6 +89,44 @@ describe("AppearanceSettings", () => {
     expect(rootStyle().getPropertyValue("--diff-add-hl")).toBe("#11223345");
   });
 
+  it("commits a typed 6-digit hex keeping the row's opacity", async () => {
+    const onChange = vi.fn();
+    const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
+    await screen.getByLabelText("Diff — added lines hex").fill("#112233");
+    await userEvent.keyboard("{Enter}");
+    expect(onChange.mock.calls[0][0].highlightColors).toEqual({ diffAdded: "#11223317" });
+  });
+
+  it("commits a typed 8-digit hex including its alpha", async () => {
+    const onChange = vi.fn();
+    const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
+    await screen.getByLabelText("Selected row hex").fill("11223380");
+    await userEvent.keyboard("{Enter}");
+    expect(onChange.mock.calls[0][0].highlightColors).toEqual({ selected: "#11223380" });
+  });
+
+  it("reverts an unparseable hex entry without saving", async () => {
+    const onChange = vi.fn();
+    const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
+    const field = screen.getByLabelText("Selected row hex");
+    await field.fill("bogus");
+    await userEvent.keyboard("{Enter}");
+    expect(onChange).not.toHaveBeenCalled();
+    await expect.element(field).toHaveValue("#173a36ff");
+  });
+
+  it("copies the hue onto another row on drop, keeping the target's opacity", async () => {
+    const onChange = vi.fn();
+    const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
+    const rows = screen.getByRole("listitem").all();
+    const source = rows[0].element().querySelector(".color-sample")!;
+    const dt = new DataTransfer();
+    source.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: dt }));
+    rows[1].element().dispatchEvent(new DragEvent("drop", { bubbles: true, dataTransfer: dt }));
+    expect(onChange.mock.calls[0][0].highlightColors).toEqual({ multiSelected: "#173a3621" });
+    expect(rootStyle().getPropertyValue("--sel-multi-bg")).toBe("#173a3621");
+  });
+
   it("does not save when the committed value equals the current one", async () => {
     const onChange = vi.fn();
     const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);

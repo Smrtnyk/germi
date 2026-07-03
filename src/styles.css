@@ -2036,18 +2036,30 @@ code {
 }
 .color-row {
   display: grid;
-  grid-template-columns: 168px 44px auto 1fr 40px auto;
+  grid-template-columns: 168px 44px auto 96px 1fr 40px auto;
   align-items: center;
   gap: var(--space-5);
+  border-radius: var(--radius-xs);
+}
+.color-row.dragover {
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 .color-label {
   font-size: var(--fs-sm);
 }
-/* tints are translucent, so demo them over the traffic list's backdrop */
+/* tints are translucent, so demo them over the traffic list's backdrop;
+   the strip doubles as the drag handle for copying a hue across rows */
 .color-sample {
   height: 18px;
   border: 1px solid var(--line);
   border-radius: var(--radius-xs);
+  cursor: grab;
+}
+.color-hex {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  padding: 3px 6px;
+  min-width: 0;
 }
 .color-row input[type="color"] {
   width: 36px;

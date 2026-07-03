@@ -1,11 +1,20 @@
-import { Fragment, useEffect, useRef, useState, type MutableRefObject } from "react";
+import {
+  Fragment,
+  useEffect,
+  useRef,
+  useState,
+  type DragEvent as ReactDragEvent,
+  type MutableRefObject,
+} from "react";
 import { isEqual } from "es-toolkit";
 
+import { COLOR_DRAG_MIME, hasColorDrag } from "../dnd";
 import {
   applyHighlightColors,
   effectiveColor,
   HIGHLIGHT_COLORS,
   joinHex8,
+  parseHexEntry,
   splitHex8,
   withOverride,
   type ColorParts,
@@ -94,6 +103,37 @@ function useCommitOnNativeChange(commitRef: MutableRefObject<() => void>) {
   return ref;
 }
 
+/** Direct hex entry (issue #93 follow-up): commits on Enter/blur, reverting
+ *  to the current value when the text doesn't parse. */
+function HexField({
+  value,
+  label,
+  onCommit,
+}: {
+  value: string;
+  label: string;
+  onCommit: (text: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  return (
+    <input
+      className="color-hex"
+      value={draft}
+      spellCheck={false}
+      aria-label={`${label} hex`}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        onCommit(draft);
+        setDraft(value);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+      }}
+    />
+  );
+}
+
 function ColorRow({
   spec,
   effective,
@@ -108,6 +148,7 @@ function ColorRow({
   onCommit: (value: string | null) => void;
 }) {
   const [draft, setDraft] = useState(() => splitHex8(effective));
+  const [dragOver, setDragOver] = useState(false);
   useEffect(() => setDraft(splitHex8(effective)), [effective]);
 
   const commitRef = useRef(() => {});
@@ -120,8 +161,37 @@ function ColorRow({
     onPreview(joinHex8(parts));
   }
 
+  function commitParts(parts: ColorParts) {
+    update(parts);
+    onCommit(joinHex8(parts));
+  }
+
+  function commitHexText(text: string) {
+    const parts = parseHexEntry(text, draft.alphaPct);
+    if (parts) commitParts(parts);
+  }
+
+  function dropColor(e: ReactDragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const payload = e.dataTransfer.getData(COLOR_DRAG_MIME) || e.dataTransfer.getData("text/plain");
+    const parsed = parseHexEntry(payload, draft.alphaPct);
+    // Dropping copies the hue only — each tint's opacity encodes its role.
+    if (parsed) commitParts({ hex: parsed.hex, alphaPct: draft.alphaPct });
+  }
+
   return (
-    <li className="color-row">
+    <li
+      className={`color-row ${dragOver ? "dragover" : ""}`}
+      onDragOver={(e) => {
+        if (!hasColorDrag(e.dataTransfer.types)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        setDragOver(true);
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={dropColor}
+    >
       <span className="color-label">{spec.label}</span>
       <span
         className="color-sample"
@@ -129,6 +199,13 @@ function ColorRow({
           background: `linear-gradient(var(${spec.cssVar}), var(${spec.cssVar})), var(--bg)`,
         }}
         aria-hidden="true"
+        draggable
+        title="Drag onto another row to copy this hue"
+        onDragStart={(e) => {
+          e.dataTransfer.setData(COLOR_DRAG_MIME, joinHex8(draft));
+          e.dataTransfer.setData("text/plain", joinHex8(draft));
+          e.dataTransfer.effectAllowed = "copy";
+        }}
       />
       <input
         ref={colorRef}
@@ -137,6 +214,7 @@ function ColorRow({
         aria-label={`${spec.label} color`}
         onChange={(e) => update({ ...draft, hex: e.target.value })}
       />
+      <HexField value={joinHex8(draft)} label={spec.label} onCommit={commitHexText} />
       <input
         ref={rangeRef}
         type="range"
