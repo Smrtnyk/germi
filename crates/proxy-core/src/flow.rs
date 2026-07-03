@@ -411,7 +411,8 @@ fn content_type_of(headers: &[(String, String)]) -> Option<String> {
         .map(|(_, v)| v.split(';').next().unwrap_or(v).trim().to_string())
 }
 
-fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+/// First value of a header, matched case-insensitively.
+pub(crate) fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))

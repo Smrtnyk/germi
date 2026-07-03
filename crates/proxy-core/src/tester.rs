@@ -727,6 +727,49 @@ mod tests {
         assert!(resp.source.contains("never hit the network"));
     }
 
+    fn cors_rule() -> Rule {
+        Rule {
+            id: "c".into(),
+            enabled: true,
+            fire_limit: None,
+            repeat: false,
+            matcher: Matcher::default(),
+            action: Action::Cors,
+        }
+    }
+
+    #[test]
+    fn previews_cors_stamp_on_mocked_response() {
+        let rules = RuleSet {
+            rules: vec![cors_rule(), respond_rule()],
+        };
+        let mut input = get_input("https://api.test/health");
+        input.req_headers = vec![("origin".into(), "http://localhost:5173".into())];
+        let result = test_rules(&rules, &input);
+        assert_eq!(result.outcome, "respond");
+        let resp = result.response.unwrap();
+        assert!(resp
+            .headers
+            .iter()
+            .any(|(k, v)| k == "access-control-allow-origin" && v == "http://localhost:5173"));
+    }
+
+    #[test]
+    fn previews_cors_preflight_answer() {
+        let rules = RuleSet {
+            rules: vec![cors_rule()],
+        };
+        let mut input = get_input("https://api.test/health");
+        input.method = "OPTIONS".into();
+        input.req_headers = vec![
+            ("origin".into(), "http://localhost:5173".into()),
+            ("access-control-request-method".into(), "GET".into()),
+        ];
+        let result = test_rules(&rules, &input);
+        assert_eq!(result.outcome, "respond");
+        assert_eq!(result.response.unwrap().status, 204);
+    }
+
     #[test]
     fn response_rules_apply_to_blocked_responses() {
         let block = Rule {

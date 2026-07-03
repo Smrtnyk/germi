@@ -80,6 +80,8 @@ export function actionLabel(a: ActionSummary): string {
       return `req ${a.name || "header"}`;
     case "rewriteResponseBody":
       return "rewrite body";
+    case "cors":
+      return "allow CORS";
   }
 }
 
