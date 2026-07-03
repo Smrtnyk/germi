@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::flow::{now_ms, CapturedRequest, CapturedResponse};
 use crate::rules::{
-    apply_response_rules, evaluate_request_rules, evaluate_request_rules_stateful, RequestOutcome,
-    Rule, RuleCursors, RuleSet,
+    apply_response_rules, blocked_response, evaluate_request_rules,
+    evaluate_request_rules_stateful, RequestOutcome, Rule, RuleCursors, RuleSet,
+    SyntheticResponse,
 };
 
 #[derive(Deserialize, Clone, Debug)]
@@ -231,40 +232,49 @@ pub(crate) fn test_rule_slice(rules: &[Rule], input: &TestInput) -> TestResult {
     let sequence = if seq.len() > 1 { seq } else { Vec::new() };
 
     match evaluate_request_rules(rules, &req) {
-        RequestOutcome::Respond { rule, response, .. } => TestResult {
-            matched_rules,
-            outcome: "respond".to_string(),
-            short_circuit: true,
-            fired_rule: Some(rule.clone()),
-            effective_request_headers: req.headers,
-            response: Some(preview_response(
-                response.status,
-                response.headers,
-                response.body,
-                format!(
-                    "Synthesized by rule \u{201c}{rule}\u{201d} — request never hit the network"
-                ),
-            )),
-            notes,
-            sequence,
-            sequence_loops,
-        },
-        RequestOutcome::Block { rule, .. } => TestResult {
-            matched_rules,
-            outcome: "block".to_string(),
-            short_circuit: true,
-            fired_rule: Some(rule.clone()),
-            effective_request_headers: req.headers,
-            response: Some(TestResponse {
-                status: 403,
-                headers: vec![("content-type".to_string(), "text/plain".to_string())],
-                body: "Blocked by Germi".to_string(),
-                source: format!("Blocked by rule \u{201c}{rule}\u{201d}"),
-            }),
-            notes,
-            sequence,
-            sequence_loops,
-        },
+        RequestOutcome::Respond { rule, response, .. } => {
+            let (resp, modified) = finalized_synthetic(rules, &req, response);
+            let base = format!("Synthesized by rule \u{201c}{rule}\u{201d}");
+            TestResult {
+                matched_rules,
+                outcome: "respond".to_string(),
+                short_circuit: true,
+                fired_rule: Some(rule),
+                effective_request_headers: req.headers,
+                response: Some(preview_response(
+                    resp.status,
+                    resp.headers,
+                    resp.body,
+                    format!(
+                        "{} — request never hit the network",
+                        modified_source(base, modified)
+                    ),
+                )),
+                notes,
+                sequence,
+                sequence_loops,
+            }
+        }
+        RequestOutcome::Block { rule, .. } => {
+            let (resp, modified) = finalized_synthetic(rules, &req, blocked_response());
+            let base = format!("Blocked by rule \u{201c}{rule}\u{201d}");
+            TestResult {
+                matched_rules,
+                outcome: "block".to_string(),
+                short_circuit: true,
+                fired_rule: Some(rule),
+                effective_request_headers: req.headers,
+                response: Some(preview_response(
+                    resp.status,
+                    resp.headers,
+                    resp.body,
+                    modified_source(base, modified),
+                )),
+                notes,
+                sequence,
+                sequence_loops,
+            }
+        }
         RequestOutcome::Continue { set_headers } => continue_result(
             rules,
             input,
@@ -275,6 +285,32 @@ pub(crate) fn test_rule_slice(rules: &[Rule], input: &TestInput) -> TestResult {
             sequence,
             sequence_loops,
         ),
+    }
+}
+
+/// Run the response-phase rules over a rule-synthesized response, mirroring the
+/// live pipeline (`CaptureHandler::finalize_synthetic`) so the preview matches
+/// what the client receives. Side-effect-free: fire budgets are not consumed.
+fn finalized_synthetic(
+    rules: &[Rule],
+    req: &CapturedRequest,
+    synthetic: SyntheticResponse,
+) -> (CapturedResponse, Option<String>) {
+    let mut resp = CapturedResponse {
+        status: synthetic.status,
+        version: "HTTP/1.1".to_string(),
+        headers: synthetic.headers,
+        body: synthetic.body,
+        timestamp_ms: now_ms(),
+    };
+    let modified = apply_response_rules(rules, req, &mut resp);
+    (resp, modified)
+}
+
+fn modified_source(base: String, modified: Option<String>) -> String {
+    match modified {
+        Some(name) => format!("{base}, modified by rule \u{201c}{name}\u{201d}"),
+        None => base,
     }
 }
 
@@ -650,5 +686,71 @@ mod tests {
         assert!(result.sequence.is_empty());
         assert_eq!(result.outcome, "respond");
         assert!(result.response.is_some());
+    }
+
+    fn set_header_rule(name: &str, value: &str) -> Rule {
+        Rule {
+            id: "hdr".into(),
+            enabled: true,
+            fire_limit: None,
+            repeat: false,
+            matcher: Matcher::default(),
+            action: Action::SetResponseHeader {
+                name: name.into(),
+                value: value.into(),
+            },
+        }
+    }
+
+    fn get_input(url: &str) -> TestInput {
+        TestInput {
+            method: "GET".into(),
+            url: url.into(),
+            req_headers: vec![],
+            req_body: String::new(),
+            resp_status: 200,
+            resp_headers: vec![],
+            resp_body: String::new(),
+        }
+    }
+
+    #[test]
+    fn response_rules_apply_to_mocked_responses() {
+        let rules = RuleSet {
+            rules: vec![respond_rule(), set_header_rule("x-injected", "yes")],
+        };
+        let result = test_rules(&rules, &get_input("https://api.test/health"));
+        assert_eq!(result.outcome, "respond");
+        let resp = result.response.unwrap();
+        assert!(resp.headers.iter().any(|(k, v)| k == "x-injected" && v == "yes"));
+        assert!(resp.source.contains("modified by rule"));
+        assert!(resp.source.contains("never hit the network"));
+    }
+
+    #[test]
+    fn response_rules_apply_to_blocked_responses() {
+        let block = Rule {
+            id: "b".into(),
+            enabled: true,
+            fire_limit: None,
+            repeat: false,
+            matcher: Matcher {
+                method: None,
+                url: "/health".into(),
+                url_match: MatchKind::Contains,
+            },
+            action: Action::Block,
+        };
+        let rules = RuleSet {
+            rules: vec![block, set_header_rule("access-control-allow-origin", "*")],
+        };
+        let result = test_rules(&rules, &get_input("https://api.test/health"));
+        assert_eq!(result.outcome, "block");
+        let resp = result.response.unwrap();
+        assert_eq!(resp.status, 403);
+        assert!(resp
+            .headers
+            .iter()
+            .any(|(k, v)| k == "access-control-allow-origin" && v == "*"));
     }
 }

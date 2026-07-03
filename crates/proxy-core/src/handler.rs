@@ -414,8 +414,33 @@ impl CaptureHandler {
         apply_request_effects(wire, &mut captured.headers, effects);
     }
 
-    /// Finalize a rule-synthesized response: run response-phase scripts over it,
-    /// record it, and build the wire response the client receives.
+    /// Run response-phase rules over a rule-synthesized response, mirroring the
+    /// passthrough path — synthesized responses never reach `handle_response`, so
+    /// without this a `setResponseHeader` / `setStatus` / CORS rule would silently
+    /// skip every mocked response. Runs before scripts (same order as
+    /// `handle_response`: rules first, scripts get the last word).
+    fn run_rules_on_synthetic(&self, req: &CapturedRequest, synthetic: &mut SyntheticResponse) {
+        let mut captured = CapturedResponse {
+            status: synthetic.status,
+            version: "HTTP/1.1".to_string(),
+            headers: std::mem::take(&mut synthetic.headers),
+            body: std::mem::take(&mut synthetic.body),
+            timestamp_ms: now_ms(),
+        };
+        // Lock order autoresponder→cursors matches handle_request, so the two
+        // never deadlock; held only for this synchronous rewrite (no .await).
+        if let (Ok(ar), Ok(mut cursors)) =
+            (self.shared.autoresponder.read(), self.shared.cursors.lock())
+        {
+            ar.apply_response_stateful(req, &mut captured, &mut cursors);
+        }
+        synthetic.status = captured.status;
+        synthetic.headers = captured.headers;
+        synthetic.body = captured.body;
+    }
+
+    /// Finalize a rule-synthesized response: run response-phase rules then scripts
+    /// over it, record it, and build the wire response the client receives.
     fn serve_synthetic(
         &self,
         id: &str,
@@ -424,6 +449,7 @@ impl CaptureHandler {
         req: Option<&CapturedRequest>,
     ) -> Response<Body> {
         if let Some(req) = req {
+            self.run_rules_on_synthetic(req, &mut response);
             self.run_scripts_on_synthetic(req, &mut response);
         }
         let out = build_response(&response);
