@@ -680,6 +680,7 @@ export function App() {
           onClear={s.requestClearTraffic}
           filter={s.filtering.filter}
           onFilterChange={s.filtering.setFilter}
+          onSaveFilter={s.saveCurrentFilter}
           filterInputRef={s.filterInputRef}
         />
 

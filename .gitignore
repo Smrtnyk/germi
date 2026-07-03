@@ -21,6 +21,7 @@ dist-ssr
 
 # Vitest browser-mode artifacts (failure screenshots + attachments)
 .vitest/
+.vitest-attachments/
 **/__screenshots__/
 
 # Logs / OS

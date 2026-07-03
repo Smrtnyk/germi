@@ -1,3 +1,4 @@
+import { userEvent } from "vitest/browser";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
@@ -24,6 +25,7 @@ const base = {
   onClear: noop,
   filter: "",
   onFilterChange: noop,
+  onSaveFilter: noop,
   filterInputRef: { current: null },
 } as const;
 
@@ -53,5 +55,32 @@ describe("Toolbar", () => {
     const screen = await render(<Toolbar {...base} onLaunchViewer={onLaunchViewer} />);
     await screen.getByRole("button", { name: "New viewer" }).click();
     expect(onLaunchViewer).toHaveBeenCalledOnce();
+  });
+
+  it("saves the filter on Ctrl+Enter in the filter bar, not on plain Enter", async () => {
+    const onSaveFilter = vi.fn();
+    const screen = await render(
+      <Toolbar {...base} filter="host:api" onSaveFilter={onSaveFilter} />,
+    );
+    const input = screen.getByPlaceholder(/Filter —/);
+    await input.click();
+    await userEvent.keyboard("{Enter}");
+    expect(onSaveFilter).not.toHaveBeenCalled();
+    await userEvent.keyboard("{Control>}{Enter}{/Control}");
+    expect(onSaveFilter).toHaveBeenCalledOnce();
+  });
+
+  it("lets Ctrl+Enter bubble so global shortcuts stay alive", async () => {
+    const onWindowKey = vi.fn();
+    window.addEventListener("keydown", onWindowKey);
+    try {
+      const screen = await render(<Toolbar {...base} onSaveFilter={vi.fn()} />);
+      await screen.getByPlaceholder(/Filter —/).click();
+      await userEvent.keyboard("{Control>}{Enter}{/Control}");
+      const events = onWindowKey.mock.calls.map(([e]) => e as KeyboardEvent);
+      expect(events.some((e) => e.ctrlKey && e.key === "Enter")).toBe(true);
+    } finally {
+      window.removeEventListener("keydown", onWindowKey);
+    }
   });
 });
