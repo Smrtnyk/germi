@@ -55,7 +55,7 @@ jobs:
       - name: Stage artifact
         run: |
           $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { $env:GITHUB_SHA.Substring(0, 7) }
-          Copy-Item src-tauri/target/release/germi.exe "Germi-portable-$version-windows-x64.exe"
+          Copy-Item target/release/germi.exe "Germi-portable-$version-windows-x64.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
