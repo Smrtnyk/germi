@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -36,8 +34,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # PR runs restore the main-branch cache but don't save their own, so
-      # per-PR Windows target dirs don't crowd the shared 10 GB cache quota.
+      # Only main saves the cache; tag/manual runs restore it without adding
+      # extra Windows target dirs to the shared 10 GB cache quota.
       # cache-on-failure: a red main run must still save the dependency cache,
       # or every later run pays the full cold compile again.
       - uses: swatinem/rust-cache@v2
@@ -69,7 +67,7 @@ jobs:
 
   # Tag pushes only: attach the exe to the GitHub release (as a draft if the
   # release doesn't exist yet). Split into its own job so the build job never
-  # carries write permissions on PR runs.
+  # carries write permissions.
   release:
     if: github.ref_type == 'tag'
     needs: portable-exe
