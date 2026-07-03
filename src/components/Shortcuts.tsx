@@ -27,6 +27,7 @@ function buildGroups(b: Bindings): { title: string; rows: { keys: string; desc: 
           keys: prettyShortcut(b["toggle-filter-hide"]),
           desc: "Hide / dim non-matching requests",
         },
+        { keys: "Ctrl / ⌘ Enter", desc: "Save the filter bar as a saved filter (in the bar)" },
         { keys: "F3   ·   Shift + F3", desc: "Next / previous find match" },
         { keys: "↑ ↓   ·   j k", desc: "Move selection" },
         { keys: "Shift + ↑ / ↓", desc: "Extend selection" },

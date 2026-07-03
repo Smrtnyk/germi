@@ -31,6 +31,8 @@ interface ToolbarProps {
   onClear: () => void;
   filter: string;
   onFilterChange: (value: string) => void;
+  /** Ctrl/⌘ Enter in the filter bar stores it as a saved filter (issue #90). */
+  onSaveFilter: () => void;
   filterInputRef: RefObject<HTMLInputElement | null>;
 }
 
@@ -100,6 +102,7 @@ export function Toolbar(props: ToolbarProps) {
     onClear,
     filter,
     onFilterChange,
+    onSaveFilter,
     filterInputRef,
   } = props;
 
@@ -185,7 +188,13 @@ export function Toolbar(props: ToolbarProps) {
           placeholder="Filter — host: status:4xx kind:xhr body:… header:… -negate /regex/"
           value={filter}
           onChange={(e) => onFilterChange(e.target.value)}
-          title="Tokens: host: path: method: scheme: status: (4xx, >=400) mime: kind: ext: is:imported is:captured rule: larger-than: slower-than: body: req-body: resp-body: header: req-header: resp-header: — bare words match the URL, /regex/ for regex, leading - negates"
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+              e.preventDefault();
+              onSaveFilter();
+            }
+          }}
+          title="Tokens: host: path: method: scheme: status: (4xx, >=400) mime: kind: ext: is:imported is:captured rule: larger-than: slower-than: body: req-body: resp-body: header: req-header: resp-header: — bare words match the URL, /regex/ for regex, leading - negates. Ctrl/⌘ Enter saves the filter."
         />
         {filter && (
           <button
