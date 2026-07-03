@@ -308,6 +308,32 @@ function matchTerm(term: SummaryTerm, s: FlowSummary): boolean {
   return term.neg ? !r : r;
 }
 
+/** Whether a flow passes the full frontend-evaluable filter: the kind/status
+ *  chip sets (empty set = no constraint) plus the parsed summary terms. */
+export function matchesFilter(
+  s: FlowSummary,
+  parsed: ParsedFilter,
+  typeChips: Set<ResourceKind>,
+  statusChips: Set<string>,
+): boolean {
+  if (typeChips.size && !typeChips.has(s.kind)) return false;
+  if (statusChips.size && !statusChips.has(statusClass(s.status))) return false;
+  return parsed.matchSummary(s);
+}
+
+export function collectMatched(
+  flows: FlowSummary[],
+  parsed: ParsedFilter,
+  typeChips: Set<ResourceKind>,
+  statusChips: Set<string>,
+): Set<string> {
+  const set = new Set<string>();
+  for (const s of flows) {
+    if (matchesFilter(s, parsed, typeChips, statusChips)) set.add(s.id);
+  }
+  return set;
+}
+
 // ---- chips ----
 
 export const KIND_CHIPS: { kind: ResourceKind; label: string }[] = [

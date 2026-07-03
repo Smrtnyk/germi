@@ -1,6 +1,5 @@
 import {
   useCallback,
-  useDeferredValue,
   useEffect,
   useMemo,
   useReducer,
@@ -10,7 +9,7 @@ import {
   type MutableRefObject,
 } from "react";
 
-import { compact, difference, intersection, isEqual } from "es-toolkit";
+import { compact, isEqual } from "es-toolkit";
 
 import { announce } from "./announce";
 import { api, subscribeFlows } from "./ipc";
@@ -25,7 +24,10 @@ import {
   openOrFocusRuleWindow,
   saveRuleWindowSize,
 } from "./ruleWindows";
-import { parseFilter, statusClass, type ContentTerm, type ParsedFilter } from "./filter";
+import { loadBool, loadJson, loadString, persist } from "./localStore";
+import { useTrafficFilter } from "./useTrafficFilter";
+import { useSavedFilters } from "./useSavedFilters";
+import { savedFilterLabel } from "./savedFilters";
 import { backfillSeqColumn, resolveColumns, DEFAULT_COLUMNS, type ColumnDef } from "./columns";
 import { nextSort, resolveSort, sortFlows, type SortState } from "./sort";
 import { useSplitRatio } from "./useResizable";
@@ -35,8 +37,8 @@ import { friendlyError, useToasts, type Notify } from "./toast";
 import { toCurl } from "./curl";
 import { flowUrl } from "./flowUrl";
 import { focusMockResponseBody } from "./focusMockBody";
-import { nextIdAfterDelete, rangeSelection, toggledSet, toggleSelection } from "./selection";
-import { DEFAULT_SHORTCUTS, resolveBindings, type Bindings } from "./shortcuts";
+import { nextIdAfterDelete, rangeSelection, toggleSelection } from "./selection";
+import { resolveBindings, type Bindings } from "./shortcuts";
 import { emitSettingsChanged } from "./themeSync";
 import {
   appendBulkRuleSummaries,
@@ -57,44 +59,17 @@ import type {
   FlowSummary,
   HistoryTag,
   ProxySettings,
-  ResourceKind,
   Rule,
   RuleSummary,
   ScenarioSummary,
 } from "./types";
 
-export type RightTab = "inspector" | "autoresponder";
+export type RightTab = "inspector" | "autoresponder" | "filters";
 export type RightMode = "single" | "split";
 /** Where the autoresponder rule detail sits relative to the list (issue #72). */
 export type AutoLayout = "side" | "stacked";
 
 type SetError = (value: string | null) => void;
-
-function loadString<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
-  try {
-    const v = localStorage.getItem(key);
-    return v && (allowed as readonly string[]).includes(v) ? (v as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function persist(key: string, value: string): void {
-  try {
-    localStorage.setItem(key, value);
-  } catch {
-    /* ignore quota / privacy-mode errors */
-  }
-}
-
-function loadBool(key: string, fallback: boolean): boolean {
-  try {
-    const v = localStorage.getItem(key);
-    return v === null ? fallback : v === "1";
-  } catch {
-    return fallback;
-  }
-}
 
 function pruneFlows(map: Map<string, FlowSummary>, order: string[], ids: string[]): void {
   if (ids.length === 0) return;
@@ -165,74 +140,6 @@ function mergeFlows(order: string[], map: Map<string, FlowSummary>, list: FlowSu
     if (!map.has(s.id)) order.push(s.id);
     map.set(s.id, s);
   }
-}
-
-function matchesFilter(
-  s: FlowSummary,
-  parsed: ParsedFilter,
-  typeChips: Set<ResourceKind>,
-  statusChips: Set<string>,
-): boolean {
-  if (typeChips.size && !typeChips.has(s.kind)) return false;
-  if (statusChips.size && !statusChips.has(statusClass(s.status))) return false;
-  return parsed.matchSummary(s);
-}
-
-function collectMatched(
-  flows: FlowSummary[],
-  parsed: ParsedFilter,
-  typeChips: Set<ResourceKind>,
-  statusChips: Set<string>,
-): Set<string> {
-  const set = new Set<string>();
-  for (const s of flows) {
-    if (matchesFilter(s, parsed, typeChips, statusChips)) set.add(s.id);
-  }
-  return set;
-}
-
-async function runContentSearch(
-  contentTerms: ContentTerm[],
-  seedIds: string[],
-  isCancelled: () => boolean,
-): Promise<string[] | null> {
-  let ids = seedIds;
-  for (const ct of contentTerms) {
-    const search = ct.field === "headers" ? api.searchHeaders : api.searchBodies;
-    const result = await search(ct.value, ct.side, ct.regex, ids);
-    if (isCancelled()) return null;
-    ids = ct.neg ? difference(ids, result) : intersection(ids, result);
-  }
-  return ids;
-}
-
-async function performContentSearch(
-  contentTerms: ContentTerm[],
-  seedIds: string[],
-  isCancelled: () => boolean,
-  apply: (ids: Set<string>) => void,
-  setSearching: (busy: boolean) => void,
-  setError: SetError,
-): Promise<void> {
-  try {
-    const ids = await runContentSearch(contentTerms, seedIds, isCancelled);
-    if (ids && !isCancelled()) apply(new Set(ids));
-  } catch (e) {
-    if (!isCancelled()) setError(String(e));
-  } finally {
-    if (!isCancelled()) setSearching(false);
-  }
-}
-
-function intersectMatches(
-  hasFilter: boolean,
-  summaryMatched: Set<string>,
-  bodyMatchIds: Set<string> | null,
-  hasContentTerms: boolean,
-): Set<string> | null {
-  if (!hasFilter) return null;
-  if (!hasContentTerms || bodyMatchIds === null) return summaryMatched;
-  return new Set([...summaryMatched].filter((id) => bodyMatchIds.has(id)));
 }
 
 function loadColumnOrder(): string[] {
@@ -394,80 +301,23 @@ function useFlowStore(setError: SetError) {
   return { flows, flowsRef, orderRef, tick, editComment, loadInitial, refresh };
 }
 
-function useTrafficFilter(flows: FlowSummary[], setError: SetError) {
-  const [filter, setFilter] = useState("");
-  const [typeChips, setTypeChips] = useState<Set<ResourceKind>>(new Set());
-  const [statusChips, setStatusChips] = useState<Set<string>>(new Set());
-  const [bodyMatchIds, setBodyMatchIds] = useState<Set<string> | null>(null);
-  const [searching, setSearching] = useState(false);
-  const summaryMatchedRef = useRef<Set<string>>(new Set());
-
-  const deferredFilter = useDeferredValue(filter);
-  const parsed = useMemo(() => parseFilter(deferredFilter), [deferredFilter]);
-
-  const hasFilter = filter.trim() !== "" || typeChips.size > 0 || statusChips.size > 0;
-
-  const summaryMatched = useMemo(
-    () => collectMatched(flows, parsed, typeChips, statusChips),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [flows, deferredFilter, typeChips, statusChips],
-  );
-  summaryMatchedRef.current = summaryMatched;
-
-  useEffect(() => {
-    if (parsed.contentTerms.length === 0) {
-      setBodyMatchIds(null);
-      setSearching(false);
-      return;
-    }
-    let cancelled = false;
-    setSearching(true);
-    const handle = window.setTimeout(() => {
-      void performContentSearch(
-        parsed.contentTerms,
-        [...summaryMatchedRef.current],
-        () => cancelled,
-        setBodyMatchIds,
-        setSearching,
-        setError,
-      );
-    }, 250);
-    return () => {
-      cancelled = true;
-      clearTimeout(handle);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deferredFilter, typeChips, statusChips]);
-
-  const matchedIds = useMemo(
-    () => intersectMatches(hasFilter, summaryMatched, bodyMatchIds, parsed.contentTerms.length > 0),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hasFilter, summaryMatched, bodyMatchIds, deferredFilter],
-  );
-
-  function resetFilter() {
-    setFilter("");
-    setTypeChips(new Set());
-    setStatusChips(new Set());
-  }
-
-  return {
-    filter,
-    setFilter,
-    typeChips,
-    statusChips,
-    toggleTypeChip: (k: ResourceKind) => setTypeChips((prev) => toggledSet(prev, k)),
-    toggleStatusChip: (c: string) => setStatusChips((prev) => toggledSet(prev, c)),
-    resetFilter,
-    matchedIds,
-    searching,
-  };
-}
-
 function useSelection(flows: FlowSummary[]) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const anchorRef = useRef<string | null>(null);
+
+  // Selection follows visibility (issue #90): a row the hide-mode or solo'd
+  // filter removes from the list leaves the selection too — otherwise Delete,
+  // drag-to-mock and Compare would silently act on rows the user can no longer
+  // see are selected. Dimmed rows stay visible, so dim mode prunes nothing.
+  useEffect(() => {
+    const present = new Set(flows.map((f) => f.id));
+    setSelectedIds((prev) => {
+      const kept = [...prev].filter((id) => present.has(id));
+      return kept.length === prev.size ? prev : new Set(kept);
+    });
+    setSelectedId((cur) => (cur !== null && !present.has(cur) ? null : cur));
+  }, [flows]);
 
   function extendOrSelect(id: string, extend: boolean) {
     const range =
@@ -1166,11 +1016,7 @@ function usePersistentColumns(headerColumns: string[]) {
 }
 
 function loadShortcuts(): Bindings {
-  try {
-    return resolveBindings(JSON.parse(localStorage.getItem("germi.shortcuts") ?? "null"));
-  } catch {
-    return DEFAULT_SHORTCUTS;
-  }
+  return resolveBindings(loadJson("germi.shortcuts"));
 }
 
 function usePersistentShortcuts() {
@@ -1182,19 +1028,15 @@ function usePersistentShortcuts() {
 }
 
 function loadSort(): SortState | null {
-  try {
-    const saved = JSON.parse(localStorage.getItem("germi.sort") ?? "null");
-    if (
-      saved &&
-      typeof saved.columnId === "string" &&
-      (saved.dir === "asc" || saved.dir === "desc")
-    ) {
-      return { columnId: saved.columnId, dir: saved.dir };
-    }
-    return null;
-  } catch {
-    return null;
+  const saved = loadJson("germi.sort") as Partial<SortState> | null;
+  if (
+    saved &&
+    typeof saved.columnId === "string" &&
+    (saved.dir === "asc" || saved.dir === "desc")
+  ) {
+    return { columnId: saved.columnId, dir: saved.dir };
   }
+  return null;
 }
 
 function useFlowSort(flows: FlowSummary[], columns: ColumnDef[]) {
@@ -1269,6 +1111,53 @@ async function copyFlowBodyAction(id: string, decode: boolean, notify: Notify, s
   }
 }
 
+/** The actions sitting above the bar filter + saved-filter list (issue #90):
+ *  freezing the current bar/chips into a saved filter (revealing the Filters
+ *  tab so the new entry is where the user lands), and the chips-row "Clear
+ *  filters" that wipes everything narrowing the list — the bar AND a solo'd
+ *  saved filter (the saved list itself is untouched). */
+function useFilterActions(
+  filtering: ReturnType<typeof useTrafficFilter>,
+  savedFilters: ReturnType<typeof useSavedFilters>,
+  reveal: {
+    rightCollapsed: boolean;
+    setRightCollapsed: (v: boolean) => void;
+    setRightTab: (tab: RightTab) => void;
+  },
+  notify: Notify,
+) {
+  // matchedIds is null exactly when no bar filter is active (useFilterMatch's
+  // hasFilter), so this can't drift from the pipeline's own notion of "active".
+  const canSaveFilter = filtering.matchedIds !== null;
+
+  function saveCurrentFilter() {
+    if (!canSaveFilter) {
+      notify("info", "Type a filter or toggle some chips first");
+      return;
+    }
+    const created = savedFilters.addFilter(
+      filtering.filter,
+      [...filtering.typeChips],
+      [...filtering.statusChips],
+    );
+    if (reveal.rightCollapsed) reveal.setRightCollapsed(false);
+    reveal.setRightTab("filters");
+    notify("success", `Saved filter "${savedFilterLabel(created)}"`);
+  }
+
+  function clearAllFilters() {
+    filtering.resetFilter();
+    savedFilters.clearSolo();
+  }
+
+  return {
+    canSaveFilter,
+    saveCurrentFilter,
+    clearAllFilters,
+    searchBusy: filtering.searching || savedFilters.soloSearching,
+  };
+}
+
 /** Spawn a second, proxy-less Germi (`--viewer`) for inspecting saved captures.
  *  Works from a normal or a viewer instance (issue #71). */
 function launchViewerAction(notify: Notify, setError: SetError) {
@@ -1340,7 +1229,7 @@ function useCapturedDelete(
 
 function useViewState() {
   const [rightTab, setRightTabState] = useState<RightTab>(() =>
-    loadString("germi.rightTab", ["inspector", "autoresponder"] as const, "inspector"),
+    loadString("germi.rightTab", ["inspector", "autoresponder", "filters"] as const, "inspector"),
   );
   const setRightTab = useCallback((tab: RightTab) => {
     setRightTabState(tab);
@@ -1610,7 +1499,14 @@ export function useAppState() {
   const columns = usePersistentColumns(settings.settings.headerColumns);
   const { sort, toggleSort, sortedFlows } = useFlowSort(flowStore.flows, columns.visibleColumns);
   const filtering = useTrafficFilter(sortedFlows, setError);
-  const selection = useSelection(sortedFlows);
+  const savedFilters = useSavedFilters(sortedFlows, filtering.matchedIds, setError);
+  const filterActions = useFilterActions(
+    filtering,
+    savedFilters,
+    { rightCollapsed, setRightCollapsed, setRightTab },
+    notify,
+  );
+  const selection = useSelection(savedFilters.visibleFlows);
   const selectedSummary = selection.selectedId
     ? flowStore.flowsRef.current.get(selection.selectedId)
     : undefined;
@@ -1622,7 +1518,7 @@ export function useAppState() {
   const availability = useAvailabilityCheck(
     sortedFlows,
     selection.selectedIds,
-    filtering.matchedIds,
+    savedFilters.combinedMatchedIds,
     notify,
     setError,
   );
@@ -1744,10 +1640,11 @@ export function useAppState() {
   }
 
   function selectAllVisible() {
-    const matched = filtering.matchedIds;
+    const matched = savedFilters.combinedMatchedIds;
+    const visible = savedFilters.visibleFlows;
     const ids = matched
-      ? sortedFlows.filter((f) => matched.has(f.id)).map((f) => f.id)
-      : sortedFlows.map((f) => f.id);
+      ? visible.filter((f) => matched.has(f.id)).map((f) => f.id)
+      : visible.map((f) => f.id);
     selection.selectAll(ids);
     if (ids.length > 1 && rightMode === "single") setRightTab("inspector");
   }
@@ -1835,7 +1732,7 @@ export function useAppState() {
     const ids = [...selection.selectedIds];
     if (ids.length === 0) return;
     const nextId = nextIdAfterDelete(
-      sortedFlows.map((f) => f.id),
+      savedFilters.visibleFlows.map((f) => f.id),
       new Set(ids),
       selection.selectedId,
     );
@@ -1854,7 +1751,7 @@ export function useAppState() {
     ar.autoresponder.scenarios.find((s) => s.id === ar.autoresponder.activeScenarioId)?.name ??
     null;
 
-  const matchCount = filtering.matchedIds ? filtering.matchedIds.size : null;
+  const matchCount = savedFilters.combinedMatchedIds?.size ?? null;
 
   return {
     setError,
@@ -1891,10 +1788,12 @@ export function useAppState() {
     confirmOpenCapture,
     settings,
     flowStore,
-    flows: sortedFlows,
+    flows: savedFilters.visibleFlows,
     sort,
     toggleSort,
     filtering,
+    savedFilters,
+    ...filterActions,
     selection,
     selectedSummary,
     selectedSummaries,

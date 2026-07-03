@@ -23,6 +23,10 @@ function buildGroups(b: Bindings): { title: string; rows: { keys: string; desc: 
           keys: prettyShortcut(b["focus-filter"]),
           desc: "Find in the open request, else focus the filter",
         },
+        {
+          keys: prettyShortcut(b["toggle-filter-hide"]),
+          desc: "Hide / dim non-matching requests",
+        },
         { keys: "F3   ·   Shift + F3", desc: "Next / previous find match" },
         { keys: "↑ ↓   ·   j k", desc: "Move selection" },
         { keys: "Shift + ↑ / ↓", desc: "Extend selection" },
@@ -40,6 +44,7 @@ function buildGroups(b: Bindings): { title: string; rows: { keys: string; desc: 
       rows: [
         { keys: prettyShortcut(b["show-inspector"]), desc: "Show Inspector" },
         { keys: prettyShortcut(b["show-autoresponder"]), desc: "Show Autoresponder" },
+        { keys: prettyShortcut(b["show-filters"]), desc: "Show saved Filters" },
         { keys: prettyShortcut(b["edit-mock-body"]), desc: "Edit mock response body" },
       ],
     },

@@ -556,6 +556,44 @@ textarea {
   background: color-mix(in srgb, var(--danger) 15%, var(--bg-2));
   color: var(--danger);
 }
+/* the Hide/Dim switch: a compact seg that fits the chips row height */
+.filter-mode button {
+  padding: 2px 8px;
+  font-size: var(--fs-xs);
+}
+/* "+ Save filter" — stores the bar + chips as a colored saved filter (issue #90) */
+.save-filter {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  color: var(--accent);
+  white-space: nowrap;
+}
+.save-filter:hover {
+  background: var(--chip-on-bg);
+  color: var(--accent);
+}
+/* "only: <filter>" — visible while a saved filter is solo'd, so a narrowed
+   list is always explained even with an empty filter bar; click clears it */
+.solo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 280px;
+  white-space: nowrap;
+}
+.solo-chip:hover {
+  border-color: var(--danger);
+}
+.solo-chip .solo-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+}
+.solo-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
 
 /* ---- active filter-term pills (removable view of the text query) ---- */
 .filter-pills {
@@ -602,6 +640,165 @@ textarea {
 }
 .filter-pill:hover .pill-x {
   color: var(--danger);
+}
+
+/* ---- saved filters panel (issue #90) ---- */
+.filters-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-5);
+}
+.filters-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.filters-title {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+}
+.filters-empty {
+  display: grid;
+  gap: var(--space-4);
+  max-width: 52ch;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.filters-empty p {
+  margin: 0;
+}
+.filters-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.sf-item {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+}
+.sf-item.expanded {
+  border-color: var(--accent-dim);
+}
+.sf-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+}
+/* the color well: native picker, trimmed to a small swatch */
+.sf-color {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 1px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-2);
+  cursor: pointer;
+}
+.sf-color::-webkit-color-swatch-wrapper {
+  padding: 1px;
+}
+.sf-color::-webkit-color-swatch {
+  border: none;
+  border-radius: 3px;
+}
+.sf-label {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.sf-label:hover {
+  color: var(--accent);
+}
+.sf-label .gi {
+  flex: none;
+}
+.sf-label-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sf-count {
+  flex: none;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-2);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+.sf-toggle {
+  flex: none;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  font: inherit;
+  font-size: var(--fs-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.sf-toggle:hover {
+  background: var(--bg-3);
+  color: var(--text);
+}
+.sf-toggle.on {
+  border-color: var(--accent);
+  background: var(--chip-on-bg);
+  color: var(--accent);
+}
+.sf-remove {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.sf-remove:hover {
+  color: var(--danger);
+}
+.sf-editor {
+  display: grid;
+  gap: var(--space-3);
+  padding: 0 var(--space-4) var(--space-4);
+}
+.sf-query {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
+.sf-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.sf-note {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--muted);
 }
 
 .flow-list {
@@ -799,6 +996,13 @@ textarea {
 .flow-canvas .flow-row.imported {
   box-shadow: inset 3px 0 0 var(--imported);
   background: var(--row-imported-bg);
+}
+/* saved-filter highlight (issue #90): the row carries its filter's color as
+   --row-tint (set inline). Placed after the match/mock/import shading so the
+   user-picked color wins, but before checked/selected so selection stays
+   dominant; the provenance left bars (box-shadow) show through either way. */
+.flow-canvas .flow-row.tinted {
+  background: color-mix(in srgb, var(--row-tint) 16%, transparent);
 }
 /* multi-select members read distinct from the single active row */
 .flow-canvas .flow-row.checked {
@@ -2722,11 +2926,6 @@ body.resizing.resizing-v * {
 }
 
 /* ---- right panel split mode ---- */
-.split-label {
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--muted);
-}
 .right-content.split {
   flex-direction: column;
 }

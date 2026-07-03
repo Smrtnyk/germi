@@ -1,10 +1,10 @@
-import type { CSSProperties } from "react";
+import type { ComponentProps, CSSProperties } from "react";
 import { userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
 import "../styles.css";
-import { CommentCell, HeaderRow } from "./TrafficList";
+import { CommentCell, FlowRow, HeaderRow, TrafficList } from "./TrafficList";
 import { resolveColumns } from "../columns";
 import type { FlowSummary } from "../types";
 
@@ -39,7 +39,7 @@ function editingComments(overrides: Partial<ReturnType<typeof commentDraft>> = {
 
 function commentDraft() {
   return {
-    editingId: "1",
+    editingId: "1" as string | null,
     draft: "",
     cancelEdit: { current: false } as { current: boolean },
     setDraft: vi.fn(),
@@ -91,6 +91,88 @@ describe("CommentCell", () => {
     expect(comments.setEditingId).toHaveBeenCalledWith(null);
     expect(comments.commitComment).not.toHaveBeenCalled();
     expect(comments.cancelEdit.current).toBe(true);
+  });
+});
+
+describe("FlowRow saved-filter tint", () => {
+  function renderRow(over: Partial<ComponentProps<typeof FlowRow>> = {}) {
+    return render(
+      <div className="flow-list" style={{ "--cols": "320px" } as CSSProperties}>
+        <div className="flow-canvas">
+          <FlowRow
+            f={flowSummary()}
+            item={{ start: 0, size: 26 }}
+            columns={resolveColumns(["url"], [])}
+            selected={false}
+            inSet={false}
+            matched={false}
+            dimmed={false}
+            tint={{ color: "#ff0000", label: "api errors" }}
+            comments={editingComments({ editingId: null })}
+            onRowClick={vi.fn()}
+            onActivate={vi.fn()}
+            onOpenMenu={vi.fn()}
+            onDragStart={vi.fn()}
+            {...over}
+          />
+        </div>
+      </div>,
+    );
+  }
+
+  it("tints the row with the filter color and names it in the tooltip", async () => {
+    const screen = await renderRow();
+    const row = screen.getByTitle("saved filter: api errors").element() as HTMLElement;
+    expect(row.classList.contains("tinted")).toBe(true);
+    expect(row.style.getPropertyValue("--row-tint")).toBe("#ff0000");
+    expect(getComputedStyle(row).backgroundColor).toBe("color(srgb 1 0 0 / 0.16)");
+  });
+
+  it("yields the tint to a selected row but keeps the tooltip", async () => {
+    const screen = await renderRow({ selected: true });
+    const row = screen.getByTitle("saved filter: api errors").element() as HTMLElement;
+    expect(row.classList.contains("tinted")).toBe(false);
+    expect(row.style.getPropertyValue("--row-tint")).toBe("");
+  });
+});
+
+describe("TrafficList empty states", () => {
+  function listProps(over: Partial<ComponentProps<typeof TrafficList>> = {}) {
+    return {
+      flows: [],
+      view: { matchedIds: null, savedTints: new Map(), totalCount: 0 },
+      columns: resolveColumns(["url"], []),
+      sort: null,
+      onToggleSort: vi.fn(),
+      selectedId: null,
+      selectedIds: new Set<string>(),
+      onRowClick: vi.fn(),
+      onKeySelect: vi.fn(),
+      onClearSelection: vi.fn(),
+      onDeleteSelected: vi.fn(),
+      onCommentEdit: vi.fn(),
+      onMockFlow: vi.fn(),
+      onFilterToHost: vi.fn(),
+      onExcludeHost: vi.fn(),
+      onCopyCurl: vi.fn(),
+      onCopyBody: vi.fn(),
+      onCompareSelected: vi.fn(),
+      viewer: false,
+      ...over,
+    };
+  }
+
+  it("explains that rows are hidden by the filter when flows exist", async () => {
+    const view = { matchedIds: null, savedTints: new Map(), totalCount: 4 };
+    const screen = await render(<TrafficList {...listProps({ view })} />);
+    await expect
+      .element(screen.getByText(/All 4 requests are hidden by the active filter/))
+      .toBeVisible();
+  });
+
+  it("keeps the no-traffic onboarding hint when nothing was captured", async () => {
+    const screen = await render(<TrafficList {...listProps()} />);
+    await expect.element(screen.getByText(/No traffic yet/)).toBeVisible();
   });
 });
 
