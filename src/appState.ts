@@ -37,6 +37,7 @@ import { flowUrl } from "./flowUrl";
 import { focusMockResponseBody } from "./focusMockBody";
 import { nextIdAfterDelete, rangeSelection, toggledSet, toggleSelection } from "./selection";
 import { DEFAULT_SHORTCUTS, resolveBindings, type Bindings } from "./shortcuts";
+import { emitSettingsChanged } from "./themeSync";
 import {
   appendBulkRuleSummaries,
   appendRuleSummary,
@@ -256,6 +257,7 @@ function persistSettings(
   void api
     .setSettings(next)
     .then(async () => {
+      emitSettingsChanged();
       if (headersChanged) await refresh();
     })
     .catch((e) => setError(String(e)));
@@ -786,6 +788,7 @@ function useSettings() {
     autoStartOnLaunch: true,
     responseDelayMs: 0,
     systemProxyHotkey: "",
+    highlightColors: {},
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   return { settings, setSettings, settingsOpen, setSettingsOpen };
@@ -1717,6 +1720,8 @@ export function useAppState() {
     const prev = settings.settings;
     const headersChanged = !isEqual(next.headerColumns, prev.headerColumns);
     settings.setSettings(next);
+    // The import command already persisted; windows just need to re-read.
+    emitSettingsChanged();
     if (headersChanged) void flowStore.refresh().catch((e) => setError(String(e)));
     // Rebind the running proxy if the imported file changed the port/scope, the
     // same as an in-app settings change — otherwise the field shows the new port

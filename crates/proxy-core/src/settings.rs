@@ -1,6 +1,7 @@
 //! Proxy-wide settings. Currently: hosts to exclude from interception.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// User-configurable proxy settings, persisted by the shell.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -52,6 +53,15 @@ pub struct ProxySettings {
     /// the engine; stored here so it persists with the rest of the settings.
     #[serde(default)]
     pub system_proxy_hotkey: String,
+
+    // ---- Appearance ----
+    /// Highlight-color overrides for the UI, keyed by a semantic name the
+    /// frontend defines (see `src/theme.ts`), values `#rrggbbaa`. Sparse —
+    /// absent keys mean the stylesheet default. The engine never interprets
+    /// these; they live here so they persist and ride settings import/export
+    /// with everything else (issue #93).
+    #[serde(default)]
+    pub highlight_colors: BTreeMap<String, String>,
 }
 
 fn default_port() -> u16 {
@@ -76,6 +86,7 @@ impl Default for ProxySettings {
             auto_start_on_launch: true,
             response_delay_ms: 0,
             system_proxy_hotkey: String::new(),
+            highlight_colors: BTreeMap::new(),
         }
     }
 }
@@ -261,6 +272,26 @@ mod tests {
         let off: ProxySettings =
             serde_json::from_str("{\"autoStartOnLaunch\":false}").expect("load explicit off");
         assert!(!off.auto_start_on_launch);
+    }
+
+    #[test]
+    fn highlight_colors_default_empty_and_round_trip() {
+        // A settings.json written before this field existed must still load,
+        // with no overrides (all stylesheet defaults).
+        let legacy: ProxySettings = serde_json::from_str("{}").expect("load legacy settings");
+        assert!(legacy.highlight_colors.is_empty());
+
+        // camelCase mirror for the TS DTO, and entries survive a round-trip.
+        let mut s = ProxySettings::default();
+        s.highlight_colors
+            .insert("selected".to_string(), "#173a36ff".to_string());
+        let json = serde_json::to_string(&s).expect("serialize settings");
+        assert!(json.contains("\"highlightColors\":{\"selected\":\"#173a36ff\"}"));
+        let back: ProxySettings = serde_json::from_str(&json).expect("round-trip");
+        assert_eq!(
+            back.highlight_colors.get("selected").map(String::as_str),
+            Some("#173a36ff")
+        );
     }
 
     #[test]

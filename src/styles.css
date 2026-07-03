@@ -23,6 +23,7 @@
   /* semantic surfaces */
   --sel-bg: #173a36;
   --sel-multi-bg: rgba(96, 165, 250, 0.13);
+  --row-match-bg: rgba(45, 212, 191, 0.08);
   --row-mock-bg: rgba(45, 212, 191, 0.05);
   --row-imported-bg: rgba(167, 139, 250, 0.06);
   --drop-overlay: rgba(45, 212, 191, 0.13);
@@ -780,7 +781,7 @@ textarea {
 }
 /* filter highlight: matches keep full opacity (tinted), non-matches dim */
 .flow-canvas .flow-row.match {
-  background: rgba(45, 212, 191, 0.08);
+  background: var(--row-match-bg);
 }
 .flow-canvas .flow-row.dim {
   opacity: 0.32;
@@ -2022,6 +2023,59 @@ textarea {
 }
 code {
   font-family: var(--mono);
+}
+
+/* ---- appearance settings: highlight color rows (issue #93) ---- */
+.color-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.color-row {
+  display: grid;
+  grid-template-columns: 168px 44px auto 1fr 40px auto;
+  align-items: center;
+  gap: var(--space-5);
+}
+.color-label {
+  font-size: var(--fs-sm);
+}
+/* tints are translucent, so demo them over the traffic list's backdrop */
+.color-sample {
+  height: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+}
+.color-row input[type="color"] {
+  width: 36px;
+  height: 24px;
+  padding: 2px;
+  background: var(--bg-2);
+  cursor: pointer;
+}
+.color-row input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+.color-row input[type="color"]::-webkit-color-swatch {
+  border: none;
+  border-radius: 3px;
+}
+.color-row input[type="range"] {
+  width: 100%;
+  min-width: 90px;
+  padding: 0;
+  border: none;
+  background: none;
+  accent-color: var(--accent);
+}
+.color-pct {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---- rule tester ---- */
