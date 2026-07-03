@@ -77,7 +77,7 @@ describe("FilterChips", () => {
     const screen = await render(
       <FilterChips {...makeProps({ matchCount: 5, total: 10, onClearAll })} />,
     );
-    await expect.element(screen.getByText("of 10 match")).toHaveTextContent("5 of 10 match");
+    await expect.element(screen.getByText("5 of 10 match")).toBeVisible();
     await screen.getByRole("button", { name: "Clear filters" }).click();
     expect(onClearAll).toHaveBeenCalledOnce();
   });
