@@ -330,6 +330,16 @@ pub struct SyntheticResponse {
     pub body: Vec<u8>,
 }
 
+/// The synthetic 403 served for a `Block` rule (shared by the live handler and
+/// the offline tester so both preview and wire stay identical).
+pub(crate) fn blocked_response() -> SyntheticResponse {
+    SyntheticResponse {
+        status: 403,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        body: b"Blocked by Germi".to_vec(),
+    }
+}
+
 /// The decision produced by evaluating request-phase rules.
 #[derive(Clone, Debug)]
 pub enum RequestOutcome {
@@ -356,7 +366,10 @@ fn is_request_phase(action: &Action) -> bool {
     )
 }
 
-/// Whether an action runs in the response phase (`handle_response`).
+/// Whether an action runs in the response phase — on upstream responses in
+/// `handle_response` AND on rule-synthesized responses before they're served,
+/// so response-phase rules describe the response the client sees regardless of
+/// who produced it.
 fn is_response_phase(action: &Action) -> bool {
     matches!(
         action,
