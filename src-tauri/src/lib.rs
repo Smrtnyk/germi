@@ -76,6 +76,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(move |app| init_app_state(app, viewer))
+        // Closing the main window quits Germi; secondary windows (compare,
+        // detached rule editors) must not keep the process alive (issue #89).
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                window.app_handle().exit(0);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::proxy_status,
             commands::bound_addr,
