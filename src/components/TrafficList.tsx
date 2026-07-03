@@ -16,6 +16,7 @@ import type { Availability, FlowSummary } from "../types";
 import type { ColumnDef } from "../columns";
 import type { SortState } from "../sort";
 import { availabilityLabel } from "../availability";
+import type { RowTint } from "../savedFilters";
 import { flowUrl } from "../flowUrl";
 import { dragFlowIds, encodeFlowIds, FLOW_DRAG_MIME } from "../dnd";
 import { useToast } from "../toast";
@@ -31,12 +32,22 @@ import {
 } from "./icons";
 import { MatchRail } from "./MatchRail";
 
+/** The filter-view state the list renders against (issue #90). */
+interface ListView {
+  /** Ids to keep at full opacity (dim mode), or null when nothing dims. */
+  matchedIds: Set<string> | null;
+  /** flow id → saved-filter highlight; rows get tinted with it. */
+  savedTints: Map<string, RowTint>;
+  /** How many flows exist before filtering — drives the "all hidden" empty state. */
+  totalCount: number;
+}
+
 interface Props {
   flows: FlowSummary[];
+  view: ListView;
   columns: ColumnDef[];
   sort: SortState | null;
   onToggleSort: (columnId: string) => void;
-  matchedIds: Set<string> | null;
   selectedId: string | null;
   selectedIds: Set<string>;
   onRowClick: (id: string, e: ReactMouseEvent) => void;
@@ -406,6 +417,7 @@ interface FlowRowProps {
   inSet: boolean;
   matched: boolean;
   dimmed: boolean;
+  tint: RowTint | undefined;
   comments: CommentDraft;
   onRowClick: (id: string, e: ReactMouseEvent) => void;
   onActivate: () => void;
@@ -414,12 +426,33 @@ interface FlowRowProps {
 }
 
 /** Row tooltip: combine the "imported from file" marker hint with the mocked-by
- *  rule hint, so both cues are explained on hover. */
-function rowTitle(f: FlowSummary): string | undefined {
+ *  rule and saved-filter highlight hints, so every cue is explained on hover. */
+function rowTitle(f: FlowSummary, tint: RowTint | undefined): string | undefined {
   const parts: string[] = [];
   if (f.imported) parts.push("imported from file");
   if (f.matchedRule) parts.push(`mocked by rule: ${f.matchedRule}`);
+  if (tint) parts.push(`saved filter: ${tint.label}`);
   return parts.length ? parts.join(" · ") : undefined;
+}
+
+function rowClass(
+  f: FlowSummary,
+  s: Pick<FlowRowProps, "selected" | "inSet" | "matched" | "dimmed">,
+  tinted: boolean,
+): string {
+  return `flow-row ${s.selected ? "selected" : ""} ${s.inSet ? "checked" : ""} ${
+    f.matchedRule ? "ruled" : ""
+  } ${f.imported ? "imported" : ""} ${s.matched ? "match" : ""} ${s.dimmed ? "dim" : ""} ${
+    tinted ? "tinted" : ""
+  }`;
+}
+
+function rowStyle(item: { start: number; size: number }, tint: RowTint | undefined): CSSProperties {
+  return {
+    transform: `translateY(${item.start}px)`,
+    height: item.size,
+    ...(tint ? ({ "--row-tint": tint.color } as CSSProperties) : null),
+  };
 }
 
 function suppressShiftSelect(e: ReactMouseEvent) {
@@ -428,7 +461,7 @@ function suppressShiftSelect(e: ReactMouseEvent) {
   if (tag !== "INPUT" && tag !== "TEXTAREA") e.preventDefault();
 }
 
-function FlowRow({
+export function FlowRow({
   f,
   item,
   columns,
@@ -436,18 +469,20 @@ function FlowRow({
   inSet,
   matched,
   dimmed,
+  tint,
   comments,
   onRowClick,
   onActivate,
   onOpenMenu,
   onDragStart,
 }: FlowRowProps) {
+  // The tint yields to selection backgrounds; the row title keeps naming the
+  // filter either way.
+  const tinted = !!tint && !selected && !inSet;
   return (
     <div
-      className={`flow-row ${selected ? "selected" : ""} ${inSet ? "checked" : ""} ${
-        f.matchedRule ? "ruled" : ""
-      } ${f.imported ? "imported" : ""} ${matched ? "match" : ""} ${dimmed ? "dim" : ""}`}
-      style={{ transform: `translateY(${item.start}px)`, height: item.size }}
+      className={rowClass(f, { selected, inSet, matched, dimmed }, tinted)}
+      style={rowStyle(item, tinted ? tint : undefined)}
       draggable
       onDragStart={(e) => onDragStart(e, f)}
       onMouseDown={suppressShiftSelect}
@@ -456,7 +491,7 @@ function FlowRow({
         onActivate();
       }}
       onContextMenu={(e) => onOpenMenu(e, f)}
-      title={rowTitle(f)}
+      title={rowTitle(f, tint)}
     >
       {columns.map((c) => (
         <FlowCell key={c.id} c={c} f={f} comments={comments} />
@@ -572,12 +607,33 @@ function useFlowMenu(
   return { openMenu, menuEl };
 }
 
+/** With flows captured but none visible, the blank list needs to say WHY: the
+ *  active filters removed them, not a broken capture (issue #90). The remedy
+ *  named here must work for every narrowing mechanism — the hide-mode bar
+ *  filter AND a solo'd saved filter — which "Clear filters" does. */
+function EmptyState({ totalCount }: { totalCount: number }) {
+  if (totalCount > 0) {
+    return (
+      <div className="empty">
+        All {totalCount} requests are hidden by the active filters — use{" "}
+        <strong>Clear filters</strong> above to show everything.
+      </div>
+    );
+  }
+  return (
+    <div className="empty">
+      No traffic yet. Start the proxy, trust the CA, and point an app at
+      <code> 127.0.0.1</code>.
+    </div>
+  );
+}
+
 interface FlowScrollProps {
   flows: FlowSummary[];
+  view: ListView;
   columns: ColumnDef[];
   headerRef: React.RefObject<HTMLDivElement | null>;
   followEnabled: boolean;
-  matchedIds: Set<string> | null;
   selectedId: string | null;
   selectedIds: Set<string>;
   comments: CommentDraft;
@@ -590,10 +646,10 @@ interface FlowScrollProps {
 
 function FlowScroll({
   flows,
+  view,
   columns,
   headerRef,
   followEnabled,
-  matchedIds,
   selectedId,
   selectedIds,
   comments,
@@ -721,8 +777,9 @@ function FlowScroll({
                 columns={columns}
                 selected={f.id === selectedId}
                 inSet={selectedIds.has(f.id)}
-                matched={matchedIds !== null && matchedIds.has(f.id)}
-                dimmed={matchedIds !== null && !matchedIds.has(f.id)}
+                matched={view.matchedIds !== null && view.matchedIds.has(f.id)}
+                dimmed={view.matchedIds !== null && !view.matchedIds.has(f.id)}
+                tint={view.savedTints.get(f.id)}
                 comments={comments}
                 onRowClick={onRowClick}
                 onActivate={() => {
@@ -736,15 +793,12 @@ function FlowScroll({
           })}
         </div>
 
-        {flows.length === 0 && (
-          <div className="empty">
-            No traffic yet. Start the proxy, trust the CA, and point an app at
-            <code> 127.0.0.1</code>.
-          </div>
-        )}
+        {flows.length === 0 && <EmptyState totalCount={view.totalCount} />}
       </div>
 
-      {matchedIds !== null && <MatchRail flows={flows} matchedIds={matchedIds} onJump={jumpTo} />}
+      {view.matchedIds !== null && (
+        <MatchRail flows={flows} matchedIds={view.matchedIds} onJump={jumpTo} />
+      )}
 
       {!follow && newCount > 0 && (
         <button
@@ -761,10 +815,10 @@ function FlowScroll({
 
 export function TrafficList({
   flows,
+  view,
   columns,
   sort,
   onToggleSort,
-  matchedIds,
   selectedId,
   selectedIds,
   onRowClick,
@@ -814,10 +868,10 @@ export function TrafficList({
 
       <FlowScroll
         flows={flows}
+        view={view}
         columns={columns}
         headerRef={headerRef}
         followEnabled={sort === null}
-        matchedIds={matchedIds}
         selectedId={selectedId}
         selectedIds={selectedIds}
         comments={comments}

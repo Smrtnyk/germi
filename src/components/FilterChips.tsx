@@ -1,6 +1,24 @@
 import type { AvailabilityProgress, ResourceKind } from "../types";
 import { KIND_CHIPS, rawSegments, STATUS_CHIPS } from "../filter";
+import type { FilterViewMode } from "../savedFilters";
 import { IconClose } from "./icons";
+
+/** The issue-90 view controls riding the chips row: the hide/dim switch, the
+ *  save-filter action, and the solo'd ("only") saved filter, if any. */
+export interface FilterViewControls {
+  /** What happens to non-matching rows: removed from the list or dimmed. */
+  mode: FilterViewMode;
+  onMode: (mode: FilterViewMode) => void;
+  /** Human label of the hide/dim shortcut, for the switch tooltip. */
+  accel: string;
+  /** Whether the bar/chips hold anything — gates the hide/dim switch (which
+   *  only affects bar narrowing; "only" narrows regardless) and save-filter. */
+  barActive: boolean;
+  onSave: () => void;
+  /** The solo'd saved filter narrowing the list, or null. */
+  solo: { label: string; color: string } | null;
+  onClearSolo: () => void;
+}
 
 interface Props {
   typeChips: Set<ResourceKind>;
@@ -14,6 +32,7 @@ interface Props {
   /** Number of matching rows, or null when no filter is active. */
   matchCount: number | null;
   total: number;
+  view: FilterViewControls;
   /** Run an on-demand public-availability check over the in-scope requests. */
   onCheckAvailability: () => void;
   /** Live progress while a check runs, or null when idle. */
@@ -66,18 +85,66 @@ function AvailabilityCheckButton({
   );
 }
 
+/** The Hide/Dim switch (issue #90): whether non-matching rows leave the list
+ *  entirely (Fiddler-style, the default) or stay visible but dimmed. */
+function ViewModeSwitch({ view }: { view: FilterViewControls }) {
+  return (
+    <div className="seg filter-mode" role="group" aria-label="Non-matching requests">
+      <button
+        className={view.mode === "hide" ? "on" : ""}
+        onClick={() => view.onMode("hide")}
+        title={`Remove non-matching requests from the list (${view.accel} toggles)`}
+      >
+        Hide
+      </button>
+      <button
+        className={view.mode === "dim" ? "on" : ""}
+        onClick={() => view.onMode("dim")}
+        title={`Keep non-matching requests visible but dimmed (${view.accel} toggles)`}
+      >
+        Dim
+      </button>
+    </div>
+  );
+}
+
+/** The "only: …" chip shown while a saved filter is solo'd — the affordance
+ *  that explains why the list is narrowed even with an empty filter bar. */
+function SoloChip({
+  solo,
+  onClear,
+}: {
+  solo: { label: string; color: string };
+  onClear: () => void;
+}) {
+  return (
+    <button
+      className="fchip solo-chip on"
+      onClick={onClear}
+      title={`Showing only requests matching "${solo.label}" — click to show everything`}
+    >
+      <span className="solo-dot" style={{ background: solo.color }} />
+      only: <span className="solo-label">{solo.label}</span>
+      <IconClose />
+    </button>
+  );
+}
+
 /** The trailing status cluster: the live "searching…" hint, the `N of M` match
- *  count, and the clear-filters button (the last two only with a filter active). */
+ *  count, the hide/dim switch, save-filter, and the clear-filters button (all
+ *  but the hint only with a filter active). */
 function FilterStatus({
   searching,
   matchCount,
   total,
   onClearAll,
+  view,
 }: {
   searching: boolean;
   matchCount: number | null;
   total: number;
   onClearAll: () => void;
+  view: FilterViewControls;
 }) {
   const active = matchCount !== null;
   return (
@@ -93,6 +160,16 @@ function FilterStatus({
             </>
           )}
         </span>
+      )}
+      {view.barActive && <ViewModeSwitch view={view} />}
+      {view.barActive && (
+        <button
+          className="fchip save-filter"
+          onClick={view.onSave}
+          title="Store this filter + chips in the Filters tab under a color; matching rows get tinted"
+        >
+          + Save filter
+        </button>
       )}
       {active && (
         <button className="chips-clear" onClick={onClearAll} title="Clear all filters">
@@ -114,6 +191,7 @@ export function FilterChips({
   searching,
   matchCount,
   total,
+  view,
   onCheckAvailability,
   availabilityCheck,
   capturedDelete,
@@ -164,6 +242,7 @@ export function FilterChips({
             {c}
           </button>
         ))}
+        {view.solo && <SoloChip solo={view.solo} onClear={view.onClearSolo} />}
         <AvailabilityCheckButton onCheck={onCheckAvailability} progress={availabilityCheck} />
         <DeleteCapturedButton {...capturedDelete} />
         <FilterStatus
@@ -171,6 +250,7 @@ export function FilterChips({
           matchCount={matchCount}
           total={total}
           onClearAll={onClearAll}
+          view={view}
         />
       </div>
     </>

@@ -12,6 +12,7 @@ import { hasFlowDrag } from "./dnd";
 import type { CaInfo, FlowDetail, FlowSummary } from "./types";
 import { Toolbar } from "./components/Toolbar";
 import { FilterChips } from "./components/FilterChips";
+import { FiltersPanel, type FiltersPanelProps } from "./components/FiltersPanel";
 import { TrafficList } from "./components/TrafficList";
 import { FlowInspector } from "./components/FlowInspector";
 import { AutoresponderPanel, type AutoresponderPanelProps } from "./components/AutoresponderPanel";
@@ -74,6 +75,23 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       shortcut: prettyShortcut(s.shortcuts["focus-filter"]),
       run: () => s.filterInputRef.current?.focus(),
     },
+    {
+      id: "filter-mode",
+      group: "Traffic",
+      label:
+        s.savedFilters.viewMode === "hide"
+          ? "Dim non-matching requests (keep all rows)"
+          : "Hide non-matching requests",
+      shortcut: prettyShortcut(s.shortcuts["toggle-filter-hide"]),
+      run: s.savedFilters.toggleViewMode,
+    },
+    {
+      id: "save-filter",
+      group: "Traffic",
+      label: "Save current filter…",
+      disabled: !s.canSaveFilter,
+      run: s.saveCurrentFilter,
+    },
     { id: "clear", group: "Traffic", label: "Clear traffic", run: s.requestClearTraffic },
     {
       id: "clear-selection",
@@ -120,6 +138,13 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       label: "Show Inspector",
       shortcut: prettyShortcut(s.shortcuts["show-inspector"]),
       run: () => s.setRightTab("inspector"),
+    },
+    {
+      id: "show-filters",
+      group: "View",
+      label: "Show saved Filters",
+      shortcut: prettyShortcut(s.shortcuts["show-filters"]),
+      run: () => s.setRightTab("filters"),
     },
     ...autoViewActions,
     {
@@ -178,10 +203,12 @@ function commandActions(
   return {
     palette: () => setPaletteOpen((o) => !o),
     "focus-filter": () => focusSearch(s),
+    "toggle-filter-hide": () => s.savedFilters.toggleViewMode(),
     save: () => void s.session.saveSession(),
     open: () => s.requestOpenCapture(),
     "copy-url": () => s.copySelectedUrl(),
     "show-inspector": () => s.setRightTab("inspector"),
+    "show-filters": () => s.setRightTab("filters"),
     // The autoresponder is disabled in viewer mode, so these are no-ops there.
     "show-autoresponder": () => {
       if (!s.viewer) s.setRightTab("autoresponder");
@@ -259,8 +286,8 @@ function handleShortcut(
   setCheatOpen: (v: boolean) => void,
 ) {
   // Configurable commands run first; only their accels live in `reverse`, so the
-  // fixed combos keep their exact semantics. All eight fire even while typing
-  // (e.g. Ctrl+S in the filter), matching the previous behavior.
+  // fixed combos keep their exact semantics. All bound commands fire even while
+  // typing (e.g. Ctrl+S in the filter), matching the previous behavior.
   const accel = accelFromEvent(e);
   const cmd = accel ? reverse.get(accel) : undefined;
   if (cmd) {
@@ -286,12 +313,110 @@ function handleShortcut(
   }
 }
 
+function FindInRequestButton({ onOpenFind }: { onOpenFind: () => void }) {
+  return (
+    <button
+      className="btn ghost small"
+      title="Search the inspected request & response (Ctrl/⌘ F)"
+      onClick={onOpenFind}
+    >
+      <IconSearch /> Search
+    </button>
+  );
+}
+
+function CollapsePanelButton({ onCollapse }: { onCollapse: () => void }) {
+  return (
+    <button
+      className="btn ghost small"
+      title="Hide panel — widen the traffic list"
+      onClick={onCollapse}
+    >
+      <IconPanelCollapse />
+    </button>
+  );
+}
+
+/** The Filters tab button (issue #90), shared by the single/split/viewer
+ *  headers. The dot marks an active "only" filter — the one state that keeps
+ *  narrowing the traffic list even while this tab is out of sight. */
+function FiltersTab({
+  rightTab,
+  setRightTab,
+  soloActive,
+}: {
+  rightTab: RightTab;
+  setRightTab: (tab: RightTab) => void;
+  soloActive: boolean;
+}) {
+  return (
+    <button
+      className={rightTab === "filters" ? "tab active" : "tab"}
+      onClick={() => setRightTab("filters")}
+    >
+      Filters
+      {soloActive && <span className="live-dot" />}
+    </button>
+  );
+}
+
+/** The Inspector/Autoresponder side of the tab strip: two tabs in single mode,
+ *  one combined "Inspector + Autoresponder" tab in split mode. Flow-drags pull
+ *  the panel back over from the Filters tab so the mock drop target is visible. */
+function WorkbenchTabs({
+  rightTab,
+  setRightTab,
+  split,
+  activeScenario,
+}: {
+  rightTab: RightTab;
+  setRightTab: (tab: RightTab) => void;
+  split: boolean;
+  activeScenario: string | null;
+}) {
+  if (split) {
+    return (
+      <button
+        className={rightTab !== "filters" ? "tab active" : "tab"}
+        onClick={() => setRightTab("inspector")}
+        onDragEnter={(e) => {
+          if (hasFlowDrag(e.dataTransfer.types)) setRightTab("inspector");
+        }}
+      >
+        Inspector + Autoresponder
+        {activeScenario && <span className="live-dot" />}
+      </button>
+    );
+  }
+  return (
+    <>
+      <button
+        className={rightTab === "inspector" ? "tab active" : "tab"}
+        onClick={() => setRightTab("inspector")}
+      >
+        Inspector
+      </button>
+      <button
+        className={rightTab === "autoresponder" ? "tab active" : "tab"}
+        onClick={() => setRightTab("autoresponder")}
+        onDragEnter={(e) => {
+          if (hasFlowDrag(e.dataTransfer.types)) setRightTab("autoresponder");
+        }}
+      >
+        Autoresponder
+        {activeScenario && <span className="live-dot" />}
+      </button>
+    </>
+  );
+}
+
 function RightPanelHeader({
   rightTab,
   setRightTab,
   split,
   setRightMode,
   activeScenario,
+  soloActive,
   onCollapse,
   onOpenFind,
 }: {
@@ -300,42 +425,24 @@ function RightPanelHeader({
   split: boolean;
   setRightMode: (mode: RightMode) => void;
   activeScenario: string | null;
+  soloActive: boolean;
   onCollapse: () => void;
   onOpenFind: () => void;
 }) {
+  const inspectorShown = split ? rightTab !== "filters" : rightTab === "inspector";
   return (
     <div className="right-header">
-      {!split && (
-        <div className="tabs">
-          <button
-            className={rightTab === "inspector" ? "tab active" : "tab"}
-            onClick={() => setRightTab("inspector")}
-          >
-            Inspector
-          </button>
-          <button
-            className={rightTab === "autoresponder" ? "tab active" : "tab"}
-            onClick={() => setRightTab("autoresponder")}
-            onDragEnter={(e) => {
-              if (hasFlowDrag(e.dataTransfer.types)) setRightTab("autoresponder");
-            }}
-          >
-            Autoresponder
-            {activeScenario && <span className="live-dot" />}
-          </button>
-        </div>
-      )}
-      {split && <span className="split-label">Inspector + Autoresponder</span>}
+      <div className="tabs">
+        <WorkbenchTabs
+          rightTab={rightTab}
+          setRightTab={setRightTab}
+          split={split}
+          activeScenario={activeScenario}
+        />
+        <FiltersTab rightTab={rightTab} setRightTab={setRightTab} soloActive={soloActive} />
+      </div>
       <div className="spacer" />
-      {(split || rightTab === "inspector") && (
-        <button
-          className="btn ghost small"
-          title="Search the inspected request & response (Ctrl/⌘ F)"
-          onClick={onOpenFind}
-        >
-          <IconSearch /> Search
-        </button>
-      )}
+      {inspectorShown && <FindInRequestButton onOpenFind={onOpenFind} />}
       <button
         className={split ? "btn active small" : "btn ghost small"}
         title={split ? "Show one panel at a time" : "Show Inspector and Autoresponder together"}
@@ -343,15 +450,89 @@ function RightPanelHeader({
       >
         <IconSplit /> Split
       </button>
-      <button
-        className="btn ghost small"
-        title="Hide panel — widen the traffic list"
-        onClick={onCollapse}
-      >
-        <IconPanelCollapse />
-      </button>
+      <CollapsePanelButton onCollapse={onCollapse} />
     </div>
   );
+}
+
+interface InspectorProps {
+  detail: FlowDetail | null;
+  summary: FlowSummary | undefined;
+  loading: boolean;
+  decode: boolean;
+  onMock: (detail: FlowDetail) => void;
+  onLoadFull: () => void;
+  selectedSummaries: FlowSummary[];
+  onSelectOne: (id: string) => void;
+  onMockMany: (ids: string[]) => void;
+  onCompare: () => void;
+  onClearSelection: () => void;
+  inspectorFindRef: AppStateValue["inspectorFindRef"];
+}
+
+/** Viewer mode disables the autoresponder entirely: Inspector + Filters tabs,
+ *  no split / autoresponder pane. */
+function ViewerPanel({
+  rightTab,
+  setRightTab,
+  onCollapse,
+  inspector,
+  filters,
+}: {
+  rightTab: RightTab;
+  setRightTab: (tab: RightTab) => void;
+  onCollapse: () => void;
+  inspector: InspectorProps;
+  filters: FiltersPanelProps;
+}) {
+  const filtersVisible = rightTab === "filters";
+  return (
+    <div className="right-panel">
+      <div className="right-header">
+        <div className="tabs">
+          <button
+            className={!filtersVisible ? "tab active" : "tab"}
+            onClick={() => setRightTab("inspector")}
+          >
+            Inspector
+          </button>
+          <FiltersTab
+            rightTab={rightTab}
+            setRightTab={setRightTab}
+            soloActive={filters.soloId !== null}
+          />
+        </div>
+        <div className="spacer" />
+        {!filtersVisible && (
+          <FindInRequestButton
+            onOpenFind={() => inspector.inspectorFindRef.current?.openFind(undefined, "body")}
+          />
+        )}
+        <CollapsePanelButton onCollapse={onCollapse} />
+      </div>
+      <div className="right-content">
+        <div className={!filtersVisible ? "pane" : "pane hidden"}>
+          <FlowInspector {...inspector} viewer />
+        </div>
+        <div className={filtersVisible ? "pane" : "pane hidden"}>
+          <FiltersPanel {...filters} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Which panes show for a tab/mode combination: the Filters tab replaces both
+ *  workbench panes (even in split), otherwise split shows the pair and single
+ *  mode shows the active tab. */
+function paneVisibility(rightTab: RightTab, split: boolean) {
+  const filters = rightTab === "filters";
+  return {
+    filters,
+    inspector: !filters && (split || rightTab === "inspector"),
+    auto: !filters && (split || rightTab === "autoresponder"),
+    splitPair: split && !filters,
+  };
 }
 
 function RightPanel({
@@ -363,6 +544,7 @@ function RightPanel({
   onCollapse,
   inspector,
   auto,
+  filters,
   viewer,
 }: {
   rightTab: RightTab;
@@ -371,58 +553,25 @@ function RightPanel({
   setRightMode: (mode: RightMode) => void;
   activeScenario: string | null;
   onCollapse: () => void;
-  inspector: {
-    detail: FlowDetail | null;
-    summary: FlowSummary | undefined;
-    loading: boolean;
-    decode: boolean;
-    onMock: (detail: FlowDetail) => void;
-    onLoadFull: () => void;
-    selectedSummaries: FlowSummary[];
-    onSelectOne: (id: string) => void;
-    onMockMany: (ids: string[]) => void;
-    onCompare: () => void;
-    onClearSelection: () => void;
-    inspectorFindRef: AppStateValue["inspectorFindRef"];
-  };
+  inspector: InspectorProps;
   auto: AutoresponderPanelProps;
+  filters: FiltersPanelProps;
   viewer: boolean;
 }) {
-  // Viewer mode disables the autoresponder entirely: an Inspector-only panel,
-  // no tabs / split / autoresponder pane.
   if (viewer) {
     return (
-      <div className="right-panel">
-        <div className="right-header">
-          <span className="split-label">Inspector</span>
-          <div className="spacer" />
-          <button
-            className="btn ghost small"
-            title="Search the inspected request & response (Ctrl/⌘ F)"
-            onClick={() => inspector.inspectorFindRef.current?.openFind(undefined, "body")}
-          >
-            <IconSearch /> Search
-          </button>
-          <button
-            className="btn ghost small"
-            title="Hide panel — widen the traffic list"
-            onClick={onCollapse}
-          >
-            <IconPanelCollapse />
-          </button>
-        </div>
-        <div className="right-content">
-          <div className="pane">
-            <FlowInspector {...inspector} viewer />
-          </div>
-        </div>
-      </div>
+      <ViewerPanel
+        rightTab={rightTab}
+        setRightTab={setRightTab}
+        onCollapse={onCollapse}
+        inspector={inspector}
+        filters={filters}
+      />
     );
   }
 
   const split = rightMode === "split";
-  const inspectorVisible = split || rightTab === "inspector";
-  const autoVisible = split || rightTab === "autoresponder";
+  const panes = paneVisibility(rightTab, split);
 
   return (
     <div className="right-panel">
@@ -432,16 +581,20 @@ function RightPanel({
         split={split}
         setRightMode={setRightMode}
         activeScenario={activeScenario}
+        soloActive={filters.soloId !== null}
         onCollapse={onCollapse}
         onOpenFind={() => inspector.inspectorFindRef.current?.openFind(undefined, "body")}
       />
 
-      <div className={`right-content ${split ? "split" : ""}`}>
-        <div className={inspectorVisible ? "pane" : "pane hidden"}>
+      <div className={`right-content ${panes.splitPair ? "split" : ""}`}>
+        <div className={panes.inspector ? "pane" : "pane hidden"}>
           <FlowInspector {...inspector} viewer={false} />
         </div>
-        <div className={autoVisible ? "pane" : "pane hidden"}>
+        <div className={panes.auto ? "pane" : "pane hidden"}>
           <AutoresponderPanel {...auto} />
+        </div>
+        <div className={panes.filters ? "pane" : "pane hidden"}>
+          <FiltersPanel {...filters} />
         </div>
       </div>
     </div>
@@ -544,12 +697,21 @@ export function App() {
               statusChips={s.filtering.statusChips}
               onToggleType={s.filtering.toggleTypeChip}
               onToggleStatus={s.filtering.toggleStatusChip}
-              onClearAll={s.filtering.resetFilter}
+              onClearAll={s.clearAllFilters}
               filter={s.filtering.filter}
               onFilterChange={s.filtering.setFilter}
-              searching={s.filtering.searching}
+              searching={s.searchBusy}
               matchCount={s.matchCount}
               total={s.flowStore.flows.length}
+              view={{
+                mode: s.savedFilters.viewMode,
+                onMode: s.savedFilters.setViewMode,
+                accel: prettyShortcut(s.shortcuts["toggle-filter-hide"]),
+                barActive: s.canSaveFilter,
+                onSave: s.saveCurrentFilter,
+                solo: s.savedFilters.soloChip,
+                onClearSolo: s.savedFilters.clearSolo,
+              }}
               onCheckAvailability={s.checkAvailability}
               availabilityCheck={s.availabilityCheck}
               capturedDelete={{
@@ -560,10 +722,14 @@ export function App() {
             />
             <TrafficList
               flows={s.flows}
+              view={{
+                matchedIds: s.savedFilters.listMatchedIds,
+                savedTints: s.savedFilters.tints,
+                totalCount: s.flowStore.flows.length,
+              }}
               columns={s.columns.visibleColumns}
               sort={s.sort}
               onToggleSort={s.toggleSort}
-              matchedIds={s.filtering.matchedIds}
               selectedId={s.selection.selectedId}
               selectedIds={s.selection.selectedIds}
               onRowClick={s.handleRowClick}
@@ -602,6 +768,16 @@ export function App() {
               activeScenario={s.activeScenario}
               onCollapse={() => s.setRightCollapsed(true)}
               viewer={s.viewer}
+              filters={{
+                filters: s.savedFilters.filters,
+                soloId: s.savedFilters.soloId,
+                counts: s.savedFilters.counts,
+                canSaveCurrent: s.canSaveFilter,
+                onSaveCurrent: s.saveCurrentFilter,
+                onUpdate: s.savedFilters.updateFilter,
+                onRemove: s.savedFilters.removeFilter,
+                onSolo: s.savedFilters.setSolo,
+              }}
               inspector={{
                 detail: s.inspector.detail,
                 summary: s.selectedSummary,

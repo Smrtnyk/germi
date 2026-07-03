@@ -3,9 +3,22 @@ import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
 import type { ResourceKind } from "../types";
-import { FilterChips } from "./FilterChips";
+import { FilterChips, type FilterViewControls } from "./FilterChips";
 
 type Props = ComponentProps<typeof FilterChips>;
+
+function makeView(overrides: Partial<FilterViewControls> = {}): FilterViewControls {
+  return {
+    mode: "hide",
+    onMode: vi.fn(),
+    accel: "Ctrl / ⌘ H",
+    barActive: false,
+    onSave: vi.fn(),
+    solo: null,
+    onClearSolo: vi.fn(),
+    ...overrides,
+  };
+}
 
 function makeProps(overrides: Partial<Props> = {}): Props {
   return {
@@ -19,6 +32,7 @@ function makeProps(overrides: Partial<Props> = {}): Props {
     searching: false,
     matchCount: null,
     total: 0,
+    view: makeView(),
     onCheckAvailability: vi.fn(),
     availabilityCheck: null,
     capturedDelete: { capturedCount: 0, importedCount: 0, onDelete: vi.fn() },
@@ -115,5 +129,45 @@ describe("FilterChips", () => {
     const screen = await render(<FilterChips {...makeProps({ capturedDelete })} />);
     const btn = screen.getByRole("button", { name: /Delete captured/ });
     await expect.element(btn).not.toBeInTheDocument();
+  });
+
+  it("shows the Hide/Dim switch only while the bar filter is active", async () => {
+    const soloOnly = await render(
+      <FilterChips {...makeProps({ matchCount: 3, total: 5, view: makeView() })} />,
+    );
+    await expect.element(soloOnly.getByRole("button", { name: "Hide" })).not.toBeInTheDocument();
+    await soloOnly.unmount();
+
+    const onMode = vi.fn();
+    const view = makeView({ barActive: true, onMode });
+    const screen = await render(<FilterChips {...makeProps({ matchCount: 3, total: 5, view })} />);
+    await expect.element(screen.getByRole("button", { name: "Hide" })).toHaveClass("on");
+    await screen.getByRole("button", { name: "Dim" }).click();
+    expect(onMode).toHaveBeenCalledWith("dim");
+  });
+
+  it("offers Save filter when the bar holds something and reports the save", async () => {
+    const onSave = vi.fn();
+    const view = makeView({ barActive: true, onSave });
+    const screen = await render(<FilterChips {...makeProps({ matchCount: 2, total: 4, view })} />);
+    await screen.getByRole("button", { name: "+ Save filter" }).click();
+    expect(onSave).toHaveBeenCalledOnce();
+  });
+
+  it("hides Save filter when there is nothing to save", async () => {
+    const screen = await render(<FilterChips {...makeProps()} />);
+    await expect
+      .element(screen.getByRole("button", { name: "+ Save filter" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("names the solo'd filter in an only-chip and clears it on click", async () => {
+    const onClearSolo = vi.fn();
+    const view = makeView({ solo: { label: "host:api 4xx", color: "#e879f9" }, onClearSolo });
+    const screen = await render(<FilterChips {...makeProps({ matchCount: 1, total: 9, view })} />);
+    const chip = screen.getByRole("button", { name: /only: host:api 4xx/ });
+    await expect.element(chip).toBeVisible();
+    await chip.click();
+    expect(onClearSolo).toHaveBeenCalledOnce();
   });
 });

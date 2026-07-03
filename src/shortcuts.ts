@@ -14,11 +14,13 @@ type ModifierKeys = Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shif
 export type CommandId =
   | "palette"
   | "focus-filter"
+  | "toggle-filter-hide"
   | "save"
   | "open"
   | "copy-url"
   | "show-inspector"
   | "show-autoresponder"
+  | "show-filters"
   | "edit-mock-body";
 
 export type Accel = string;
@@ -33,11 +35,13 @@ export interface ShortcutCommand {
 export const SHORTCUT_COMMANDS: readonly ShortcutCommand[] = [
   { id: "palette", label: "Open command palette", default: "Mod+K" },
   { id: "focus-filter", label: "Find in request / focus filter", default: "Mod+F" },
+  { id: "toggle-filter-hide", label: "Hide / dim non-matching requests", default: "Mod+H" },
   { id: "save", label: "Save session", default: "Mod+S" },
   { id: "open", label: "Open session", default: "Mod+O" },
   { id: "copy-url", label: "Copy URL of selected request", default: "Mod+U" },
   { id: "show-inspector", label: "Show Inspector", default: "Mod+1" },
   { id: "show-autoresponder", label: "Show Autoresponder", default: "Mod+2" },
+  { id: "show-filters", label: "Show saved Filters", default: "Mod+3" },
   { id: "edit-mock-body", label: "Edit mock response body", default: "F2" },
 ];
 
