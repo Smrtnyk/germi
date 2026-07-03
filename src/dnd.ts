@@ -1,5 +1,6 @@
 export const FLOW_DRAG_MIME = "application/x-germi-flows";
 export const RULE_DRAG_MIME = "application/x-germi-rule";
+export const COLOR_DRAG_MIME = "application/x-germi-color";
 
 export function dragFlowIds(
   rowId: string,
@@ -31,4 +32,10 @@ export function decodeFlowIds(data: string): string[] {
 
 export function hasFlowDrag(types: readonly string[]): boolean {
   return types.includes(FLOW_DRAG_MIME);
+}
+
+/** A color swatch drag (in-app), or plain text that may hold a pasted hex
+ *  (e.g. dropped from an external color tool) — parsing decides on drop. */
+export function hasColorDrag(types: readonly string[]): boolean {
+  return types.includes(COLOR_DRAG_MIME) || types.includes("text/plain");
 }

@@ -120,6 +120,20 @@ export function joinHex8({ hex, alphaPct }: ColorParts): string {
   return `${hex.toLowerCase()}${byte.toString(16).padStart(2, "0")}`;
 }
 
+/**
+ * Parse a hand-typed or dropped hex entry (`#` optional, case-insensitive).
+ * A 6-digit hex keeps `fallbackAlphaPct` — the opacity slider owns alpha, so
+ * pasting a hue doesn't blow away the tint's translucency — while an explicit
+ * 8-digit hex sets both.
+ */
+export function parseHexEntry(text: string, fallbackAlphaPct: number): ColorParts | null {
+  const t = text.trim().toLowerCase();
+  const hex = t.startsWith("#") ? t : `#${t}`;
+  if (/^#[0-9a-f]{6}$/.test(hex)) return { hex, alphaPct: fallbackAlphaPct };
+  const norm = normalizeHex8(hex);
+  return norm === null ? null : splitHex8(norm);
+}
+
 /** The color a spec currently shows: its valid override, else its default. */
 export function effectiveColor(
   overrides: Record<string, string>,

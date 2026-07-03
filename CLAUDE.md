@@ -220,6 +220,9 @@ and the diff specs derive their `-hl` intra-line mark at 3× alpha).
 (`themeSync.ts`), re-applying on the frontend-emitted
 `germi://settings-changed` event; the Appearance section previews by writing
 the custom properties live and commits once per interaction (native `change`).
+Rows also take direct hex entry (6-digit keeps the row's opacity, 8-digit
+sets it — `parseHexEntry`) and drag-a-swatch-onto-another-row hue copy
+(`COLOR_DRAG_MIME` in `dnd.ts`; drops copy the hue, never the opacity).
 
 Deferred (not started): repeater (edit & resend), breakpoints, WebSocket frame
 editing, HTTP/2, upstream/parent-proxy chaining, SQLite-backed persistent store.
