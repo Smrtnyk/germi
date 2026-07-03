@@ -77,6 +77,26 @@ export function visiblePaneFlows(
   return query.sort ? sortPaneFlows(kept, query.sort, matches) : kept;
 }
 
+// ---- filter linking across the two panes (issue #88) ----
+
+/** True when the query carries any filter state (text or kind chips); the
+ *  sort is a per-pane view preference and never counts. */
+export function hasPaneFilter(query: PaneQuery): boolean {
+  return query.filter.trim() !== "" || query.kinds.size > 0;
+}
+
+/** Copy the filter half (text + kind chips) of `source` onto `target`,
+ *  leaving the target's own sort alone. */
+export function copyPaneFilter(source: PaneQuery, target: PaneQuery): PaneQuery {
+  return { ...target, filter: source.filter, kinds: new Set(source.kinds) };
+}
+
+/** The side whose filter survives when the panes get (re-)linked: the only
+ *  side that has one, or the left side when both (or neither) do. */
+export function linkSourceSide(left: PaneQuery, right: PaneQuery): "left" | "right" {
+  return hasPaneFilter(right) && !hasPaneFilter(left) ? "right" : "left";
+}
+
 // ---- selection (single focus + shift/ctrl multi-select, per pane) ----
 
 export interface PaneSelection {

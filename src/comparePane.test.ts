@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  copyPaneFilter,
   emptyPaneQuery,
   extractFlows,
+  hasPaneFilter,
+  linkSourceSide,
   movePaneFlows,
   paneData,
   selectMany,
@@ -63,6 +66,36 @@ describe("visiblePaneFlows", () => {
       matches,
     );
     expect(best.map((f) => f.id)).toEqual(["b", "c", "a"]);
+  });
+});
+
+describe("filter linking", () => {
+  it("counts text and kind chips as filter state but never the sort", () => {
+    expect(hasPaneFilter(query())).toBe(false);
+    expect(hasPaneFilter(query({ filter: "   " }))).toBe(false);
+    expect(hasPaneFilter(query({ filter: "host:api" }))).toBe(true);
+    expect(hasPaneFilter(query({ kinds: new Set<ResourceKind>(["js"]) }))).toBe(true);
+    expect(hasPaneFilter(query({ sort: { columnId: "status", dir: "asc" } }))).toBe(false);
+  });
+
+  it("copies the text and kinds onto the target but keeps the target's sort", () => {
+    const source = query({ filter: "host:api", kinds: new Set<ResourceKind>(["xhr"]) });
+    const target = query({ filter: "old", sort: { columnId: "seq", dir: "desc" } });
+    const copied = copyPaneFilter(source, target);
+    expect(copied.filter).toBe("host:api");
+    expect([...copied.kinds]).toEqual(["xhr"]);
+    expect(copied.sort).toEqual({ columnId: "seq", dir: "desc" });
+    expect(copied.kinds).not.toBe(source.kinds);
+  });
+
+  it("relinks from the only side that has a filter", () => {
+    expect(linkSourceSide(query(), query({ filter: "cdn" }))).toBe("right");
+    expect(linkSourceSide(query({ kinds: new Set<ResourceKind>(["js"]) }), query())).toBe("left");
+  });
+
+  it("prefers the left side when both (or neither) have a filter", () => {
+    expect(linkSourceSide(query({ filter: "a" }), query({ filter: "b" }))).toBe("left");
+    expect(linkSourceSide(query(), query())).toBe("left");
   });
 });
 

@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type MouseEvent as ReactMouseEvent,
+  type SetStateAction,
+} from "react";
 
 import { api } from "../ipc";
 import { flowUrl } from "../flowUrl";
@@ -7,6 +15,8 @@ import { isTypingTarget } from "../hotkey";
 import { nextSort } from "../sort";
 import { toggledSet } from "../selection";
 import {
+  copyPaneFilter,
+  linkSourceSide,
   movePaneFlows,
   paneData,
   selectOnly,
@@ -20,18 +30,14 @@ import {
 } from "../comparePane";
 import { useToast, type Notify } from "../toast";
 import { CompareDiff } from "./CompareDiff";
+import { CompareGutter } from "./CompareGutter";
 import { ComparePane, type ComparePaneProps } from "./ComparePane";
-import {
-  IconArrowLeft,
-  IconArrowRight,
-  IconChevronRight,
-  IconCompare,
-  IconDiff,
-  IconOpen,
-} from "./icons";
+import { IconArrowLeft, IconChevronRight, IconCompare, IconDiff, IconOpen } from "./icons";
 import type { FlowSummary, ResourceKind } from "../types";
 
 type Side = "left" | "right";
+
+const otherSide = (side: Side): Side => (side === "left" ? "right" : "left");
 
 function matchMap(list: FlowSummary[], other: FlowSummary | null): Map<string, number> | null {
   if (!other) return null;
@@ -53,17 +59,23 @@ interface PaneOps {
   toggleSort: (columnId: PaneColumnId) => void;
 }
 
-function paneOps(pane: PaneData, setPane: (p: PaneData) => void, visibleIds: string[]): PaneOps {
-  const setQuery = (query: PaneQuery) => setPane({ ...pane, query });
+/** Filter and kind edits go through `applyQuery` so linking can mirror them
+ *  to the other pane; the sort stays a per-pane view preference. */
+function paneOps(
+  pane: PaneData,
+  setPane: (p: PaneData) => void,
+  visibleIds: string[],
+  applyQuery: (query: PaneQuery) => void,
+): PaneOps {
   return {
     click: (id, e) =>
       setPane({ ...pane, sel: selectRow(pane.sel, visibleIds, id, modeFromEvent(e)) }),
     step: (dir, extend) =>
       setPane({ ...pane, sel: stepSelection(pane.sel, visibleIds, dir, extend) }),
-    setFilter: (filter) => setQuery({ ...pane.query, filter }),
-    toggleKind: (kind) => setQuery({ ...pane.query, kinds: toggledSet(pane.query.kinds, kind) }),
+    setFilter: (filter) => applyQuery({ ...pane.query, filter }),
+    toggleKind: (kind) => applyQuery({ ...pane.query, kinds: toggledSet(pane.query.kinds, kind) }),
     toggleSort: (columnId) =>
-      setQuery({ ...pane.query, sort: nextSort(pane.query.sort, columnId) }),
+      setPane({ ...pane, query: { ...pane.query, sort: nextSort(pane.query.sort, columnId) } }),
   };
 }
 
@@ -81,6 +93,11 @@ function useComparePanes(initialLeft: FlowSummary[], initialRight: FlowSummary[]
   const [left, setLeft] = useState(() => paneData(initialLeft));
   const [right, setRight] = useState(() => paneData(initialRight));
   const [activeSide, setActiveSide] = useState<Side>("left");
+  const [linked, setLinked] = useState(true);
+  const setters: Record<Side, Dispatch<SetStateAction<PaneData>>> = {
+    left: setLeft,
+    right: setRight,
+  };
 
   const leftFocused = left.flows.find((f) => f.id === left.sel.focusedId) ?? null;
   const rightFocused = right.flows.find((f) => f.id === right.sel.focusedId) ?? null;
@@ -98,6 +115,27 @@ function useComparePanes(initialLeft: FlowSummary[], initialRight: FlowSummary[]
     [right, rightMatches],
   );
 
+  /** Write a side's query; while linked, mirror the filter half across. */
+  function applyQuery(side: Side, query: PaneQuery) {
+    setters[side]((cur) => ({ ...cur, query }));
+    if (linked) copyFilterTo(otherSide(side), query);
+  }
+
+  function copyFilterTo(side: Side, source: PaneQuery) {
+    setters[side]((cur) => ({ ...cur, query: copyPaneFilter(source, cur.query) }));
+  }
+
+  function copyFilter(from: Side) {
+    copyFilterTo(otherSide(from), from === "left" ? left.query : right.query);
+  }
+
+  /** Re-linking syncs both sides from the surviving filter (issue #88: the
+   *  only filled-in side, or the left one when both are). */
+  function toggleLinked() {
+    if (!linked) copyFilter(linkSourceSide(left.query, right.query));
+    setLinked(!linked);
+  }
+
   const sides: Record<Side, SideState> = {
     left: {
       data: left,
@@ -108,6 +146,7 @@ function useComparePanes(initialLeft: FlowSummary[], initialRight: FlowSummary[]
         left,
         setLeft,
         leftVisible.map((f) => f.id),
+        (query) => applyQuery("left", query),
       ),
     },
     right: {
@@ -119,6 +158,7 @@ function useComparePanes(initialLeft: FlowSummary[], initialRight: FlowSummary[]
         right,
         setRight,
         rightVisible.map((f) => f.id),
+        (query) => applyQuery("right", query),
       ),
     },
   };
@@ -144,7 +184,7 @@ function useComparePanes(initialLeft: FlowSummary[], initialRight: FlowSummary[]
 
   function rowMove(side: Side, id: string) {
     const inSelection = sides[side].data.sel.selectedIds.has(id);
-    move(side === "left" ? "right" : "left", inSelection ? null : new Set([id]));
+    move(otherSide(side), inSelection ? null : new Set([id]));
   }
 
   function click(side: Side, id: string, e: ReactMouseEvent) {
@@ -163,6 +203,9 @@ function useComparePanes(initialLeft: FlowSummary[], initialRight: FlowSummary[]
   return {
     sides,
     activeSide,
+    linked,
+    toggleLinked,
+    copyFilter,
     stepActive: (dir: 1 | -1, extend: boolean) => sides[activeSide].ops.step(dir, extend),
     moveRight: (ids: Set<string> | null = null) => move("right", ids),
     moveLeft: (ids: Set<string> | null = null) => move("left", ids),
@@ -398,24 +441,15 @@ export function CompareView({ initialLeft, initialRight, onClose }: CompareViewP
       ) : (
         <div className="compare-body">
           <ComparePane {...paneProps("left")} />
-          <div className="compare-gutter">
-            <button
-              className="btn ghost"
-              disabled={left.focused === null}
-              onClick={() => panes.moveRight()}
-              title="Move the selected requests to the right side (→)"
-            >
-              <IconArrowRight />
-            </button>
-            <button
-              className="btn ghost"
-              disabled={right.focused === null}
-              onClick={() => panes.moveLeft()}
-              title="Move the selected requests back to the left side (←)"
-            >
-              <IconArrowLeft />
-            </button>
-          </div>
+          <CompareGutter
+            linked={panes.linked}
+            canMoveRight={left.focused !== null}
+            canMoveLeft={right.focused !== null}
+            onToggleLinked={panes.toggleLinked}
+            onCopyFilter={panes.copyFilter}
+            onMoveRight={() => panes.moveRight()}
+            onMoveLeft={() => panes.moveLeft()}
+          />
           <ComparePane
             {...paneProps("right")}
             actions={
