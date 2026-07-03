@@ -141,7 +141,8 @@ export type Action =
   | { kind: "setRequestHeader"; name: string; value: string }
   | { kind: "setResponseHeader"; name: string; value: string }
   | { kind: "setStatus"; status: number }
-  | { kind: "rewriteResponseBody"; find: string; replace: string; regex: boolean };
+  | { kind: "rewriteResponseBody"; find: string; replace: string; regex: boolean }
+  | { kind: "cors" };
 
 export type ActionKind = Action["kind"];
 
@@ -161,7 +162,8 @@ export type ActionSummary =
   | { kind: "setRequestHeader"; name: string }
   | { kind: "setResponseHeader"; name: string }
   | { kind: "setStatus"; status: number }
-  | { kind: "rewriteResponseBody" };
+  | { kind: "rewriteResponseBody" }
+  | { kind: "cors" };
 
 export interface RuleSummary {
   id: string;

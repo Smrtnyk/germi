@@ -126,6 +126,7 @@ describe("actionLabel", () => {
     expect(actionLabel({ kind: "setResponseHeader", name: "X-Cache" })).toBe("resp X-Cache");
     expect(actionLabel({ kind: "setRequestHeader", name: "" })).toBe("req header");
     expect(actionLabel({ kind: "rewriteResponseBody" })).toBe("rewrite body");
+    expect(actionLabel({ kind: "cors" })).toBe("allow CORS");
   });
 });
 

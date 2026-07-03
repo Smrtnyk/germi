@@ -599,6 +599,7 @@ fn action_columns(action: &Action) -> (&'static str, Option<u16>, Option<&str>, 
         }
         Action::SetStatus { status } => ("setStatus", Some(*status), None, None),
         Action::RewriteResponseBody { .. } => ("rewriteResponseBody", None, None, None),
+        Action::Cors => ("cors", None, None, None),
     }
 }
 

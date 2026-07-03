@@ -17,7 +17,7 @@ use std::sync::{LazyLock, Mutex};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::flow::{CapturedRequest, CapturedResponse, Flow};
+use crate::flow::{header, CapturedRequest, CapturedResponse, Flow};
 
 /// Compile-once cache for user rule regexes. The same pattern is evaluated on
 /// every intercepted request (and response), so memoize the compiled `Regex`
@@ -141,6 +141,13 @@ pub enum Action {
         #[serde(default)]
         regex: bool,
     },
+
+    // --- dual-phase ---
+    /// Make matching traffic CORS-friendly: answer genuine preflights with a
+    /// synthesized 204 (request phase) and stamp echo-based Access-Control
+    /// headers on matching responses (response phase). Echoing the request's
+    /// `Origin` — never `*` — keeps credentialed requests working.
+    Cors,
 }
 
 fn default_ok() -> u16 {
@@ -259,6 +266,7 @@ pub enum ActionSummary {
         status: u16,
     },
     RewriteResponseBody,
+    Cors,
 }
 
 impl From<&Action> for ActionSummary {
@@ -282,6 +290,7 @@ impl From<&Action> for ActionSummary {
             }
             Action::SetStatus { status } => Self::SetStatus { status: *status },
             Action::RewriteResponseBody { .. } => Self::RewriteResponseBody,
+            Action::Cors => Self::Cors,
         }
     }
 }
@@ -363,6 +372,7 @@ fn is_request_phase(action: &Action) -> bool {
             | Action::MapLocal { .. }
             | Action::Block
             | Action::SetRequestHeader { .. }
+            | Action::Cors
     )
 }
 
@@ -376,6 +386,7 @@ fn is_response_phase(action: &Action) -> bool {
         Action::SetResponseHeader { .. }
             | Action::SetStatus { .. }
             | Action::RewriteResponseBody { .. }
+            | Action::Cors
     )
 }
 
@@ -427,6 +438,134 @@ fn read_map_local(path: &str) -> Option<Vec<u8>> {
         return None;
     }
     std::fs::read(path).ok()
+}
+
+/// A genuine CORS preflight: `OPTIONS` carrying both `Origin` and
+/// `Access-Control-Request-Method`. Plain OPTIONS requests are not preflights
+/// and must keep flowing through the normal pipeline.
+fn is_preflight(req: &CapturedRequest) -> bool {
+    req.method.eq_ignore_ascii_case("OPTIONS")
+        && header(&req.headers, "origin").is_some_and(|v| !v.is_empty())
+        && header(&req.headers, "access-control-request-method").is_some_and(|v| !v.is_empty())
+}
+
+/// Synthesize the answer to a preflight: a 204 echoing back exactly what the
+/// browser asked for. Echoing (rather than `*`) is what keeps credentialed
+/// requests working — browsers reject `*` when cookies/Authorization are sent.
+fn preflight_response(req: &CapturedRequest) -> Option<SyntheticResponse> {
+    if !is_preflight(req) {
+        return None;
+    }
+    let origin = header(&req.headers, "origin")?;
+    let method = header(&req.headers, "access-control-request-method")?;
+    let mut headers = vec![
+        ("access-control-allow-origin".to_string(), origin.to_string()),
+        ("access-control-allow-methods".to_string(), method.to_string()),
+        ("access-control-allow-credentials".to_string(), "true".to_string()),
+        ("access-control-max-age".to_string(), "600".to_string()),
+        (
+            "vary".to_string(),
+            "Origin, Access-Control-Request-Method, Access-Control-Request-Headers".to_string(),
+        ),
+    ];
+    if let Some(requested) =
+        header(&req.headers, "access-control-request-headers").filter(|v| !v.is_empty())
+    {
+        headers.insert(
+            2,
+            ("access-control-allow-headers".to_string(), requested.to_string()),
+        );
+    }
+    Some(SyntheticResponse {
+        status: 204,
+        headers,
+        body: Vec::new(),
+    })
+}
+
+/// Response headers browsers expose to page JS without an
+/// `Access-Control-Expose-Headers` entry (the CORS safelist), plus headers that
+/// are never exposable (`Set-Cookie`) or meaningless to list (hop-by-hop,
+/// recomputed framing, `Vary`).
+fn is_expose_excluded(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("access-control-")
+        || matches!(
+            lower.as_str(),
+            "cache-control"
+                | "content-language"
+                | "content-length"
+                | "content-type"
+                | "expires"
+                | "last-modified"
+                | "pragma"
+                | "set-cookie"
+                | "set-cookie2"
+                | "vary"
+                | "content-encoding"
+                | "transfer-encoding"
+                | "connection"
+                | "keep-alive"
+                | "te"
+                | "trailer"
+                | "upgrade"
+        )
+}
+
+/// Add `Origin` to the response's `Vary` (creating it if absent) so caches
+/// never serve one origin's Allow-Origin echo to another. `Vary: *` already
+/// covers everything and is left alone.
+fn add_vary_origin(headers: &mut Vec<(String, String)>) {
+    match headers.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case("vary")) {
+        Some((_, value)) => {
+            let covered = value
+                .split(',')
+                .any(|t| t.trim() == "*" || t.trim().eq_ignore_ascii_case("origin"));
+            if !covered {
+                *value = format!("{value}, Origin");
+            }
+        }
+        None => headers.push(("vary".to_string(), "Origin".to_string())),
+    }
+}
+
+/// Stamp echo-based CORS headers onto a response (mocked or passed through).
+/// Existing Allow-Origin values are overwritten — the rule's purpose is forcing
+/// permissive CORS, and its matcher scopes what it touches. Expose-Headers is
+/// derived from the response's own non-safelisted header names so page JS can
+/// read them. Preflights are skipped: matching ones were already answered in
+/// the request phase. Returns whether the response was touched.
+fn inject_cors(req: &CapturedRequest, resp: &mut CapturedResponse) -> bool {
+    if is_preflight(req) {
+        return false;
+    }
+    let Some(origin) = header(&req.headers, "origin").filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    let origin = origin.to_string();
+    let mut seen: Vec<String> = Vec::new();
+    let expose: Vec<String> = resp
+        .headers
+        .iter()
+        .map(|(k, _)| k.clone())
+        .filter(|k| !is_expose_excluded(k))
+        .filter(|k| {
+            let lower = k.to_ascii_lowercase();
+            if seen.contains(&lower) {
+                false
+            } else {
+                seen.push(lower);
+                true
+            }
+        })
+        .collect();
+    if !expose.is_empty() {
+        set_header(&mut resp.headers, "access-control-expose-headers", &expose.join(", "));
+    }
+    set_header(&mut resp.headers, "access-control-allow-origin", &origin);
+    set_header(&mut resp.headers, "access-control-allow-credentials", "true");
+    add_vary_origin(&mut resp.headers);
+    true
 }
 
 fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors) -> RequestOutcome {
@@ -505,6 +644,19 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
             }
             Action::SetRequestHeader { name, value } => {
                 set_headers.push((name.clone(), value.clone()));
+            }
+            // Preflights are answered here so they neither hit a (possibly
+            // dead) upstream nor fall through to a mock rule below and burn
+            // its fire budget. Non-preflight requests fall through.
+            Action::Cors => {
+                if let Some(response) = preflight_response(req) {
+                    cursors.record_fire(rule);
+                    return RequestOutcome::Respond {
+                        rule: rule.label(),
+                        rule_id: rule.id.clone(),
+                        response,
+                    };
+                }
             }
             // Response-phase actions are ignored here.
             Action::SetResponseHeader { .. }
@@ -595,6 +747,7 @@ pub fn apply_response_rules_stateful(
                 replace,
                 regex,
             } => rewrite_response_body(resp, find, replace, *regex),
+            Action::Cors => inject_cors(req, resp),
             _ => false,
         };
         if fired {
@@ -2374,5 +2527,227 @@ mod tests {
                 "the scratch preview re-applies every call (no state)"
             );
         }
+    }
+
+    fn cors_rule(url: &str) -> Rule {
+        Rule {
+            id: "cors".into(),
+            enabled: true,
+            fire_limit: None,
+            repeat: false,
+            matcher: Matcher {
+                method: None,
+                url: url.into(),
+                url_match: MatchKind::Contains,
+            },
+            action: Action::Cors,
+        }
+    }
+
+    fn req_h(method: &str, path: &str, headers: &[(&str, &str)]) -> CapturedRequest {
+        let mut r = req(method, "https", "example.com", path);
+        r.headers = headers
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        r
+    }
+
+    #[test]
+    fn cors_answers_matching_preflight() {
+        let rules = vec![cors_rule("/api")];
+        let outcome = evaluate_request_rules(
+            &rules,
+            &req_h(
+                "OPTIONS",
+                "/api/users",
+                &[
+                    ("origin", "http://localhost:3000"),
+                    ("access-control-request-method", "POST"),
+                    ("access-control-request-headers", "authorization, content-type"),
+                ],
+            ),
+        );
+        let RequestOutcome::Respond { response, .. } = outcome else {
+            panic!("a matching preflight must be answered");
+        };
+        assert_eq!(response.status, 204);
+        assert!(response.body.is_empty());
+        assert_eq!(
+            header(&response.headers, "access-control-allow-origin"),
+            Some("http://localhost:3000"),
+            "the Origin is echoed, never `*`"
+        );
+        assert_eq!(
+            header(&response.headers, "access-control-allow-methods"),
+            Some("POST")
+        );
+        assert_eq!(
+            header(&response.headers, "access-control-allow-headers"),
+            Some("authorization, content-type")
+        );
+        assert_eq!(
+            header(&response.headers, "access-control-allow-credentials"),
+            Some("true")
+        );
+        assert!(header(&response.headers, "vary").unwrap().contains("Origin"));
+    }
+
+    #[test]
+    fn cors_ignores_plain_options_and_other_urls() {
+        let rules = vec![cors_rule("/api")];
+        assert!(
+            matches!(
+                evaluate_request_rules(
+                    &rules,
+                    &req_h("OPTIONS", "/api/users", &[("origin", "http://a")])
+                ),
+                RequestOutcome::Continue { .. }
+            ),
+            "OPTIONS without Access-Control-Request-Method is not a preflight"
+        );
+        assert!(
+            matches!(
+                evaluate_request_rules(
+                    &rules,
+                    &req_h(
+                        "OPTIONS",
+                        "/other",
+                        &[
+                            ("origin", "http://a"),
+                            ("access-control-request-method", "GET"),
+                        ]
+                    )
+                ),
+                RequestOutcome::Continue { .. }
+            ),
+            "a preflight outside the matcher passes through"
+        );
+    }
+
+    #[test]
+    fn cors_stamps_matching_response() {
+        let rules = vec![cors_rule("/api")];
+        let r = req_h("GET", "/api/users", &[("origin", "http://localhost:3000")]);
+        let mut response = resp();
+        response.headers = vec![
+            ("content-type".into(), "application/json".into()),
+            ("x-total-count".into(), "42".into()),
+            ("set-cookie".into(), "sid=1".into()),
+            ("access-control-allow-origin".into(), "*".into()),
+        ];
+        assert!(apply_response_rules(&rules, &r, &mut response).is_some());
+        assert_eq!(
+            header(&response.headers, "access-control-allow-origin"),
+            Some("http://localhost:3000"),
+            "the echo overwrites a stale value — `*` breaks credentialed requests"
+        );
+        assert_eq!(
+            header(&response.headers, "access-control-allow-credentials"),
+            Some("true")
+        );
+        assert_eq!(
+            header(&response.headers, "access-control-expose-headers"),
+            Some("x-total-count"),
+            "derived from the response's non-safelisted headers"
+        );
+        assert_eq!(header(&response.headers, "vary"), Some("Origin"));
+    }
+
+    #[test]
+    fn cors_leaves_non_cors_traffic_untouched() {
+        let rules = vec![cors_rule("")];
+        let r = req("GET", "https", "api.test", "/api/users");
+        let mut response = resp();
+        assert_eq!(
+            apply_response_rules(&rules, &r, &mut response),
+            None,
+            "no Origin header means no CORS to fix"
+        );
+        assert!(response.headers.is_empty());
+    }
+
+    #[test]
+    fn cors_appends_origin_to_existing_vary() {
+        let rules = vec![cors_rule("")];
+        let r = req_h("GET", "/x", &[("origin", "http://a")]);
+        let mut response = resp();
+        response.headers = vec![("vary".into(), "Accept-Encoding".into())];
+        apply_response_rules(&rules, &r, &mut response);
+        assert_eq!(
+            header(&response.headers, "vary"),
+            Some("Accept-Encoding, Origin")
+        );
+
+        let mut star = resp();
+        star.headers = vec![("vary".into(), "*".into())];
+        apply_response_rules(&rules, &r, &mut star);
+        assert_eq!(header(&star.headers, "vary"), Some("*"));
+    }
+
+    #[test]
+    fn cors_preflight_spares_the_mock_fire_budget() {
+        let mock = Rule {
+            id: "mock".into(),
+            enabled: true,
+            fire_limit: Some(1),
+            repeat: false,
+            matcher: Matcher {
+                method: None,
+                url: "/api".into(),
+                url_match: MatchKind::Contains,
+            },
+            action: Action::Respond {
+                status: 200,
+                headers: vec![],
+                body: "{}".into(),
+                content_type: None,
+                content_encoding: None,
+            },
+        };
+        let rules = vec![cors_rule("/api"), mock];
+        let mut cursors = RuleCursors::default();
+
+        let preflight = req_h(
+            "OPTIONS",
+            "/api/users",
+            &[
+                ("origin", "http://a"),
+                ("access-control-request-method", "GET"),
+            ],
+        );
+        let RequestOutcome::Respond { rule_id, .. } =
+            evaluate_request_rules_stateful(&rules, &preflight, &mut cursors)
+        else {
+            panic!("the preflight must be answered");
+        };
+        assert_eq!(rule_id, "cors", "the Cors rule above answers the preflight");
+
+        let real = req_h("GET", "/api/users", &[("origin", "http://a")]);
+        let RequestOutcome::Respond { rule_id, .. } =
+            evaluate_request_rules_stateful(&rules, &real, &mut cursors)
+        else {
+            panic!("the mock must still fire");
+        };
+        assert_eq!(rule_id, "mock", "the one-shot mock's budget was not burned");
+    }
+
+    #[test]
+    fn cors_skips_response_phase_for_preflights() {
+        let rules = vec![cors_rule("")];
+        let preflight = req_h(
+            "OPTIONS",
+            "/api",
+            &[
+                ("origin", "http://a"),
+                ("access-control-request-method", "GET"),
+            ],
+        );
+        let mut response = resp();
+        assert_eq!(
+            apply_response_rules(&rules, &preflight, &mut response),
+            None,
+            "the request phase already answered — no double fire"
+        );
     }
 }

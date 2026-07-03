@@ -129,6 +129,7 @@ const ACTION_KINDS: { value: ActionKind; label: string }[] = [
   { value: "respond", label: "Auto-respond (mock)" },
   { value: "mapLocal", label: "Map local file" },
   { value: "setResponseHeader", label: "Set response header" },
+  { value: "cors", label: "Allow CORS" },
   { value: "rewriteResponseBody", label: "Rewrite response body" },
   { value: "setStatus", label: "Set status code" },
   { value: "setRequestHeader", label: "Set request header" },
@@ -158,6 +159,8 @@ function defaultAction(kind: ActionKind): Action {
       return { kind: "setStatus", status: 200 };
     case "rewriteResponseBody":
       return { kind: "rewriteResponseBody", find: "", replace: "", regex: false };
+    case "cors":
+      return { kind: "cors" };
   }
 }
 
@@ -189,6 +192,11 @@ function ruleWarnings(rule: Rule): string[] {
     } catch {
       w.push("URL regex is invalid — this rule will never match.");
     }
+  }
+  if (rule.action.kind === "cors" && rule.matcher.method) {
+    w.push(
+      "A method-specific matcher splits Allow CORS in half — preflights are OPTIONS while the stamped responses are GET/POST etc. Clear Method to cover both.",
+    );
   }
   if (rule.action.kind === "respond") {
     const names = rule.action.headers.map(([n]) => n.trim().toLowerCase()).filter(Boolean);
@@ -2489,5 +2497,14 @@ function ActionFields({
       );
     case "block":
       return <div className="muted pad">Matching requests get a 403.</div>;
+    case "cors":
+      return (
+        <div className="muted pad">
+          Makes matching traffic CORS-friendly for browser apps: answers preflights (OPTIONS) with a
+          204 echoing the requested method and headers, and stamps Access-Control headers — the
+          request's Origin, credentials, exposed headers — on matching responses, mocked or passed
+          through. Place it above your mocks so preflights don't consume their fire limits.
+        </div>
+      );
   }
 }
