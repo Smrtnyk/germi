@@ -19,20 +19,14 @@
       {
         "files": ["src/appState.ts"],
         "functions": ["useAutoresponder"],
-        "maxCognitive": 18,
-        "reason": "Feature hook that wires the scenario/rule/mock action callbacks (cyclomatic 1); cognitive reflects per-action callback fan-out — each action now also tags its mutation for the undo-history timeline — not branching."
+        "maxCognitive": 19,
+        "reason": "Feature hook that wires the scenario/rule/mock action callbacks (cyclomatic 1); cognitive reflects per-action callback fan-out (incl. the General-layer on/off toggle) — each action also tags its mutation for the undo-history timeline — not branching."
       },
       {
         "files": ["src/components/SettingsDialog.tsx"],
         "functions": ["SettingsDialog"],
         "maxCognitive": 16,
         "reason": "Settings shell driven by the section registry (cyclomatic 3); cognitive reflects prop fan-out to the section components (incl. the inline port-rebind error passed to Connections), not branching."
-      },
-      {
-        "files": ["src/components/AutoresponderPanel.tsx"],
-        "functions": ["ScenarioView"],
-        "maxCognitive": 16,
-        "reason": "Pure wiring component (cyclomatic 2) that assembles the two workspace hooks and forwards them to the header + rule-workspace subcomponents; the header dispatch (built-in General vs a user scenario) and General-toggle props are already extracted into ScenarioViewHeader/GeneralScenarioHeader, so the residual cognitive is prop fan-out, not branching."
       }
     ]
   }

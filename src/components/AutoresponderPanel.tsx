@@ -17,7 +17,7 @@ import { debounce, isEqual } from "es-toolkit";
 
 import { api } from "../ipc";
 import { GENERAL_SCENARIO_ID } from "../types";
-import { ruleLabel } from "../autoresponderState";
+import { ruleLabel, selectedTabEnabled } from "../autoresponderState";
 import { clickSelection, pruneSelection } from "../selection";
 import { decodeFlowIds, FLOW_DRAG_MIME, hasFlowDrag, RULE_DRAG_MIME } from "../dnd";
 import type {
@@ -1454,14 +1454,12 @@ function ScenarioSaveStatus({
 function GeneralScenarioHeader({
   active,
   generalActive,
-  onToggleGeneral,
   ruleSaveState,
   onExport,
   onReset,
 }: {
   active: ScenarioSummary;
   generalActive: boolean;
-  onToggleGeneral: () => void;
   ruleSaveState: SaveState;
   onExport: () => void;
   onReset: () => void;
@@ -1470,6 +1468,7 @@ function GeneralScenarioHeader({
     <div className="scenario-head">
       <span className="scenario-name general-name" title="Built-in layer — cannot be renamed">
         <IconGeneral /> {active.name}
+        {/* State only — the single on/off control is the power toggle on the tab. */}
         <span className={`general-badge ${generalActive ? "on" : "off"}`}>
           {generalActive ? "stacking" : "off"}
         </span>
@@ -1486,13 +1485,6 @@ function GeneralScenarioHeader({
         >
           Export rules
         </button>
-        <button
-          className={`btn ${generalActive ? "" : "primary"}`}
-          onClick={onToggleGeneral}
-          title="Turn the General layer on or off — its rules stack on top of the active scenario when on"
-        >
-          <IconPower /> {generalActive ? "Turn off" : "Turn on"}
-        </button>
       </div>
     </div>
   );
@@ -1502,7 +1494,6 @@ function ScenarioViewHeader({
   active,
   isGeneral,
   generalActive,
-  onToggleGeneral,
   nameEditor,
   ruleSaveState,
   onExport,
@@ -1512,7 +1503,6 @@ function ScenarioViewHeader({
   active: ScenarioSummary;
   isGeneral: boolean;
   generalActive: boolean;
-  onToggleGeneral: () => void;
   nameEditor: ScenarioNameEditor;
   ruleSaveState: SaveState;
   onExport: () => void;
@@ -1524,7 +1514,6 @@ function ScenarioViewHeader({
       <GeneralScenarioHeader
         active={active}
         generalActive={generalActive}
-        onToggleGeneral={onToggleGeneral}
         ruleSaveState={ruleSaveState}
         onExport={onExport}
         onReset={onReset}
@@ -1723,7 +1712,6 @@ function ScenarioView({
   active,
   isGeneral,
   generalActive,
-  onToggleGeneral,
   onRequestDelete,
   selectRuleId,
   reloadToken,
@@ -1741,7 +1729,6 @@ function ScenarioView({
   active: ScenarioSummary;
   isGeneral: boolean;
   generalActive: boolean;
-  onToggleGeneral: () => void;
   onRequestDelete: () => void;
   selectRuleId?: string | null;
   reloadToken?: number;
@@ -1777,7 +1764,6 @@ function ScenarioView({
         active={active}
         isGeneral={isGeneral}
         generalActive={generalActive}
-        onToggleGeneral={onToggleGeneral}
         nameEditor={nameEditor}
         ruleSaveState={workspace.editor.saveState}
         onExport={exportScenario}
@@ -1806,7 +1792,6 @@ function GeneralTab({
   dropTarget,
   dropProps,
   onSelect,
-  onToggle,
 }: {
   scenario: ScenarioSummary;
   generalActive: boolean;
@@ -1814,38 +1799,20 @@ function GeneralTab({
   dropTarget: boolean;
   dropProps: FlowDropZone;
   onSelect: () => void;
-  onToggle: () => void;
 }) {
   return (
-    <div
+    <button
+      type="button"
       className={`stab general ${selected ? "active" : ""} ${generalActive ? "" : "layer-off"} ${
         dropTarget ? "drop-target" : ""
       }`}
+      onClick={onSelect}
+      title="Built-in rules that stack on top of whichever scenario is active — the home for cross-cutting rules like CORS headers. Enable/disable it with the Off button while it's selected; drop requests here to mock them into the General layer."
       {...dropProps}
     >
-      <button
-        type="button"
-        className="stab-label"
-        onClick={onSelect}
-        title="Built-in rules that stack on top of whichever scenario is active — the home for cross-cutting rules like CORS headers. Drop requests here to mock them into the General layer."
-      >
-        <IconGeneral /> {scenario.name}
-        {generalActive && <span className="live-dot" />}
-      </button>
-      <button
-        type="button"
-        className={`stab-toggle ${generalActive ? "on" : ""}`}
-        onClick={onToggle}
-        aria-pressed={generalActive}
-        title={
-          generalActive
-            ? "General rules are on — click to stop applying them"
-            : "General rules are off — click to apply them alongside the active scenario"
-        }
-      >
-        <IconPower />
-      </button>
-    </div>
+      <IconGeneral /> {scenario.name}
+      {generalActive && <span className="live-dot" />}
+    </button>
   );
 }
 
@@ -1856,7 +1823,7 @@ function ScenarioTabs({
   viewedId,
   onSelectView,
   onActivate,
-  onToggleGeneral,
+  onOffToggle,
   onAdd,
   onImport,
   onReplace,
@@ -1867,8 +1834,8 @@ function ScenarioTabs({
   zoneProps: FlowDrop["zoneProps"];
   viewedId: string | null;
   onSelectView: (id: string) => void;
-  onActivate: (id: string | null) => void;
-  onToggleGeneral: (active: boolean) => void;
+  onActivate: (id: string) => void;
+  onOffToggle: () => void;
   onAdd: () => void;
   onImport: () => void;
   onReplace: () => void;
@@ -1876,6 +1843,7 @@ function ScenarioTabs({
 }) {
   const general = ar.scenarios.find((s) => s.id === GENERAL_SCENARIO_ID);
   const userScenarios = ar.scenarios.filter((s) => s.id !== GENERAL_SCENARIO_ID);
+  const enabled = selectedTabEnabled(viewedId, ar);
   return (
     <div className="scenario-tabs">
       {general && (
@@ -1886,7 +1854,6 @@ function ScenarioTabs({
           dropTarget={zone === GENERAL_SCENARIO_ID}
           dropProps={zoneProps(GENERAL_SCENARIO_ID, GENERAL_SCENARIO_ID)}
           onSelect={() => onSelectView(GENERAL_SCENARIO_ID)}
-          onToggle={() => onToggleGeneral(!ar.generalActive)}
         />
       )}
       {userScenarios.map((s) => (
@@ -1912,11 +1879,16 @@ function ScenarioTabs({
       </button>
       <div className="spacer" />
       <button
-        className={`stab off ${ar.activeScenarioId === null ? "active" : ""}`}
-        onClick={() => onActivate(null)}
-        title="Disable mocking — capture only"
+        className={`stab off ${enabled ? "" : "active"}`}
+        onClick={onOffToggle}
+        disabled={viewedId === null}
+        title={
+          enabled
+            ? "Turn off the selected tab's rules (selection stays put)"
+            : "Turn on the selected tab's rules (selection stays put)"
+        }
       >
-        <IconPower /> Off
+        <IconPower /> {enabled ? "Off" : "On"}
       </button>
       <button
         className="btn small"
@@ -1964,20 +1936,49 @@ export function AutoresponderPanel({
 
   // Which scenario's rules are shown/edited. Distinct from the *active* scenario
   // because the General layer is editable without ever being active. Follows the
-  // active scenario when it changes (create / activate / external edits); the
-  // General tab sets it directly without touching the active pointer.
+  // active scenario when it changes (create / activate / external edits) — but
+  // never yanks focus off the built-in General tab, which isn't the active
+  // scenario and has its own on/off, so (de)activating a scenario or pressing
+  // Off keeps General selected and just reflects its enabled/disabled state.
   const [viewedId, setViewedId] = useState<string | null>(ar.activeScenarioId);
+  // Selection is a stable UI concern: keep the current selection while it still
+  // exists (so enabling/disabling a tab via the Off button never moves it), but
+  // adopt the active scenario when nothing is selected yet (first load) or when
+  // the selected scenario was just deleted — otherwise viewedId would dangle at
+  // a gone id and strand the panel in the off state.
   useEffect(() => {
-    setViewedId(ar.activeScenarioId);
-  }, [ar.activeScenarioId]);
+    setViewedId((cur) =>
+      cur !== null && ar.scenarios.some((s) => s.id === cur) ? cur : ar.activeScenarioId,
+    );
+  }, [ar.scenarios, ar.activeScenarioId]);
 
-  const activateAndView = (id: string | null) => {
+  const activateAndView = (id: string) => {
     scenarioActions.activate(id);
     setViewedId(id);
   };
 
   const viewed = ar.scenarios.find((s) => s.id === viewedId) ?? null;
   const isGeneral = viewed?.id === GENERAL_SCENARIO_ID;
+
+  // The Off/On button enables or disables the SELECTED tab, leaving the selection
+  // put: General toggles its layer; a scenario toggles whether it's the active
+  // one. Nothing selected ⇒ the button is disabled (no tab to act on).
+  const onOffToggle = () => {
+    if (isGeneral) {
+      scenarioActions.setGeneralActive(!ar.generalActive);
+    } else if (viewed) {
+      scenarioActions.activate(viewed.id === ar.activeScenarioId ? null : viewed.id);
+    }
+  };
+
+  // Create a scenario and focus it. Explicit because the effect only fills an
+  // empty selection — creating while another tab is selected would otherwise
+  // leave the new scenario active but unfocused. Shared by the tab-bar "+" and
+  // the empty-state "Create a scenario" button so both behave the same.
+  const createAndFocus = () =>
+    void scenarioActions.create().then((s) => {
+      if (s) setViewedId(s.id);
+    });
 
   return (
     <div className="autoresponder">
@@ -1988,8 +1989,8 @@ export function AutoresponderPanel({
         viewedId={viewedId}
         onSelectView={setViewedId}
         onActivate={activateAndView}
-        onToggleGeneral={scenarioActions.setGeneralActive}
-        onAdd={() => void scenarioActions.create()}
+        onOffToggle={onOffToggle}
+        onAdd={createAndFocus}
         onImport={() => transferActions.importRules(false)}
         onReplace={() => setPendingReplace(true)}
         onExportAll={() => transferActions.exportRules(null)}
@@ -2003,7 +2004,6 @@ export function AutoresponderPanel({
           active={viewed}
           isGeneral={isGeneral}
           generalActive={ar.generalActive}
-          onToggleGeneral={() => scenarioActions.setGeneralActive(!ar.generalActive)}
           onRequestDelete={() => setPendingDelete(viewed)}
           selectRuleId={selectRuleId}
           reloadToken={reloadToken}
@@ -2023,7 +2023,7 @@ export function AutoresponderPanel({
           empty={ar.scenarios.filter((s) => s.id !== GENERAL_SCENARIO_ID).length === 0}
           dropActive={zone === "__off__"}
           dropProps={zoneProps("__off__", null)}
-          onCreate={() => void scenarioActions.create()}
+          onCreate={createAndFocus}
         />
       )}
 

@@ -7,8 +7,9 @@ import {
   removeRuleSummary,
   reorderRuleSummary,
   replaceRuleSummary,
+  selectedTabEnabled,
 } from "./autoresponderState";
-import type { AutoResponderSummary, RuleSummary } from "./types";
+import { GENERAL_SCENARIO_ID, type AutoResponderSummary, type RuleSummary } from "./types";
 
 function rule(id: string, url = `/${id}`): RuleSummary {
   return {
@@ -76,5 +77,35 @@ describe("autoresponder summary updates", () => {
     expect(second.activeScenarioId).toBe("bulk");
     expect(second.scenarios).toHaveLength(1);
     expect(ids(second)).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("selectedTabEnabled (Off/On button state)", () => {
+  const ar = (over: Partial<AutoResponderSummary> = {}): AutoResponderSummary => ({
+    scenarios: [],
+    activeScenarioId: null,
+    generalActive: true,
+    ...over,
+  });
+
+  it("reflects the General layer toggle when General is selected", () => {
+    expect(selectedTabEnabled(GENERAL_SCENARIO_ID, ar({ generalActive: true }))).toBe(true);
+    expect(selectedTabEnabled(GENERAL_SCENARIO_ID, ar({ generalActive: false }))).toBe(false);
+  });
+
+  it("reflects whether the selected scenario is the active one", () => {
+    expect(selectedTabEnabled("A", ar({ activeScenarioId: "A" }))).toBe(true);
+    expect(selectedTabEnabled("A", ar({ activeScenarioId: "B" }))).toBe(false);
+    expect(selectedTabEnabled("A", ar({ activeScenarioId: null }))).toBe(false);
+  });
+
+  it("is independent of General when a scenario is selected", () => {
+    // A disabled General layer must not make an active scenario read as off.
+    expect(selectedTabEnabled("A", ar({ activeScenarioId: "A", generalActive: false }))).toBe(true);
+  });
+
+  it("nothing selected reflects whether any scenario is active", () => {
+    expect(selectedTabEnabled(null, ar({ activeScenarioId: "A" }))).toBe(true);
+    expect(selectedTabEnabled(null, ar({ activeScenarioId: null }))).toBe(false);
   });
 });
