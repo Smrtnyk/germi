@@ -27,6 +27,10 @@ export async function openOrFocusCompareWindow(): Promise<void> {
     height: DEFAULT_SIZE.height,
     minWidth: MIN_SIZE.width,
     minHeight: MIN_SIZE.height,
+    // Match the main window (tauri.conf.json): the constructor default is `true`,
+    // which registers WebView2's native drag-drop handler and stops HTML5 file
+    // drops reaching the DOM on Windows — breaking the issue-100 capture drop.
+    dragDropEnabled: false,
   });
   if (result === "focused") await emit(COMPARE_SEED_CHANGED, null);
 }
