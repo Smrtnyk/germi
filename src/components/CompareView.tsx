@@ -11,14 +11,15 @@ import {
 import { api } from "../ipc";
 import { flowUrl } from "../flowUrl";
 import { urlSimilarity } from "../urlSimilarity";
-import { isTypingTarget } from "../hotkey";
 import { nextSort } from "../sort";
 import { toggledSet } from "../selection";
+import { handleCompareKeys, type CompareKeyActions } from "../compareKeys";
 import {
   copyPaneFilter,
   linkSourceSide,
   movePaneFlows,
   paneData,
+  selectAll,
   selectOnly,
   selectRow,
   stepSelection,
@@ -192,6 +193,12 @@ function useComparePanes(initialLeft: FlowSummary[], initialRight: FlowSummary[]
     sides[side].ops.click(id, e);
   }
 
+  /** Ctrl/⌘+A: mark every visible row of the active pane (issue #104). */
+  function selectAllActive() {
+    const ids = sides[activeSide].visible.map((f) => f.id);
+    setters[activeSide]((cur) => ({ ...cur, sel: selectAll(cur.sel, ids) }));
+  }
+
   function appendRight(added: FlowSummary[]) {
     setRight((cur) => ({
       ...cur,
@@ -207,6 +214,7 @@ function useComparePanes(initialLeft: FlowSummary[], initialRight: FlowSummary[]
     toggleLinked,
     copyFilter,
     stepActive: (dir: 1 | -1, extend: boolean) => sides[activeSide].ops.step(dir, extend),
+    selectAllActive,
     moveRight: (ids: Set<string> | null = null) => move("right", ids),
     moveLeft: (ids: Set<string> | null = null) => move("left", ids),
     rowMove,
@@ -242,49 +250,6 @@ function useCompareFile(appendRight: (flows: FlowSummary[]) => void, notify: Not
   }
 
   return { loading, loadFile };
-}
-
-interface CompareKeyActions {
-  diffOpen: boolean;
-  canDiff: boolean;
-  openDiff: () => void;
-  closeDiff: () => void;
-  close: () => void;
-  moveSelectedRight: () => void;
-  moveSelectedLeft: () => void;
-  stepActive: (dir: 1 | -1, extend: boolean) => void;
-}
-
-/** Esc steps back from the diff, then closes the window — the issue's explicit
- *  ask. Typing in a pane filter is left alone entirely (the input handles its
- *  own Esc-to-clear). */
-function handleCompareKeys(e: KeyboardEvent, ctx: CompareKeyActions): void {
-  if (isTypingTarget(e.target)) return;
-  if (e.key === "Escape") {
-    e.preventDefault();
-    if (ctx.diffOpen) ctx.closeDiff();
-    else ctx.close();
-    return;
-  }
-  if (ctx.diffOpen) return;
-  if (e.key === "Enter") {
-    if (ctx.canDiff && !(e.target as HTMLElement).closest("button")) {
-      e.preventDefault();
-      ctx.openDiff();
-    }
-    return;
-  }
-  const nav: Record<string, () => void> = {
-    ArrowUp: () => ctx.stepActive(-1, e.shiftKey),
-    ArrowDown: () => ctx.stepActive(1, e.shiftKey),
-    ArrowRight: ctx.moveSelectedRight,
-    ArrowLeft: ctx.moveSelectedLeft,
-  };
-  const run = nav[e.key];
-  if (run) {
-    e.preventDefault();
-    run();
-  }
 }
 
 function useCompareKeys(actions: CompareKeyActions): void {
@@ -351,7 +316,8 @@ function CompareFoot({ diffOpen, pairMatch }: { diffOpen: boolean; pairMatch: nu
       ) : (
         <>
           <kbd>↑</kbd>
-          <kbd>↓</kbd> select · <kbd>⇧</kbd> extend · <kbd>⌃/⌘</kbd> toggle · <kbd>→</kbd>
+          <kbd>↓</kbd> select · <kbd>⇧</kbd> extend · <kbd>⌃/⌘</kbd> toggle · <kbd>⌃/⌘</kbd>
+          <kbd>A</kbd> all · <kbd>→</kbd>
           <kbd>←</kbd> move selection · double-click moves too · <kbd>Enter</kbd> diff ·{" "}
           <kbd>Esc</kbd> close
         </>
@@ -398,6 +364,7 @@ export function CompareView({ initialLeft, initialRight, onClose }: CompareViewP
     moveSelectedRight: () => panes.moveRight(),
     moveSelectedLeft: () => panes.moveLeft(),
     stepActive: panes.stepActive,
+    selectAllActive: panes.selectAllActive,
   });
 
   const paneProps = (side: Side): ComparePaneProps => {
