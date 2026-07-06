@@ -105,6 +105,7 @@ pub fn run() {
             commands::get_autoresponder_summary,
             commands::get_rule,
             commands::set_active_scenario,
+            commands::set_general_active,
             commands::create_scenario,
             commands::rename_scenario,
             commands::delete_scenario,

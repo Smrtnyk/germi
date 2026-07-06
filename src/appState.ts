@@ -699,6 +699,7 @@ function useAutoresponder(
   const [autoresponder, setAutoresponder] = useState<AutoResponderSummary>({
     scenarios: [],
     activeScenarioId: null,
+    generalActive: true,
   });
   const [selectRuleId, setSelectRuleId] = useState<string | null>(null);
   const [bulkMockProgress, setBulkMockProgress] = useState<BulkMockEvent | null>(null);
@@ -752,10 +753,26 @@ function useAutoresponder(
     [refresh, setError],
   );
 
+  const setGeneralActive = useCallback(
+    (active: boolean) => {
+      setAutoresponder((current) => ({ ...current, generalActive: active }));
+      void api
+        .setGeneralActive(active, {
+          label: active ? "Enable General rules" : "Disable General rules",
+        })
+        .catch((e) => {
+          setError(String(e));
+          void refresh();
+        });
+    },
+    [refresh, setError],
+  );
+
   const createScenario = useCallback(async (): Promise<ScenarioSummary | null> => {
     try {
       const scenario = await api.createScenario(null, { label: "New scenario" });
       setAutoresponder((current) => ({
+        ...current,
         scenarios: [...current.scenarios, scenario],
         activeScenarioId: scenario.id,
       }));
@@ -791,6 +808,7 @@ function useAutoresponder(
     (scenarioId: string) => {
       const label = `Delete scenario "${scenarioNameIn(arRef.current, scenarioId)}"`;
       setAutoresponder((current) => ({
+        ...current,
         scenarios: current.scenarios.filter((scenario) => scenario.id !== scenarioId),
         activeScenarioId: current.activeScenarioId === scenarioId ? null : current.activeScenarioId,
       }));
@@ -977,6 +995,7 @@ function useAutoresponder(
     selectRuleId,
     bulkMockProgress,
     activateScenario,
+    setGeneralActive,
     createScenario,
     renameScenario,
     deleteScenario,

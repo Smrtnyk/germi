@@ -835,6 +835,7 @@ export function App() {
                 ar: s.ar.autoresponder,
                 scenarioActions: {
                   activate: s.ar.activateScenario,
+                  setGeneralActive: s.ar.setGeneralActive,
                   create: s.ar.createScenario,
                   rename: s.ar.renameScenario,
                   delete: s.ar.deleteScenario,

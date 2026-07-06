@@ -7,7 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use proxy_core::{Action, AutoResponder, MatchKind, Rule, Scenario};
+use proxy_core::{
+    Action, AutoResponder, MatchKind, Rule, Scenario, GENERAL_SCENARIO_ID, GENERAL_SCENARIO_NAME,
+};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 const DB_FILE: &str = "autoresponder.sqlite3";
@@ -44,6 +46,18 @@ impl RuleStore {
             Self::create_schema(&connection)?;
         }
         let autoresponder = Self::load_with_connection(&connection)?;
+        // Persist the built-in General scenario row for a writable instance so a
+        // rule inserted into it later has a valid parent (the FK). `load_*`
+        // already guarantees it in-memory via `ensure_general`; this makes the
+        // seeded row durable. INSERT OR IGNORE keeps an existing one untouched.
+        if !read_only {
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO scenarios (id, name, sort_key) VALUES (?1, ?2, ?3)",
+                    params![GENERAL_SCENARIO_ID, GENERAL_SCENARIO_NAME, -SORT_STEP],
+                )
+                .map_err(|e| e.to_string())?;
+        }
         Ok((store, autoresponder))
     }
 
@@ -172,6 +186,18 @@ impl RuleStore {
             .optional()
             .map_err(|e| e.to_string())?
             .flatten();
+        // Absent (older DB or never toggled) means on — the General layer
+        // defaults to active. Only an explicit "0" turns it off.
+        let general_active = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'general_active'",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .is_none_or(|v| v != "0");
 
         let mut scenarios_statement = connection
             .prepare("SELECT id, name FROM scenarios ORDER BY sort_key")
@@ -199,10 +225,15 @@ impl RuleStore {
             scenarios.push(Scenario { id, name, rules });
         }
 
-        Ok(AutoResponder {
+        let mut autoresponder = AutoResponder {
             scenarios,
             active_scenario_id,
-        })
+            general_active,
+        };
+        // Guarantee the built-in General scenario exists and sits first, even
+        // for a DB written before this feature existed.
+        autoresponder.ensure_general();
+        Ok(autoresponder)
     }
 
     pub fn replace(&self, autoresponder: &AutoResponder) -> Result<(), String> {
@@ -238,6 +269,17 @@ impl RuleStore {
             }
         }
         set_active_metadata(&transaction, autoresponder.active_scenario_id.as_deref())?;
+        set_general_metadata(&transaction, autoresponder.general_active)?;
+        transaction.commit().map_err(|e| e.to_string())
+    }
+
+    pub fn set_general_active(&self, active: bool) -> Result<(), String> {
+        if self.read_only {
+            return Ok(());
+        }
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction().map_err(|e| e.to_string())?;
+        set_general_metadata(&transaction, active)?;
         transaction.commit().map_err(|e| e.to_string())
     }
 
@@ -454,6 +496,17 @@ fn set_active_metadata(
     Ok(())
 }
 
+fn set_general_metadata(transaction: &Transaction<'_>, active: bool) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO metadata (key, value) VALUES ('general_active', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [if active { "1" } else { "0" }],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn insert_rule_connection(
     connection: &Connection,
     scenario_id: &str,
@@ -646,7 +699,17 @@ mod tests {
                 rules: vec![rule("one", "first"), rule("two", "second"), rule("three", "third")],
             }],
             active_scenario_id: Some("scenario".to_string()),
+            general_active: true,
         }
+    }
+
+    /// The first non-General scenario — `load()` always prepends the built-in
+    /// General layer, so tests locate the user scenario by identity.
+    fn user(ar: &AutoResponder) -> &Scenario {
+        ar.scenarios
+            .iter()
+            .find(|s| s.id != GENERAL_SCENARIO_ID)
+            .expect("a user scenario")
     }
 
     #[test]
@@ -655,8 +718,15 @@ mod tests {
         let (store, loaded) = RuleStore::open(&dir, false).expect("open store");
 
         assert!(dir.join(DB_FILE).exists());
-        assert!(loaded.scenarios.is_empty());
+        assert_eq!(
+            loaded.scenarios.len(),
+            1,
+            "a fresh store holds only the built-in General scenario"
+        );
+        assert_eq!(loaded.scenarios[0].id, GENERAL_SCENARIO_ID);
+        assert!(loaded.scenarios[0].rules.is_empty());
         assert!(loaded.active_scenario_id.is_none());
+        assert!(loaded.general_active, "General is on by default");
 
         drop(store);
         std::fs::remove_dir_all(dir).expect("remove temp dir");
@@ -677,7 +747,7 @@ mod tests {
             .expect("move rule to front");
 
         let loaded = store.load().expect("reload store");
-        let rules = &loaded.scenarios[0].rules;
+        let rules = &user(&loaded).rules;
         assert_eq!(
             rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
             vec!["three", "one", "two"]
@@ -712,11 +782,12 @@ mod tests {
                 rules: vec![a, b],
             }],
             active_scenario_id: Some("scenario".to_string()),
+            general_active: true,
         };
         store.replace(&ar).expect("persist two same-url rules");
 
         let loaded = store.load().expect("reload store");
-        let rules = &loaded.scenarios[0].rules;
+        let rules = &user(&loaded).rules;
         assert_eq!(
             rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
             vec!["a", "b"]
@@ -737,7 +808,7 @@ mod tests {
 
         // A viewer (read_only) handle can load the seeded data...
         let (viewer, loaded) = RuleStore::open(&dir, true).expect("open viewer");
-        assert_eq!(loaded.scenarios[0].rules.len(), 3);
+        assert_eq!(user(&loaded).rules.len(), 3);
 
         // ...but every mutation is a silent no-op that never touches disk.
         viewer
@@ -755,14 +826,14 @@ mod tests {
             .replace(&AutoResponder {
                 scenarios: Vec::new(),
                 active_scenario_id: None,
+                general_active: true,
             })
             .expect("replace is a no-op");
 
         // Reopen writable: the on-disk data is exactly what the writer seeded.
         let (_, after) = RuleStore::open(&dir, false).expect("reopen writer");
-        assert_eq!(after.scenarios.len(), 1);
-        assert_eq!(after.scenarios[0].id, "scenario");
-        let ids: Vec<_> = after.scenarios[0].rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(user(&after).id, "scenario");
+        let ids: Vec<_> = user(&after).rules.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["one", "two", "three"]);
 
         std::fs::remove_dir_all(dir).expect("remove temp dir");
@@ -836,18 +907,17 @@ mod tests {
             "the legacy `name` column must be dropped: {cols:?}"
         );
 
-        assert_eq!(loaded.scenarios.len(), 1);
-        assert_eq!(loaded.scenarios[0].rules.len(), 1, "the rule is preserved via rule_json");
-        assert_eq!(loaded.scenarios[0].rules[0].id, "one");
+        assert_eq!(user(&loaded).rules.len(), 1, "the rule is preserved via rule_json");
+        assert_eq!(user(&loaded).rules[0].id, "one");
         assert_eq!(loaded.active_scenario_id.as_deref(), Some("scenario"));
+        assert!(loaded.general().is_some(), "healing still yields the General layer");
 
         // The insert that used to fail on the dead constraint now succeeds.
         store
             .insert_rule("scenario", &rule("two", "second"), None)
             .expect("insert after heal");
         let reloaded = store.load().expect("reload");
-        let ids: Vec<_> =
-            reloaded.scenarios[0].rules.iter().map(|r| r.id.as_str()).collect();
+        let ids: Vec<_> = user(&reloaded).rules.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains(&"two"), "a fresh rule inserts cleanly: {ids:?}");
 
         drop(store);
@@ -864,9 +934,60 @@ mod tests {
         drop(store);
 
         let (_, reloaded) = RuleStore::open(&dir, false).expect("reopen store");
-        let ids: Vec<_> =
-            reloaded.scenarios[0].rules.iter().map(|r| r.id.as_str()).collect();
+        let ids: Vec<_> = user(&reloaded).rules.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["one", "two", "three"]);
+
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn open_seeds_general_into_a_pre_feature_db() {
+        // A DB written before the General layer existed: current schema, one user
+        // scenario, and NO general scenario or general_active metadata. Opening it
+        // must seed the General layer (defaulting on) without disturbing the user
+        // scenario, and persist a durable General row.
+        let dir = test_dir("pre-general");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+        store.replace(&autoresponder()).expect("seed store");
+        {
+            // Simulate an older build: drop the General row + its metadata.
+            let conn = Connection::open(dir.join(DB_FILE)).unwrap();
+            conn.execute("DELETE FROM scenarios WHERE id = ?1", params![GENERAL_SCENARIO_ID])
+                .unwrap();
+            conn.execute("DELETE FROM metadata WHERE key = 'general_active'", [])
+                .unwrap();
+        }
+        drop(store);
+
+        let (store, loaded) = RuleStore::open(&dir, false).expect("reopen seeds General");
+        assert_eq!(loaded.scenarios[0].id, GENERAL_SCENARIO_ID, "General seeded first");
+        assert!(loaded.general_active, "absent metadata defaults the layer on");
+        assert_eq!(user(&loaded).id, "scenario", "the user scenario is untouched");
+
+        // A rule inserted into the seeded General scenario persists (its FK parent
+        // row exists) and round-trips.
+        store
+            .insert_rule(GENERAL_SCENARIO_ID, &rule("g1", "cors"), None)
+            .expect("insert into General");
+        let reloaded = store.load().expect("reload");
+        assert_eq!(
+            reloaded.general().expect("General present").rules[0].id,
+            "g1"
+        );
+
+        drop(store);
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn general_active_toggle_round_trips() {
+        let dir = test_dir("general-toggle");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+        store.set_general_active(false).expect("toggle off");
+        drop(store);
+
+        let (_, loaded) = RuleStore::open(&dir, false).expect("reopen");
+        assert!(!loaded.general_active, "the off toggle persists across reopen");
 
         std::fs::remove_dir_all(dir).expect("remove temp dir");
     }

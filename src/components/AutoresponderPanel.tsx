@@ -16,6 +16,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { debounce, isEqual } from "es-toolkit";
 
 import { api } from "../ipc";
+import { GENERAL_SCENARIO_ID } from "../types";
 import { ruleLabel } from "../autoresponderState";
 import { clickSelection, pruneSelection } from "../selection";
 import { decodeFlowIds, FLOW_DRAG_MIME, hasFlowDrag, RULE_DRAG_MIME } from "../dnd";
@@ -42,6 +43,7 @@ import {
   IconChevronRight,
   IconClose,
   IconExternal,
+  IconGeneral,
   IconGrip,
   IconMaximize,
   IconMock,
@@ -84,6 +86,7 @@ function useDetailCollapsed(): [boolean, (fn: (c: boolean) => boolean) => void] 
 
 interface ScenarioActions {
   activate: (scenarioId: string | null) => void;
+  setGeneralActive: (active: boolean) => void;
   create: () => Promise<ScenarioSummary | null>;
   rename: (scenarioId: string, name: string) => void;
   delete: (scenarioId: string) => void;
@@ -1406,6 +1409,121 @@ function useScenarioWorkspace(
 type ScenarioWorkspace = ReturnType<typeof useScenarioWorkspace>;
 type ScenarioNameEditor = ReturnType<typeof useScenarioName>;
 
+function ScenarioSaveStatus({
+  active,
+  nameSaveState,
+  ruleSaveState,
+}: {
+  active: ScenarioSummary;
+  nameSaveState: SaveState;
+  ruleSaveState: SaveState;
+}) {
+  const saving = nameSaveState === "saving" || ruleSaveState === "saving";
+  const saved = nameSaveState === "saved" || ruleSaveState === "saved";
+  return (
+    <span className="muted small scenario-status">
+      {active.rules.filter((rule) => rule.enabled).length}/{active.rules.length} active
+      {saving && <span className="save-state"> · saving…</span>}
+      {saved && (
+        <span className="save-state ok">
+          {" "}
+          · saved <IconCheck />
+        </span>
+      )}
+    </span>
+  );
+}
+
+function GeneralScenarioHeader({
+  active,
+  generalActive,
+  onToggleGeneral,
+  ruleSaveState,
+  onExport,
+  onReset,
+}: {
+  active: ScenarioSummary;
+  generalActive: boolean;
+  onToggleGeneral: () => void;
+  ruleSaveState: SaveState;
+  onExport: () => void;
+  onReset: () => void;
+}) {
+  return (
+    <div className="scenario-head">
+      <span className="scenario-name general-name" title="Built-in layer — cannot be renamed">
+        <IconGeneral /> {active.name}
+        <span className={`general-badge ${generalActive ? "on" : "off"}`}>
+          {generalActive ? "stacking" : "off"}
+        </span>
+      </span>
+      <ScenarioSaveStatus active={active} nameSaveState="idle" ruleSaveState={ruleSaveState} />
+      <div className="scenario-actions">
+        <button className="btn" title="Clear per-rule hit counters." onClick={onReset}>
+          Reset state
+        </button>
+        <button
+          className="btn"
+          title="Export the General rules to a shareable .germi-rules file"
+          onClick={onExport}
+        >
+          Export rules
+        </button>
+        <button
+          className={`btn ${generalActive ? "" : "primary"}`}
+          onClick={onToggleGeneral}
+          title="Turn the General layer on or off — its rules stack on top of the active scenario when on"
+        >
+          <IconPower /> {generalActive ? "Turn off" : "Turn on"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ScenarioViewHeader({
+  active,
+  isGeneral,
+  generalActive,
+  onToggleGeneral,
+  nameEditor,
+  ruleSaveState,
+  onExport,
+  onReset,
+  onRequestDelete,
+}: {
+  active: ScenarioSummary;
+  isGeneral: boolean;
+  generalActive: boolean;
+  onToggleGeneral: () => void;
+  nameEditor: ScenarioNameEditor;
+  ruleSaveState: SaveState;
+  onExport: () => void;
+  onReset: () => void;
+  onRequestDelete: () => void;
+}) {
+  if (isGeneral) {
+    return (
+      <GeneralScenarioHeader
+        active={active}
+        generalActive={generalActive}
+        onToggleGeneral={onToggleGeneral}
+        ruleSaveState={ruleSaveState}
+        onExport={onExport}
+        onReset={onReset}
+      />
+    );
+  }
+  return (
+    <ScenarioHeader
+      active={active}
+      nameEditor={nameEditor}
+      ruleSaveState={ruleSaveState}
+      actions={{ reset: onReset, export: onExport, requestDelete: onRequestDelete }}
+    />
+  );
+}
+
 function ScenarioHeader({
   active,
   nameEditor,
@@ -1424,18 +1542,11 @@ function ScenarioHeader({
         value={nameEditor.name}
         onChange={(e) => nameEditor.change(e.target.value)}
       />
-      <span className="muted small scenario-status">
-        {active.rules.filter((rule) => rule.enabled).length}/{active.rules.length} active
-        {(nameEditor.saveState === "saving" || ruleSaveState === "saving") && (
-          <span className="save-state"> · saving…</span>
-        )}
-        {(nameEditor.saveState === "saved" || ruleSaveState === "saved") && (
-          <span className="save-state ok">
-            {" "}
-            · saved <IconCheck />
-          </span>
-        )}
-      </span>
+      <ScenarioSaveStatus
+        active={active}
+        nameSaveState={nameEditor.saveState}
+        ruleSaveState={ruleSaveState}
+      />
       <div className="scenario-actions">
         <button
           className="btn"
@@ -1593,6 +1704,9 @@ function ScenarioRuleWorkspace({
 
 function ScenarioView({
   active,
+  isGeneral,
+  generalActive,
+  onToggleGeneral,
   onRequestDelete,
   selectRuleId,
   reloadToken,
@@ -1608,6 +1722,9 @@ function ScenarioView({
   onOpenRuleWindow,
 }: {
   active: ScenarioSummary;
+  isGeneral: boolean;
+  generalActive: boolean;
+  onToggleGeneral: () => void;
   onRequestDelete: () => void;
   selectRuleId?: string | null;
   reloadToken?: number;
@@ -1629,23 +1746,26 @@ function ScenarioView({
     openWindowRuleIds,
     reloadToken,
   );
+  // The General layer is not renamable; `rename` is never called for it.
   const nameEditor = useScenarioName(active, scenarioActions.rename);
   const exportScenario = () => {
     nameEditor.flush();
     void workspace.editor.flush().then(onExport);
   };
+  const resetState = () => scenarioActions.resetState(active.id);
 
   return (
     <div className={`scenario-body ${drop.active ? "drop-target" : ""}`} {...drop.props}>
-      <ScenarioHeader
+      <ScenarioViewHeader
         active={active}
+        isGeneral={isGeneral}
+        generalActive={generalActive}
+        onToggleGeneral={onToggleGeneral}
         nameEditor={nameEditor}
         ruleSaveState={workspace.editor.saveState}
-        actions={{
-          reset: () => scenarioActions.resetState(active.id),
-          export: exportScenario,
-          requestDelete: onRequestDelete,
-        }}
+        onExport={exportScenario}
+        onReset={resetState}
+        onRequestDelete={onRequestDelete}
       />
       <ScenarioRuleWorkspace
         active={active}
@@ -1662,11 +1782,64 @@ function ScenarioView({
   );
 }
 
+function GeneralTab({
+  scenario,
+  generalActive,
+  selected,
+  dropTarget,
+  dropProps,
+  onSelect,
+  onToggle,
+}: {
+  scenario: ScenarioSummary;
+  generalActive: boolean;
+  selected: boolean;
+  dropTarget: boolean;
+  dropProps: FlowDropZone;
+  onSelect: () => void;
+  onToggle: () => void;
+}) {
+  return (
+    <div
+      className={`stab general ${selected ? "active" : ""} ${generalActive ? "" : "layer-off"} ${
+        dropTarget ? "drop-target" : ""
+      }`}
+      {...dropProps}
+    >
+      <button
+        type="button"
+        className="stab-label"
+        onClick={onSelect}
+        title="Built-in rules that stack on top of whichever scenario is active — the home for cross-cutting rules like CORS headers. Drop requests here to mock them into the General layer."
+      >
+        <IconGeneral /> {scenario.name}
+        {generalActive && <span className="live-dot" />}
+      </button>
+      <button
+        type="button"
+        className={`stab-toggle ${generalActive ? "on" : ""}`}
+        onClick={onToggle}
+        aria-pressed={generalActive}
+        title={
+          generalActive
+            ? "General rules are on — click to stop applying them"
+            : "General rules are off — click to apply them alongside the active scenario"
+        }
+      >
+        <IconPower />
+      </button>
+    </div>
+  );
+}
+
 function ScenarioTabs({
   ar,
   zone,
   zoneProps,
+  viewedId,
+  onSelectView,
   onActivate,
+  onToggleGeneral,
   onAdd,
   onImport,
   onReplace,
@@ -1675,18 +1848,34 @@ function ScenarioTabs({
   ar: AutoResponderSummary;
   zone: string | null;
   zoneProps: FlowDrop["zoneProps"];
+  viewedId: string | null;
+  onSelectView: (id: string) => void;
   onActivate: (id: string | null) => void;
+  onToggleGeneral: (active: boolean) => void;
   onAdd: () => void;
   onImport: () => void;
   onReplace: () => void;
   onExportAll: () => void;
 }) {
+  const general = ar.scenarios.find((s) => s.id === GENERAL_SCENARIO_ID);
+  const userScenarios = ar.scenarios.filter((s) => s.id !== GENERAL_SCENARIO_ID);
   return (
     <div className="scenario-tabs">
-      {ar.scenarios.map((s) => (
+      {general && (
+        <GeneralTab
+          scenario={general}
+          generalActive={ar.generalActive}
+          selected={viewedId === GENERAL_SCENARIO_ID}
+          dropTarget={zone === GENERAL_SCENARIO_ID}
+          dropProps={zoneProps(GENERAL_SCENARIO_ID, GENERAL_SCENARIO_ID)}
+          onSelect={() => onSelectView(GENERAL_SCENARIO_ID)}
+          onToggle={() => onToggleGeneral(!ar.generalActive)}
+        />
+      )}
+      {userScenarios.map((s) => (
         <button
           key={s.id}
-          className={`stab ${s.id === ar.activeScenarioId ? "active" : ""} ${
+          className={`stab ${s.id === viewedId ? "active" : ""} ${
             zone === s.id ? "drop-target" : ""
           }`}
           onClick={() => onActivate(s.id)}
@@ -1756,7 +1945,22 @@ export function AutoresponderPanel({
   const [collapsed, setCollapsed] = useDetailCollapsed();
   const { zone, zoneProps } = useFlowDrop(transferActions.dropMock);
 
-  const active = ar.scenarios.find((s) => s.id === ar.activeScenarioId) ?? null;
+  // Which scenario's rules are shown/edited. Distinct from the *active* scenario
+  // because the General layer is editable without ever being active. Follows the
+  // active scenario when it changes (create / activate / external edits); the
+  // General tab sets it directly without touching the active pointer.
+  const [viewedId, setViewedId] = useState<string | null>(ar.activeScenarioId);
+  useEffect(() => {
+    setViewedId(ar.activeScenarioId);
+  }, [ar.activeScenarioId]);
+
+  const activateAndView = (id: string | null) => {
+    scenarioActions.activate(id);
+    setViewedId(id);
+  };
+
+  const viewed = ar.scenarios.find((s) => s.id === viewedId) ?? null;
+  const isGeneral = viewed?.id === GENERAL_SCENARIO_ID;
 
   return (
     <div className="autoresponder">
@@ -1764,7 +1968,10 @@ export function AutoresponderPanel({
         ar={ar}
         zone={zone}
         zoneProps={zoneProps}
-        onActivate={scenarioActions.activate}
+        viewedId={viewedId}
+        onSelectView={setViewedId}
+        onActivate={activateAndView}
+        onToggleGeneral={scenarioActions.setGeneralActive}
         onAdd={() => void scenarioActions.create()}
         onImport={() => transferActions.importRules(false)}
         onReplace={() => setPendingReplace(true)}
@@ -1773,18 +1980,21 @@ export function AutoresponderPanel({
 
       <BulkMockProgress event={bulkMockProgress} />
 
-      {active ? (
+      {viewed ? (
         <ScenarioView
-          key={active.id}
-          active={active}
-          onRequestDelete={() => setPendingDelete(active)}
+          key={viewed.id}
+          active={viewed}
+          isGeneral={isGeneral}
+          generalActive={ar.generalActive}
+          onToggleGeneral={() => scenarioActions.setGeneralActive(!ar.generalActive)}
+          onRequestDelete={() => setPendingDelete(viewed)}
           selectRuleId={selectRuleId}
           reloadToken={reloadToken}
           ruleHits={ruleHits}
-          drop={{ active: zone === "__body__", props: zoneProps("__body__", active.id) }}
+          drop={{ active: zone === "__body__", props: zoneProps("__body__", viewed.id) }}
           scenarioActions={scenarioActions}
           ruleActions={ruleActions}
-          onExport={() => transferActions.exportRules(active.id)}
+          onExport={() => transferActions.exportRules(viewed.id)}
           layout={layout}
           collapsed={collapsed}
           onToggleCollapse={() => setCollapsed((c) => !c)}
@@ -1793,7 +2003,7 @@ export function AutoresponderPanel({
         />
       ) : (
         <AutoresponderOffState
-          empty={ar.scenarios.length === 0}
+          empty={ar.scenarios.filter((s) => s.id !== GENERAL_SCENARIO_ID).length === 0}
           dropActive={zone === "__off__"}
           dropProps={zoneProps("__off__", null)}
           onCreate={() => void scenarioActions.create()}
