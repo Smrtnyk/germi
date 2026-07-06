@@ -118,6 +118,14 @@ export function selectMany(ids: string[]): PaneSelection {
   return { selectedIds: new Set(ids), focusedId: ids[0], anchorId: ids[0] };
 }
 
+/** Ctrl/⌘+A over a pane: select every visible row, focusing the last and
+ *  anchoring the first — mirrors the main traffic list's select-all. An empty
+ *  list is a no-op (the current selection stands). */
+export function selectAll(sel: PaneSelection, ids: string[]): PaneSelection {
+  if (ids.length === 0) return sel;
+  return { selectedIds: new Set(ids), focusedId: ids[ids.length - 1], anchorId: ids[0] };
+}
+
 export type SelectMode = "single" | "toggle" | "range";
 
 /** Click transition: plain click selects one, ctrl/⌘ toggles, shift ranges

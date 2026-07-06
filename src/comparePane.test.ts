@@ -8,6 +8,7 @@ import {
   linkSourceSide,
   movePaneFlows,
   paneData,
+  selectAll,
   selectMany,
   selectOnly,
   selectRow,
@@ -146,6 +147,18 @@ describe("pane selection", () => {
   it("clamps stepping at the ends", () => {
     const top = stepSelection(selectOnly("a"), ids, -1, false);
     expect(top.focusedId).toBe("a");
+  });
+
+  it("selects every row on select-all, focusing the last and anchoring the first", () => {
+    const sel = selectAll(selectOnly("b"), ids);
+    expect([...sel.selectedIds]).toEqual(["a", "b", "c"]);
+    expect(sel.focusedId).toBe("c");
+    expect(sel.anchorId).toBe("a");
+  });
+
+  it("leaves the selection untouched when select-all runs on an empty list", () => {
+    const before = selectOnly("b");
+    expect(selectAll(before, [])).toBe(before);
   });
 });
 
