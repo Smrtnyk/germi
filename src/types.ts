@@ -180,9 +180,17 @@ export interface ScenarioSummary {
 
 export interface AutoResponderSummary {
   scenarios: ScenarioSummary[];
-  /** Id of the active scenario, or null for Off (passthrough). */
+  /** Id of the active scenario, or null for Off (passthrough). Never the
+   *  built-in General scenario, which stacks via `generalActive` instead. */
   activeScenarioId: string | null;
+  /** Whether the built-in General layer is evaluated (stacks with the active
+   *  scenario). Independent of `activeScenarioId`. */
+  generalActive: boolean;
 }
+
+/** Id of the built-in, undeletable "General rules" scenario (mirrors proxy-core
+ *  `GENERAL_SCENARIO_ID`). Its display name travels in the summary. */
+export const GENERAL_SCENARIO_ID = "general";
 
 /** Which rule fields `searchRules` scans (mirrors proxy-core `RuleSearchScope`). */
 export type RuleSearchScope = "url" | "method" | "status" | "response" | "headers" | "all";

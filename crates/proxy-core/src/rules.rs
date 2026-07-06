@@ -196,15 +196,40 @@ pub struct Scenario {
     pub rules: Vec<Rule>,
 }
 
-/// The autoresponder: many scenarios, at most one active (`None` = Off).
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+/// Id of the built-in "General rules" scenario — undeletable, never the active
+/// scenario; its rules stack with (evaluate before) the active scenario's when
+/// [`AutoResponder::general_active`] is on. The home for cross-cutting rules
+/// (global header stamps, CORS headers, body rewrites) that should apply
+/// whichever scenario is live, without duplicating them into every scenario.
+pub const GENERAL_SCENARIO_ID: &str = "general";
+/// Fixed display name of the built-in General scenario (not renamable).
+pub const GENERAL_SCENARIO_NAME: &str = "General rules";
+
+/// The autoresponder: many scenarios, at most one active (`None` = Off), plus
+/// the built-in General layer that stacks on top of whichever is active.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoResponder {
     #[serde(default)]
     pub scenarios: Vec<Scenario>,
-    /// Id of the active scenario, or `None` for Off (plain passthrough).
+    /// Id of the active scenario, or `None` for Off (plain passthrough). Never
+    /// the General scenario — that layer toggles via `general_active` instead.
     #[serde(default)]
     pub active_scenario_id: Option<String>,
+    /// Whether the built-in General scenario's rules are evaluated. Independent
+    /// of `active_scenario_id`, so General + one scenario can be live together.
+    #[serde(default = "default_true")]
+    pub general_active: bool,
+}
+
+impl Default for AutoResponder {
+    fn default() -> Self {
+        AutoResponder {
+            scenarios: Vec::new(),
+            active_scenario_id: None,
+            general_active: true,
+        }
+    }
 }
 
 /// Lightweight autoresponder state for the frontend. Rule response bodies and
@@ -214,6 +239,7 @@ pub struct AutoResponder {
 pub struct AutoResponderSummary {
     pub scenarios: Vec<ScenarioSummary>,
     pub active_scenario_id: Option<String>,
+    pub general_active: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -318,6 +344,7 @@ impl From<&AutoResponder> for AutoResponderSummary {
                 .map(ScenarioSummary::from)
                 .collect(),
             active_scenario_id: autoresponder.active_scenario_id.clone(),
+            general_active: autoresponder.general_active,
         }
     }
 }
@@ -682,33 +709,99 @@ impl RuleSet {
 }
 
 impl AutoResponder {
-    /// The active scenario, or `None` when Off.
+    /// The active scenario, or `None` when Off. The built-in General scenario is
+    /// never "active" — it stacks via [`Self::general_active`] instead, so an
+    /// `active_scenario_id` pointing at it resolves to `None`.
     pub fn active(&self) -> Option<&Scenario> {
         match &self.active_scenario_id {
-            Some(id) => self.scenarios.iter().find(|s| &s.id == id),
-            None => None,
+            Some(id) if id != GENERAL_SCENARIO_ID => self.scenarios.iter().find(|s| &s.id == id),
+            _ => None,
+        }
+    }
+
+    /// The built-in General scenario, if present.
+    pub fn general(&self) -> Option<&Scenario> {
+        self.scenarios.iter().find(|s| s.id == GENERAL_SCENARIO_ID)
+    }
+
+    /// The rules the General layer contributes to evaluation: empty when the
+    /// layer is toggled off or the scenario is absent.
+    fn general_rules(&self) -> &[Rule] {
+        if !self.general_active {
+            return &[];
+        }
+        self.general().map_or(&[], |s| s.rules.as_slice())
+    }
+
+    /// The active scenario's rules, or an empty slice when Off.
+    fn active_rules(&self) -> &[Rule] {
+        self.active().map_or(&[], |s| s.rules.as_slice())
+    }
+
+    /// Rule ids that can hold live cursors: the General layer's (when on) plus
+    /// the active scenario's — exactly the rules `evaluate_*`/`apply_*` consult.
+    /// Cursor reconciliation retains only these.
+    pub fn evaluated_rule_ids(&self) -> HashSet<&str> {
+        self.general_rules()
+            .iter()
+            .chain(self.active_rules())
+            .map(|r| r.id.as_str())
+            .collect()
+    }
+
+    /// Guarantee the built-in General scenario exists and sits first in the
+    /// list, and that the switchable active pointer never aliases it.
+    pub fn ensure_general(&mut self) {
+        match self
+            .scenarios
+            .iter()
+            .position(|s| s.id == GENERAL_SCENARIO_ID)
+        {
+            Some(0) => {}
+            Some(pos) => {
+                let general = self.scenarios.remove(pos);
+                self.scenarios.insert(0, general);
+            }
+            None => self.scenarios.insert(
+                0,
+                Scenario {
+                    id: GENERAL_SCENARIO_ID.to_string(),
+                    name: GENERAL_SCENARIO_NAME.to_string(),
+                    rules: Vec::new(),
+                },
+            ),
+        }
+        if self.active_scenario_id.as_deref() == Some(GENERAL_SCENARIO_ID) {
+            self.active_scenario_id = None;
         }
     }
 
     pub fn evaluate_request(&self, req: &CapturedRequest) -> RequestOutcome {
-        match self.active() {
-            Some(s) => evaluate_request_rules(&s.rules, req),
-            None => RequestOutcome::Continue {
-                set_headers: vec![],
-            },
-        }
+        let mut scratch = RuleCursors::default();
+        self.evaluate_request_stateful(req, &mut scratch)
     }
 
+    /// Evaluate the General layer first (a general rule wins the short-circuit
+    /// and shields the active scenario's mocks from general-layer requests),
+    /// then the active scenario. Request-header edits from both layers
+    /// accumulate; the first short-circuiting action from either layer wins.
     pub fn evaluate_request_stateful(
         &self,
         req: &CapturedRequest,
         cursors: &mut RuleCursors,
     ) -> RequestOutcome {
-        match self.active() {
-            Some(s) => evaluate_request_rules_stateful(&s.rules, req, cursors),
-            None => RequestOutcome::Continue {
-                set_headers: vec![],
-            },
+        let mut merged = match evaluate_request_rules_stateful(self.general_rules(), req, cursors) {
+            RequestOutcome::Continue { set_headers } => set_headers,
+            short_circuit => return short_circuit,
+        };
+        match evaluate_request_rules_stateful(self.active_rules(), req, cursors) {
+            RequestOutcome::Continue { set_headers } => {
+                merged.extend(set_headers);
+                RequestOutcome::Continue {
+                    set_headers: merged,
+                }
+            }
+            short_circuit => short_circuit,
         }
     }
 
@@ -717,36 +810,38 @@ impl AutoResponder {
         req: &CapturedRequest,
         resp: &mut CapturedResponse,
     ) -> Option<String> {
-        match self.active() {
-            Some(s) => apply_response_rules(&s.rules, req, resp),
-            None => None,
-        }
+        let mut scratch = RuleCursors::default();
+        self.apply_response_stateful(req, resp, &mut scratch)
     }
 
-    /// Apply response-phase rules of the active scenario, advancing `cursors`
-    /// (the live handler path — honors `fire_limit`/`repeat`).
+    /// Apply response-phase rules — General layer first, then the active
+    /// scenario — advancing `cursors` (the live handler path — honors
+    /// `fire_limit`/`repeat`). Returns the last rule that changed the response.
     pub fn apply_response_stateful(
         &self,
         req: &CapturedRequest,
         resp: &mut CapturedResponse,
         cursors: &mut RuleCursors,
     ) -> Option<String> {
-        match self.active() {
-            Some(s) => apply_response_rules_stateful(&s.rules, req, resp, cursors),
-            None => None,
-        }
+        let general = apply_response_rules_stateful(self.general_rules(), req, resp, cursors);
+        let scenario = apply_response_rules_stateful(self.active_rules(), req, resp, cursors);
+        scenario.or(general)
     }
 
-    /// A starter autoresponder: one example scenario, Off by default.
+    /// A starter autoresponder: the built-in General scenario plus one example
+    /// scenario, Off by default.
     pub fn example() -> Self {
-        AutoResponder {
+        let mut ar = AutoResponder {
             scenarios: vec![Scenario {
                 id: "default".to_string(),
                 name: "My mocks".to_string(),
                 rules: RuleSet::example().rules,
             }],
             active_scenario_id: None,
-        }
+            general_active: true,
+        };
+        ar.ensure_general();
+        ar
     }
 }
 
@@ -1224,6 +1319,7 @@ mod tests {
                 },
             ],
             active_scenario_id: Some("b".into()),
+            general_active: true,
         };
         match ar.evaluate_request(&req("GET", "https", "h", "/x")) {
             RequestOutcome::Respond { rule_id, .. } => assert_eq!(rule_id, "from-b"),
@@ -1240,6 +1336,7 @@ mod tests {
                 rules: vec![respond_rule("from-a", "/x")],
             }],
             active_scenario_id: None, // Off
+            general_active: true,
         };
         assert!(matches!(
             ar.evaluate_request(&req("GET", "https", "h", "/x")),
@@ -1353,6 +1450,7 @@ mod tests {
                 rules: vec![a, b],
             }],
             active_scenario_id: Some("s".into()),
+            general_active: true,
         };
         assert_eq!(ar.scenarios[0].rules.len(), 2);
         let outcome = ar.evaluate_request(&req("GET", "https", "x", "/api"));
@@ -2137,6 +2235,7 @@ mod tests {
                 },
             ],
             active_scenario_id: Some("b".into()),
+            general_active: true,
         };
         let mut cursors = RuleCursors::default();
 
@@ -2205,6 +2304,7 @@ mod tests {
                 rules: vec![respond_rule_limited("from-a", "/x", Some(1), false)],
             }],
             active_scenario_id: None,
+            general_active: true,
         };
         let mut cursors = RuleCursors::default();
 
@@ -2361,5 +2461,197 @@ mod tests {
                 "the scratch preview re-applies every call (no state)"
             );
         }
+    }
+
+    // ---- General layer stacking ----
+
+    fn resp_header_rule(id: &str, url: &str, name: &str, value: &str) -> Rule {
+        Rule {
+            id: id.to_string(),
+            enabled: true,
+            fire_limit: None,
+            repeat: false,
+            matcher: Matcher {
+                method: None,
+                url: url.to_string(),
+                url_match: MatchKind::Contains,
+            },
+            action: Action::SetResponseHeader {
+                name: name.to_string(),
+                value: value.to_string(),
+            },
+        }
+    }
+
+    fn req_header_rule(id: &str, url: &str, name: &str, value: &str) -> Rule {
+        Rule {
+            id: id.to_string(),
+            enabled: true,
+            fire_limit: None,
+            repeat: false,
+            matcher: Matcher {
+                method: None,
+                url: url.to_string(),
+                url_match: MatchKind::Contains,
+            },
+            action: Action::SetRequestHeader {
+                name: name.to_string(),
+                value: value.to_string(),
+            },
+        }
+    }
+
+    fn general_scenario(rules: Vec<Rule>) -> Scenario {
+        Scenario {
+            id: GENERAL_SCENARIO_ID.to_string(),
+            name: GENERAL_SCENARIO_NAME.to_string(),
+            rules,
+        }
+    }
+
+    fn user_scenario(id: &str, rules: Vec<Rule>) -> Scenario {
+        Scenario {
+            id: id.to_string(),
+            name: id.to_string(),
+            rules,
+        }
+    }
+
+    fn ar_with(general: Vec<Rule>, active: Option<(&str, Vec<Rule>)>, general_active: bool) -> AutoResponder {
+        let mut scenarios = vec![general_scenario(general)];
+        let active_id = active.as_ref().map(|(id, _)| (*id).to_string());
+        if let Some((id, rules)) = active {
+            scenarios.push(user_scenario(id, rules));
+        }
+        AutoResponder {
+            scenarios,
+            active_scenario_id: active_id,
+            general_active,
+        }
+    }
+
+    #[test]
+    fn general_respond_wins_before_active() {
+        let ar = ar_with(
+            vec![respond_rule("general-mock", "/x")],
+            Some(("A", vec![respond_rule("active-mock", "/x")])),
+            true,
+        );
+        match ar.evaluate_request(&req("GET", "https", "h", "/x")) {
+            RequestOutcome::Respond { rule_id, .. } => {
+                assert_eq!(rule_id, "general-mock", "the General layer is evaluated first");
+            }
+            other => panic!("expected a General respond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn general_off_lets_active_respond() {
+        let ar = ar_with(
+            vec![respond_rule("general-mock", "/x")],
+            Some(("A", vec![respond_rule("active-mock", "/x")])),
+            false,
+        );
+        match ar.evaluate_request(&req("GET", "https", "h", "/x")) {
+            RequestOutcome::Respond { rule_id, .. } => {
+                assert_eq!(rule_id, "active-mock", "General off ⇒ its rules never fire");
+            }
+            other => panic!("expected the active respond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn general_and_active_request_headers_merge() {
+        let ar = ar_with(
+            vec![req_header_rule("g", "/x", "x-general", "1")],
+            Some(("A", vec![req_header_rule("a", "/x", "x-active", "2")])),
+            true,
+        );
+        match ar.evaluate_request(&req("GET", "https", "h", "/x")) {
+            RequestOutcome::Continue { set_headers } => {
+                assert!(set_headers.iter().any(|(k, v)| k == "x-general" && v == "1"));
+                assert!(set_headers.iter().any(|(k, v)| k == "x-active" && v == "2"));
+            }
+            other => panic!("expected Continue with merged headers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn general_and_active_response_rules_both_apply() {
+        let ar = ar_with(
+            vec![resp_header_rule("g", "/x", "x-general", "1")],
+            Some(("A", vec![resp_header_rule("a", "/x", "x-active", "2")])),
+            true,
+        );
+        let mut response = resp();
+        let fired = ar.apply_response(&req("GET", "https", "h", "/x"), &mut response);
+        assert!(fired.is_some(), "at least one layer changed the response");
+        assert!(response.headers.iter().any(|(k, v)| k == "x-general" && v == "1"));
+        assert!(response.headers.iter().any(|(k, v)| k == "x-active" && v == "2"));
+    }
+
+    #[test]
+    fn general_applies_when_active_is_off() {
+        let ar = ar_with(vec![resp_header_rule("g", "/x", "x-general", "1")], None, true);
+        let mut response = resp();
+        assert_eq!(
+            ar.apply_response(&req("GET", "https", "h", "/x"), &mut response)
+                .as_deref(),
+            Some("/x"),
+            "General response rules apply even when the active scenario is Off"
+        );
+        assert!(response.headers.iter().any(|(k, v)| k == "x-general" && v == "1"));
+    }
+
+    #[test]
+    fn evaluated_rule_ids_span_general_and_active() {
+        let ar = ar_with(
+            vec![respond_rule("g1", "/x")],
+            Some(("A", vec![respond_rule("a1", "/y")])),
+            true,
+        );
+        let ids = ar.evaluated_rule_ids();
+        assert!(ids.contains("g1") && ids.contains("a1"));
+
+        let off = ar_with(
+            vec![respond_rule("g1", "/x")],
+            Some(("A", vec![respond_rule("a1", "/y")])),
+            false,
+        );
+        let ids_off = off.evaluated_rule_ids();
+        assert!(!ids_off.contains("g1"), "General off ⇒ its ids are not live");
+        assert!(ids_off.contains("a1"));
+    }
+
+    #[test]
+    fn active_never_resolves_to_general() {
+        let ar = AutoResponder {
+            scenarios: vec![general_scenario(vec![respond_rule("g", "/x")])],
+            active_scenario_id: Some(GENERAL_SCENARIO_ID.to_string()),
+            general_active: true,
+        };
+        assert!(ar.active().is_none(), "General can never be the active scenario");
+    }
+
+    #[test]
+    fn ensure_general_seeds_first_and_unaliases_active() {
+        let mut ar = AutoResponder {
+            scenarios: vec![user_scenario("A", vec![])],
+            active_scenario_id: Some(GENERAL_SCENARIO_ID.to_string()),
+            general_active: true,
+        };
+        ar.ensure_general();
+        assert_eq!(ar.scenarios[0].id, GENERAL_SCENARIO_ID, "General is seeded first");
+        assert_eq!(ar.scenarios.len(), 2);
+        assert_eq!(
+            ar.active_scenario_id, None,
+            "an active pointer aliasing General is cleared"
+        );
+
+        // Idempotent + relocates an out-of-place General to the front.
+        ar.scenarios.swap(0, 1);
+        ar.ensure_general();
+        assert_eq!(ar.scenarios[0].id, GENERAL_SCENARIO_ID);
+        assert_eq!(ar.scenarios.len(), 2, "no duplicate General is added");
     }
 }

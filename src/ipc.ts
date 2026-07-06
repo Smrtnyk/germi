@@ -47,6 +47,8 @@ export const api = {
   getRule: (ruleId: string) => invoke<Rule | null>("get_rule", { ruleId }),
   setActiveScenario: (scenarioId: string | null, historyTag: HistoryTag) =>
     invoke<void>("set_active_scenario", { scenarioId, historyTag }),
+  setGeneralActive: (active: boolean, historyTag: HistoryTag) =>
+    invoke<void>("set_general_active", { active, historyTag }),
   createScenario: (name: string | null, historyTag: HistoryTag) =>
     invoke<ScenarioSummary>("create_scenario", { name, historyTag }),
   renameScenario: (scenarioId: string, name: string, historyTag: HistoryTag) =>

@@ -30,6 +30,7 @@ function state(): AutoResponderSummary {
   return {
     scenarios: [{ id: "scenario", name: "Scenario", rules: [rule("a"), rule("b"), rule("c")] }],
     activeScenarioId: "scenario",
+    generalActive: true,
   };
 }
 
@@ -64,7 +65,11 @@ describe("autoresponder summary updates", () => {
   });
 
   it("creates a bulk scenario once and appends later chunks", () => {
-    const empty: AutoResponderSummary = { scenarios: [], activeScenarioId: null };
+    const empty: AutoResponderSummary = {
+      scenarios: [],
+      activeScenarioId: null,
+      generalActive: true,
+    };
     const first = appendBulkRuleSummaries(empty, "bulk", [rule("a"), rule("b")]);
     const second = appendBulkRuleSummaries(first, "bulk", [rule("c")]);
 

@@ -32,6 +32,7 @@ import {
   LuGitCompareArrows,
   LuGripVertical,
   LuInfo,
+  LuLayers,
   LuLink,
   LuLogIn,
   LuMaximize2,
@@ -81,6 +82,7 @@ export const IconPanelCollapse = make(LuPanelRightClose);
 export const IconPanelExpand = make(LuPanelRightOpen);
 export const IconGrip = make(LuGripVertical, { size: 14 });
 export const IconPower = make(LuPower, { size: 14 });
+export const IconGeneral = make(LuLayers, { color: "var(--s3)", size: 14 });
 
 export const IconCompare = make(LuGitCompareArrows, { color: "var(--s3)", size: 14 });
 export const IconDiff = make(LuFileDiff, { size: 14 });

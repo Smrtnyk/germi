@@ -56,7 +56,8 @@ pub use flow::{
 pub use history::{HistoryEntryView, HistoryKind, HistoryTag, HistoryView};
 pub use rules::{
     Action, ActionSummary, AutoResponder, AutoResponderSummary, MatchKind, Matcher, Rule,
-    RuleSearchScope, RuleSet, RuleSummary, Scenario, ScenarioSummary,
+    RuleSearchScope, RuleSet, RuleSummary, Scenario, ScenarioSummary, GENERAL_SCENARIO_ID,
+    GENERAL_SCENARIO_NAME,
 };
 pub use rules_export::RulesExport;
 pub use settings::ProxySettings;
@@ -583,8 +584,15 @@ impl ProxyController {
 
         let mut ar = self.get_autoresponder();
         if replace {
+            // Replace swaps out the switchable scenarios, but the General layer
+            // is a persistent cross-cutting layer — not one of the replaceable
+            // scenarios — so preserve its rules across the replace.
+            let general = ar.general().cloned();
             ar.scenarios.clear();
             ar.active_scenario_id = None;
+            if let Some(general) = general {
+                ar.scenarios.push(general);
+            }
         }
         let mut taken: std::collections::HashSet<String> =
             ar.scenarios.iter().map(|s| s.name.clone()).collect();
@@ -593,6 +601,9 @@ impl ProxyController {
             ar.scenarios.push(scenario);
         }
 
+        // Guarantee the built-in General scenario exists and stays first, even
+        // when neither the current config nor the bundle carried one.
+        ar.ensure_general();
         self.set_autoresponder(ar);
         Ok(count)
     }
@@ -682,12 +693,15 @@ impl ProxyController {
 
     pub fn set_autoresponder(&self, autoresponder: AutoResponder) {
         let new_active = autoresponder.active_scenario_id.clone();
-        // Only the active scenario is ever evaluated, so only its rule ids have
-        // meaningful cursors — scope retention to those.
+        // Both the General layer and the active scenario are evaluated, so both
+        // hold meaningful cursors — scope retention to that combined set (which
+        // also drops General's cursors when the layer is toggled off, since
+        // `evaluated_rule_ids` omits them then).
         let live: std::collections::HashSet<String> = autoresponder
-            .active()
-            .map(|s| s.rules.iter().map(|r| r.id.clone()).collect())
-            .unwrap_or_default();
+            .evaluated_rule_ids()
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect();
 
         let Ok(mut ar) = self.shared.autoresponder.write() else {
             return;
@@ -709,10 +723,7 @@ impl ProxyController {
     }
 
     fn reconcile_rule_cursors(&self, previous_active: Option<&str>, autoresponder: &AutoResponder) {
-        let live: std::collections::HashSet<&str> = autoresponder
-            .active()
-            .map(|scenario| scenario.rules.iter().map(|rule| rule.id.as_str()).collect())
-            .unwrap_or_default();
+        let live = autoresponder.evaluated_rule_ids();
         if let Ok(mut cursors) = self.shared.cursors.lock() {
             if previous_active == autoresponder.active_scenario_id.as_deref() {
                 cursors.reset_missing(&live);
@@ -723,6 +734,11 @@ impl ProxyController {
     }
 
     pub fn set_active_scenario(&self, scenario_id: Option<&str>) -> Result<()> {
+        if scenario_id == Some(GENERAL_SCENARIO_ID) {
+            return Err(anyhow!(
+                "the built-in General scenario cannot be the active scenario"
+            ));
+        }
         let mut ar = self
             .shared
             .autoresponder
@@ -734,6 +750,22 @@ impl ProxyController {
         let previous_active = ar.active_scenario_id.clone();
         ar.active_scenario_id = scenario_id.map(str::to_string);
         self.reconcile_rule_cursors(previous_active.as_deref(), &ar);
+        Ok(())
+    }
+
+    /// Toggle the built-in General layer on/off. Independent of the active
+    /// scenario, so General + one scenario can be live together. Resets cursors
+    /// (the set of evaluated rules changes).
+    pub fn set_general_active(&self, active: bool) -> Result<()> {
+        let mut ar = self
+            .shared
+            .autoresponder
+            .write()
+            .map_err(|_| anyhow!("autoresponder lock poisoned"))?;
+        ar.general_active = active;
+        if let Ok(mut cursors) = self.shared.cursors.lock() {
+            cursors.reset();
+        }
         Ok(())
     }
 
@@ -762,6 +794,9 @@ impl ProxyController {
     }
 
     pub fn rename_scenario(&self, scenario_id: &str, name: String) -> Result<()> {
+        if scenario_id == GENERAL_SCENARIO_ID {
+            return Err(anyhow!("the built-in General scenario cannot be renamed"));
+        }
         let mut ar = self
             .shared
             .autoresponder
@@ -777,6 +812,9 @@ impl ProxyController {
     }
 
     pub fn delete_scenario(&self, scenario_id: &str) -> Result<()> {
+        if scenario_id == GENERAL_SCENARIO_ID {
+            return Err(anyhow!("the built-in General scenario cannot be deleted"));
+        }
         let mut ar = self
             .shared
             .autoresponder
@@ -1265,6 +1303,17 @@ mod tests {
 
     fn controller() -> ProxyController {
         ProxyController::new(CertAuthority::generate().expect("generate in-memory CA"))
+    }
+
+    /// Scenario names excluding the built-in General layer — the "user"
+    /// scenarios the import/merge/replace tests reason about. `import_rules`
+    /// always seeds a General scenario, so tests assert on this filtered view.
+    fn user_names(ar: &AutoResponder) -> Vec<String> {
+        ar.scenarios
+            .iter()
+            .filter(|s| s.id != GENERAL_SCENARIO_ID)
+            .map(|s| s.name.clone())
+            .collect()
     }
 
     fn respond_rule(id: &str) -> Rule {
@@ -1851,6 +1900,7 @@ mod tests {
                 }],
             }],
             active_scenario_id: Some("summary".to_string()),
+            general_active: true,
         });
 
         let json = serde_json::to_string(&c.autoresponder_summary()).expect("serialize summary");
@@ -1878,6 +1928,7 @@ mod tests {
                 vec![respond_rule("one"), respond_rule("two"), respond_rule("three")],
             )],
             active_scenario_id: Some("scenario".to_string()),
+            general_active: true,
         });
 
         let (previous, next) = c
@@ -1906,6 +1957,7 @@ mod tests {
         let ar_a = AutoResponder {
             scenarios: vec![scenario("A", vec![respond_rule("seq-rule")])],
             active_scenario_id: Some("A".to_string()),
+            general_active: true,
         };
         controller.set_autoresponder(ar_a.clone());
 
@@ -1929,6 +1981,7 @@ mod tests {
                 scenario("B", vec![respond_rule("other-rule")]),
             ],
             active_scenario_id: Some("B".to_string()),
+            general_active: true,
         };
         controller.set_autoresponder(ar_b);
         assert!(
@@ -1944,6 +1997,7 @@ mod tests {
         let with_rule = AutoResponder {
             scenarios: vec![scenario("A", vec![respond_rule("seq-rule")])],
             active_scenario_id: Some("A".to_string()),
+            general_active: true,
         };
         controller.set_autoresponder(with_rule);
         fire_active_once(&controller);
@@ -1956,6 +2010,7 @@ mod tests {
         let rule_removed = AutoResponder {
             scenarios: vec![scenario("A", vec![])],
             active_scenario_id: Some("A".to_string()),
+            general_active: true,
         };
         controller.set_autoresponder(rule_removed);
         assert!(
@@ -1970,12 +2025,14 @@ mod tests {
         dst.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("A", vec![respond_rule("a-rule")])],
             active_scenario_id: Some("A".to_string()),
+            general_active: true,
         });
 
         let src = controller();
         src.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("B", vec![respond_rule("b-rule")])],
             active_scenario_id: None,
+            general_active: true,
         });
         let bytes = src.export_rules(None);
 
@@ -1983,7 +2040,8 @@ mod tests {
         assert_eq!(count, 1);
 
         let ar = dst.get_autoresponder();
-        assert_eq!(ar.scenarios.len(), 2, "merge appends the imported scenario");
+        assert_eq!(user_names(&ar), vec!["A", "B"], "merge appends the imported scenario");
+        assert!(ar.general().is_some(), "the built-in General layer stays present");
         assert_eq!(
             ar.active_scenario_id.as_deref(),
             Some("A"),
@@ -2003,6 +2061,7 @@ mod tests {
                 rules: vec![],
             }],
             active_scenario_id: None,
+            general_active: true,
         });
 
         let src = controller();
@@ -2013,12 +2072,15 @@ mod tests {
                 rules: vec![],
             }],
             active_scenario_id: None,
+            general_active: true,
         });
         let bytes = src.export_rules(None);
 
         dst.import_rules(&bytes, false).expect("import");
-        let names: Vec<String> = dst.get_autoresponder().scenarios.iter().map(|s| s.name.clone()).collect();
-        assert_eq!(names, vec!["My mocks".to_string(), "My mocks (2)".to_string()]);
+        assert_eq!(
+            user_names(&dst.get_autoresponder()),
+            vec!["My mocks".to_string(), "My mocks (2)".to_string()]
+        );
     }
 
     #[test]
@@ -2030,6 +2092,7 @@ mod tests {
                 scenario("B", vec![respond_rule("b-rule")]),
             ],
             active_scenario_id: None,
+            general_active: true,
         });
 
         let only_a = rules_export::parse_rules(&c.export_rules(Some("A"))).expect("parse A");
@@ -2046,6 +2109,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("A", vec![respond_rule("seq-rule")])],
             active_scenario_id: Some("A".to_string()),
+            general_active: true,
         });
 
         fire_active_once(&c);
@@ -2083,12 +2147,14 @@ mod tests {
                 scenario("B", vec![respond_rule("b-rule")]),
             ],
             active_scenario_id: Some("A".to_string()),
+            general_active: true,
         });
 
         let src = controller();
         src.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("C", vec![respond_rule("c-rule")])],
             active_scenario_id: None,
+            general_active: true,
         });
         let bytes = src.export_rules(None);
 
@@ -2096,10 +2162,15 @@ mod tests {
         assert_eq!(count, 1);
 
         let ar = dst.get_autoresponder();
-        assert_eq!(ar.scenarios.len(), 1, "replace wipes the existing scenarios");
-        assert_eq!(ar.scenarios[0].name, "C");
-        assert_ne!(ar.scenarios[0].id, "C", "the replaced-in scenario is re-keyed");
-        assert_ne!(ar.scenarios[0].rules[0].id, "c-rule", "its rule is re-keyed too");
+        assert_eq!(user_names(&ar), vec!["C"], "replace wipes the existing user scenarios");
+        assert!(ar.general().is_some(), "the built-in General layer survives a replace");
+        let c = ar
+            .scenarios
+            .iter()
+            .find(|s| s.id != GENERAL_SCENARIO_ID)
+            .expect("replaced-in scenario");
+        assert_ne!(c.id, "C", "the replaced-in scenario is re-keyed");
+        assert_ne!(c.rules[0].id, "c-rule", "its rule is re-keyed too");
         assert_eq!(
             ar.active_scenario_id, None,
             "replace resets the active pointer to Off"
@@ -2112,20 +2183,26 @@ mod tests {
         dst.set_autoresponder(AutoResponder {
             scenarios: vec![],
             active_scenario_id: None,
+            general_active: true,
         });
 
         let src = controller();
         src.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("Only", vec![respond_rule("only-rule")])],
             active_scenario_id: None,
+            general_active: true,
         });
         let bytes = src.export_rules(None);
 
         let count = dst.import_rules(&bytes, true).expect("replace into empty");
         assert_eq!(count, 1);
         let ar = dst.get_autoresponder();
-        assert_eq!(ar.scenarios.len(), 1, "replace into an empty config yields exactly the import");
-        assert_eq!(ar.scenarios[0].name, "Only");
+        assert_eq!(
+            user_names(&ar),
+            vec!["Only"],
+            "replace into an empty config yields exactly the import"
+        );
+        assert!(ar.general().is_some(), "General is seeded even into an empty config");
         assert_eq!(ar.active_scenario_id, None, "still Off after replace into empty");
     }
 
@@ -2135,6 +2212,7 @@ mod tests {
         dst.set_autoresponder(AutoResponder {
             scenarios: vec![],
             active_scenario_id: None,
+            general_active: true,
         });
 
         let src = controller();
@@ -2145,13 +2223,13 @@ mod tests {
                 Scenario { id: "c".into(), name: "Set".into(), rules: vec![] },
             ],
             active_scenario_id: None,
+            general_active: true,
         });
         let bytes = src.export_rules(None);
 
         dst.import_rules(&bytes, false).expect("import");
-        let names: Vec<String> = dst.get_autoresponder().scenarios.iter().map(|s| s.name.clone()).collect();
         assert_eq!(
-            names,
+            user_names(&dst.get_autoresponder()),
             vec!["Set".to_string(), "Set (2)".to_string(), "Set (3)".to_string()],
             "duplicate names inside a single imported file are de-duped in order"
         );
@@ -2163,6 +2241,7 @@ mod tests {
         dst.set_autoresponder(AutoResponder {
             scenarios: vec![Scenario { id: "x".into(), name: "Set".into(), rules: vec![] }],
             active_scenario_id: None,
+            general_active: true,
         });
 
         let src = controller();
@@ -2172,13 +2251,13 @@ mod tests {
                 Scenario { id: "b".into(), name: "Set".into(), rules: vec![] },
             ],
             active_scenario_id: None,
+            general_active: true,
         });
         let bytes = src.export_rules(None);
 
         dst.import_rules(&bytes, false).expect("import");
-        let names: Vec<String> = dst.get_autoresponder().scenarios.iter().map(|s| s.name.clone()).collect();
         assert_eq!(
-            names,
+            user_names(&dst.get_autoresponder()),
             vec!["Set".to_string(), "Set (2)".to_string(), "Set (3)".to_string()],
             "merge de-dupes the imported names against the existing one AND against each other"
         );
@@ -2190,6 +2269,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("A", vec![respond_rule("seq-rule")])],
             active_scenario_id: Some("A".to_string()),
+            general_active: true,
         });
 
         let bytes = c.export_rules(Some("A"));
@@ -2216,12 +2296,14 @@ mod tests {
         dst.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("A", vec![respond_rule("a-rule")])],
             active_scenario_id: Some("A".to_string()),
+            general_active: true,
         });
 
         let src = controller();
         src.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("B", vec![respond_rule("b-rule")])],
             active_scenario_id: None,
+            general_active: true,
         });
         let bytes = src.export_rules(None);
 
@@ -2239,6 +2321,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("A", vec![respond_rule("r1")])],
             active_scenario_id: Some("A".to_string()),
+            general_active: true,
         });
     }
 
@@ -2322,6 +2405,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("A", vec![]), scenario("B", vec![])],
             active_scenario_id: Some("A".to_string()),
+            general_active: true,
         });
 
         c.with_history(HistoryTag::new("Activate B", None), |ctrl| {
@@ -2595,6 +2679,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("S", vec![respond_rule("one"), respond_rule("two")])],
             active_scenario_id: Some("S".to_string()),
+            general_active: true,
         });
 
         assert_eq!(
@@ -2614,6 +2699,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("S", vec![a, b])],
             active_scenario_id: Some("S".to_string()),
+            general_active: true,
         });
 
         assert_eq!(
@@ -2632,6 +2718,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("S", vec![a, b])],
             active_scenario_id: Some("S".to_string()),
+            general_active: true,
         });
 
         assert_eq!(
@@ -2662,6 +2749,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("S", vec![down, teapot])],
             active_scenario_id: Some("S".to_string()),
+            general_active: true,
         });
 
         assert_eq!(
@@ -2688,6 +2776,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("S", vec![a, respond_rule("b")])],
             active_scenario_id: Some("S".to_string()),
+            general_active: true,
         });
 
         assert_eq!(
@@ -2722,6 +2811,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("S", vec![respond, set_header])],
             active_scenario_id: Some("S".to_string()),
+            general_active: true,
         });
 
         assert_eq!(
@@ -2756,6 +2846,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("S", vec![a, respond_rule("b")])],
             active_scenario_id: Some("S".to_string()),
+            general_active: true,
         });
 
         assert_eq!(
@@ -2771,6 +2862,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("S", vec![respond_rule("a")])],
             active_scenario_id: Some("S".to_string()),
+            general_active: true,
         });
 
         assert!(
@@ -2791,6 +2883,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("S", vec![a])],
             active_scenario_id: Some("S".to_string()),
+            general_active: true,
         });
 
         assert!(
@@ -2863,6 +2956,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("S", vec![off])],
             active_scenario_id: Some("S".to_string()),
+            general_active: true,
         });
 
         assert_eq!(
@@ -2886,6 +2980,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("S", vec![no_method, posted])],
             active_scenario_id: Some("S".to_string()),
+            general_active: true,
         });
 
         assert_eq!(
@@ -2910,6 +3005,7 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario("S", vec![a, respond_rule("b")])],
             active_scenario_id: Some("S".to_string()),
+            general_active: true,
         });
 
         assert_eq!(
@@ -2917,5 +3013,44 @@ mod tests {
             vec!["a".to_string()],
             "All unions the Headers scope, so a value present only in a response header still matches",
         );
+    }
+
+    #[test]
+    fn controller_seeds_general_by_default() {
+        let c = controller();
+        let ar = c.get_autoresponder();
+        assert!(ar.general().is_some(), "a fresh controller has the built-in General scenario");
+        assert_eq!(ar.scenarios[0].id, GENERAL_SCENARIO_ID, "General is first");
+        assert!(ar.general_active, "General is on by default");
+    }
+
+    #[test]
+    fn general_scenario_is_protected() {
+        let c = controller();
+        assert!(
+            c.set_active_scenario(Some(GENERAL_SCENARIO_ID)).is_err(),
+            "General cannot be the active scenario"
+        );
+        assert!(
+            c.delete_scenario(GENERAL_SCENARIO_ID).is_err(),
+            "General cannot be deleted"
+        );
+        assert!(
+            c.rename_scenario(GENERAL_SCENARIO_ID, "Nope".to_string()).is_err(),
+            "General cannot be renamed"
+        );
+        assert!(
+            c.get_autoresponder().general().is_some(),
+            "General still present after the rejected mutations"
+        );
+    }
+
+    #[test]
+    fn set_general_active_toggles_and_persists_in_state() {
+        let c = controller();
+        c.set_general_active(false).expect("toggle off");
+        assert!(!c.get_autoresponder().general_active);
+        c.set_general_active(true).expect("toggle on");
+        assert!(c.get_autoresponder().general_active);
     }
 }

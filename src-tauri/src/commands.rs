@@ -11,7 +11,7 @@ use std::time::Duration;
 use proxy_core::{
     AutoResponderSummary, BodyComparison, FlowDetail, FlowEvent, FlowSummary, HistoryStep,
     HistoryTag, MockResult, ProxySettings, Rule, RuleSearchScope, RuleSummary, Scenario,
-    ScenarioSummary, SearchSide, TestInput, TestResult,
+    ScenarioSummary, SearchSide, TestInput, TestResult, GENERAL_SCENARIO_ID,
 };
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -276,12 +276,31 @@ pub fn set_active_scenario(
     scenario_id: Option<String>,
     history_tag: HistoryTag,
 ) -> Result<(), String> {
+    // Reject the built-in General scenario before touching the store — General
+    // stacks via `set_general_active`, it is never the active scenario.
+    if scenario_id.as_deref() == Some(GENERAL_SCENARIO_ID) {
+        return Err("the built-in General scenario cannot be the active scenario".to_string());
+    }
     state
         .rule_store
         .set_active_scenario(scenario_id.as_deref())?;
     state.controller.with_history(history_tag, |c| {
         c.set_active_scenario(scenario_id.as_deref())
             .map_err(|e| e.to_string())
+    })
+}
+
+/// Toggle the built-in General layer on/off. Persisted, then applied to the live
+/// engine (undo-tracked) so it takes effect for new traffic immediately.
+#[tauri::command]
+pub fn set_general_active(
+    state: State<'_, AppState>,
+    active: bool,
+    history_tag: HistoryTag,
+) -> Result<(), String> {
+    state.rule_store.set_general_active(active)?;
+    state.controller.with_history(history_tag, |c| {
+        c.set_general_active(active).map_err(|e| e.to_string())
     })
 }
 
@@ -314,6 +333,9 @@ pub fn rename_scenario(
     name: String,
     history_tag: HistoryTag,
 ) -> Result<(), String> {
+    if scenario_id == GENERAL_SCENARIO_ID {
+        return Err("the built-in General scenario cannot be renamed".to_string());
+    }
     state.rule_store.rename_scenario(&scenario_id, &name)?;
     state.controller.with_history(history_tag, |c| {
         c.rename_scenario(&scenario_id, name).map_err(|e| e.to_string())
@@ -326,6 +348,9 @@ pub fn delete_scenario(
     scenario_id: String,
     history_tag: HistoryTag,
 ) -> Result<(), String> {
+    if scenario_id == GENERAL_SCENARIO_ID {
+        return Err("the built-in General scenario cannot be deleted".to_string());
+    }
     state.rule_store.delete_scenario(&scenario_id)?;
     state.controller.with_history(history_tag, |c| {
         c.delete_scenario(&scenario_id).map_err(|e| e.to_string())
