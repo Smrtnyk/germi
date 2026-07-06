@@ -49,6 +49,10 @@ fn init_app_state(app: &mut tauri::App, viewer: bool) -> Result<(), Box<dyn std:
     if let Some(settings) = persist::load_settings(&ca_dir) {
         controller.set_settings(settings);
     }
+    // Restore persisted user scripts (request/response hooks).
+    if let Some(scripts) = persist::load_scripts(&ca_dir) {
+        controller.set_scripts(scripts);
+    }
     app.manage(AppState {
         controller,
         rule_store: Arc::new(rule_store),
@@ -114,6 +118,9 @@ pub fn run() {
             commands::rule_hits,
             commands::get_settings,
             commands::set_settings,
+            commands::get_scripts,
+            commands::set_scripts,
+            commands::check_script,
             commands::export_settings,
             commands::import_settings,
             commands::test_scenario,

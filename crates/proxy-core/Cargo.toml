@@ -33,6 +33,11 @@ tracing = "=0.1.44"
 mime_guess = "=2.0.5"
 base64 = "=0.22.1"
 
+# Sandboxed, pure-Rust scripting for user-authored request/response hooks. The
+# "sync" feature makes Engine/AST Send+Sync so a compiled script can be shared
+# across the proxy's worker threads and run inside the async handler.
+rhai = { version = "=1.25.1", features = ["sync"] }
+
 # Archive import (SAZ): unzip + raw HTTP parsing + body decode.
 zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 httparse = "=1.10.1"

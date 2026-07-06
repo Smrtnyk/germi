@@ -184,6 +184,21 @@ export interface AutoResponderSummary {
   activeScenarioId: string | null;
 }
 
+/** A user script (Rhai) with optional `on_request`/`on_response` hooks. */
+export interface Script {
+  id: string;
+  name: string;
+  enabled: boolean;
+  source: string;
+}
+
+/** Per-script compile feedback from `setScripts`/on load; `error` null = OK. */
+export interface ScriptDiagnostic {
+  id: string;
+  name: string;
+  error: string | null;
+}
+
 /** Which rule fields `searchRules` scans (mirrors proxy-core `RuleSearchScope`). */
 export type RuleSearchScope = "url" | "method" | "status" | "response" | "headers" | "all";
 
