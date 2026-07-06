@@ -40,6 +40,8 @@ import { focusMockResponseBody } from "./focusMockBody";
 import { nextIdAfterDelete, rangeSelection, toggleSelection } from "./selection";
 import { resolveBindings, type Bindings } from "./shortcuts";
 import { emitSettingsChanged } from "./themeSync";
+import { readFileAsBase64 } from "./captureDrop";
+import type { CaptureExt } from "./dnd";
 import {
   appendBulkRuleSummaries,
   appendRuleSummary,
@@ -1082,7 +1084,19 @@ function useSession(setError: SetError, onOpened: () => void, notify: Notify) {
       setError(String(e));
     }
   }
-  return { saveSession, openCapture };
+  /** Open a capture dragged from the file manager (issue #100) — same effect as
+   *  `openCapture`, but the bytes come from the dropped File rather than the
+   *  native picker. */
+  async function openDropped(file: File, ext: CaptureExt) {
+    try {
+      const n = await api.openDroppedCapture(await readFileAsBase64(file), ext);
+      onOpened();
+      notify("success", `Opened ${plural(n, "flow")}`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+  return { saveSession, openCapture, openDropped };
 }
 
 async function copyFlowAsCurlAction(id: string, notify: Notify, setError: SetError) {
@@ -1711,6 +1725,12 @@ export function useAppState() {
     clearTraffic();
   }
 
+  // A capture dropped onto the main window shares the open-capture confirm
+  // (replacing traffic is destructive and never auto-saved). The dropped File
+  // parks here until the user confirms; `null` means the confirm belongs to the
+  // native picker instead (issue #100).
+  const pendingDropRef = useRef<{ file: File; ext: CaptureExt } | null>(null);
+
   function requestOpenCapture() {
     if (flowStore.orderRef.current.length === 0) {
       void session.openCapture();
@@ -1719,9 +1739,29 @@ export function useAppState() {
     setConfirmOpen(true);
   }
 
+  function requestOpenDropped(file: File, ext: CaptureExt) {
+    if (flowStore.orderRef.current.length === 0) {
+      void session.openDropped(file, ext);
+      return;
+    }
+    pendingDropRef.current = { file, ext };
+    setConfirmOpen(true);
+  }
+
   function confirmOpenCapture() {
     setConfirmOpen(false);
+    const dropped = pendingDropRef.current;
+    pendingDropRef.current = null;
+    if (dropped) {
+      void session.openDropped(dropped.file, dropped.ext);
+      return;
+    }
     void session.openCapture();
+  }
+
+  function cancelOpenCapture() {
+    pendingDropRef.current = null;
+    setConfirmOpen(false);
   }
 
   // Prune the selected flows (no confirm — the backend `removed` event drops
@@ -1785,7 +1825,9 @@ export function useAppState() {
     confirmOpen,
     setConfirmOpen,
     requestOpenCapture,
+    requestOpenDropped,
     confirmOpenCapture,
+    cancelOpenCapture,
     settings,
     flowStore,
     flows: savedFilters.visibleFlows,

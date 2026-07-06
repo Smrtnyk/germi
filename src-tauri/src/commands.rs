@@ -8,6 +8,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use base64::Engine;
 use proxy_core::{
     AutoResponderSummary, BodyComparison, FlowDetail, FlowEvent, FlowSummary, HistoryStep,
     HistoryTag, MockResult, ProxySettings, Rule, RuleSearchScope, RuleSummary, Scenario,
@@ -796,6 +797,50 @@ pub async fn append_capture(
         .controller
         .append_capture(&bytes, &ext)
         .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// Decode a capture file dragged from the OS file manager onto the webview.
+/// An HTML5 file drop hands the frontend the File's *bytes* (base64 over IPC,
+/// the same encoding `.germi` sessions already use), not a filesystem path like
+/// the native picker — so there is nothing to `std::fs::read` here. `ext` (the
+/// dropped file's extension) disambiguates HAR from `.germi` (both JSON).
+fn decode_dropped_capture(data_b64: &str, ext: &str) -> Result<(Vec<u8>, String), String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .map_err(|e| format!("could not decode the dropped file: {e}"))?;
+    Ok((bytes, ext.to_ascii_lowercase()))
+}
+
+/// Open a capture file dropped onto the main window, REPLACING the current
+/// traffic — the drag-drop counterpart of [`open_capture`] (issue #100). Returns
+/// the number of flows loaded.
+#[tauri::command]
+pub async fn open_dropped_capture(
+    state: State<'_, AppState>,
+    data_b64: String,
+    ext: String,
+) -> Result<usize, String> {
+    let (bytes, ext) = decode_dropped_capture(&data_b64, &ext)?;
+    state
+        .controller
+        .open_capture(&bytes, &ext)
+        .map_err(|e| e.to_string())
+}
+
+/// Append a capture file dropped onto the compare window WITHOUT replacing the
+/// current traffic — the drag-drop counterpart of [`append_capture`] (issue
+/// #100). Returns the appended flows' summaries.
+#[tauri::command]
+pub async fn append_dropped_capture(
+    state: State<'_, AppState>,
+    data_b64: String,
+    ext: String,
+) -> Result<Vec<FlowSummary>, String> {
+    let (bytes, ext) = decode_dropped_capture(&data_b64, &ext)?;
+    state
+        .controller
+        .append_capture(&bytes, &ext)
         .map_err(|e| e.to_string())
 }
 

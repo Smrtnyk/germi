@@ -2574,6 +2574,44 @@ code {
   pointer-events: none;
 }
 
+/* ---- OS file drop overlay (issue #100) ---- */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: grid;
+  place-items: center;
+  padding: var(--space-8);
+  background: var(--drop-overlay);
+  /* Purely visual: never intercept the drag events the window listener needs. */
+  pointer-events: none;
+}
+.drop-overlay-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 300px;
+  padding: var(--space-8) var(--space-9);
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-xl);
+  background: var(--bg-1);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  text-align: center;
+}
+.drop-overlay-card svg {
+  width: 36px;
+  height: 36px;
+}
+.drop-overlay-title {
+  font: 600 var(--fs-lg) var(--sans);
+  color: var(--text);
+}
+.drop-overlay-hint {
+  font: var(--fs-sm) var(--sans);
+  color: var(--muted);
+}
+
 /* ---- status bar ---- */
 .statusbar {
   display: flex;

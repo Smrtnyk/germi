@@ -131,6 +131,8 @@ pub fn run() {
             commands::save_session,
             commands::open_capture,
             commands::append_capture,
+            commands::open_dropped_capture,
+            commands::append_dropped_capture,
             commands::compare_flow_bodies,
             commands::set_compare_seed,
             commands::get_compare_seed,

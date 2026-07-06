@@ -92,6 +92,10 @@ export const api = {
   saveSession: () => invoke<boolean>("save_session"),
   openCapture: () => invoke<number | null>("open_capture"),
   appendCapture: () => invoke<FlowSummary[] | null>("append_capture"),
+  openDroppedCapture: (dataB64: string, ext: string) =>
+    invoke<number>("open_dropped_capture", { dataB64, ext }),
+  appendDroppedCapture: (dataB64: string, ext: string) =>
+    invoke<FlowSummary[]>("append_dropped_capture", { dataB64, ext }),
   compareFlowBodies: (idA: string, idB: string) =>
     invoke<BodyComparison | null>("compare_flow_bodies", { idA, idB }),
   setCompareSeed: (seed: CompareSeed) => invoke<void>("set_compare_seed", { seed }),
