@@ -818,6 +818,7 @@ export function App() {
                   load: s.ar.loadRule,
                   update: s.ar.updateRule,
                   delete: s.ar.deleteRule,
+                  deleteMany: s.ar.deleteRules,
                   duplicate: s.ar.duplicateRule,
                   reorder: s.ar.reorderRule,
                 },

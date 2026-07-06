@@ -1481,6 +1481,11 @@ textarea {
   overflow: auto;
   scrollbar-gutter: stable;
 }
+/* The viewport is focusable so Ctrl/⌘+A, Del and Esc route to the rule list
+   (issue #106); the row highlight is the focus affordance, so no outline. */
+.rule-list-viewport:focus-visible {
+  outline: none;
+}
 .rule-list-canvas {
   position: relative;
   width: 100%;
@@ -1510,8 +1515,14 @@ textarea {
 .rule-item:hover {
   background: var(--bg-1);
 }
-.rule-item.selected {
-  background: var(--bg-2);
+/* multi-select members read distinct from the single active row (issue #106);
+   the active row (whose editor is open) stays dominant, so it's listed last. */
+.rule-item.checked {
+  background: var(--sel-multi-bg);
+}
+.rule-item.selected,
+.rule-item.selected.checked {
+  background: var(--sel-bg);
 }
 .rule-item.dragover {
   box-shadow: inset 0 2px 0 var(--accent);
@@ -1712,6 +1723,18 @@ textarea {
   flex-direction: column;
   align-items: flex-start;
   gap: var(--space-4);
+}
+/* Bulk-selection notice shown in the detail pane while several rules are
+   selected — editing is off, so it offers the bulk delete instead (issue #106). */
+.rule-bulk {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+.rule-bulk-count {
+  font-weight: 600;
+  font-size: var(--fs-base);
 }
 /* Collapsed detail pane: a thin rail with an expand affordance, echoing the
    app-level PanelRail but scoped to the list/detail split (issue #72). */

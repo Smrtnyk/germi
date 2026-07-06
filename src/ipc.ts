@@ -59,6 +59,8 @@ export const api = {
     invoke<RuleSummary>("update_rule", { scenarioId, rule, historyTag }),
   deleteRule: (scenarioId: string, ruleId: string, historyTag: HistoryTag) =>
     invoke<void>("delete_rule", { scenarioId, ruleId, historyTag }),
+  deleteRules: (scenarioId: string, ruleIds: string[], historyTag: HistoryTag) =>
+    invoke<void>("delete_rules", { scenarioId, ruleIds, historyTag }),
   duplicateRule: (scenarioId: string, ruleId: string, historyTag: HistoryTag) =>
     invoke<RuleSummary>("duplicate_rule", { scenarioId, ruleId, historyTag }),
   reorderRule: (scenarioId: string, ruleId: string, toId: string, historyTag: HistoryTag) =>

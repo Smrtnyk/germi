@@ -65,7 +65,10 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
 - **Auto-responder** — rules grouped into switchable **scenarios** (one active, or
   Off). Each rule is `matcher → action`: auto-respond, map-local-file, block, set
   request/response header, set status, or regex-rewrite the body. Built-in **offline
-  tester**, lazy-loaded rule details, and SQLite-backed persistence.
+  tester**, lazy-loaded rule details, and SQLite-backed persistence. Manage the rule
+  list with the keyboard: **Shift/Ctrl-⌘-click** multi-selects, **Ctrl/⌘ A** selects
+  all, and **Del** deletes the selection in one undoable step (editing is disabled
+  while several rules are selected).
 - **Import & bulk-mock** — load **HAR** or Fiddler **SAZ** archives via **Open**; multi-select
   rows (Shift-range, Ctrl/⌘-click, **Ctrl/⌘ A** to select all) → **Add to scenario**
   to seed mock rules from real responses, or **⚡ Mock this** on one. Selecting

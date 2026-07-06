@@ -1,11 +1,13 @@
 import {
   lazy,
   Suspense,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactElement,
   type ReactNode,
@@ -15,6 +17,7 @@ import { debounce, isEqual } from "es-toolkit";
 
 import { api } from "../ipc";
 import { ruleLabel } from "../autoresponderState";
+import { clickSelection, pruneSelection } from "../selection";
 import { decodeFlowIds, FLOW_DRAG_MIME, hasFlowDrag, RULE_DRAG_MIME } from "../dnd";
 import type {
   Action,
@@ -92,6 +95,7 @@ interface RuleActions {
   load: (ruleId: string) => Promise<Rule | null>;
   update: (scenarioId: string, rule: Rule, tag?: HistoryTag) => Promise<RuleSummary | null>;
   delete: (scenarioId: string, ruleId: string) => void;
+  deleteMany: (scenarioId: string, ruleIds: string[]) => void;
   duplicate: (scenarioId: string, ruleId: string) => Promise<RuleSummary | null>;
   reorder: (scenarioId: string, ruleId: string, toId: string) => void;
 }
@@ -301,11 +305,27 @@ function RuleRowMarkers({
   );
 }
 
+function ruleItemClass(s: {
+  selected: boolean;
+  checked: boolean;
+  dragOver: boolean;
+  poppedOut: boolean;
+}): string {
+  const flags = [
+    s.selected && "selected",
+    s.checked && "checked",
+    s.dragOver && "dragover",
+    s.poppedOut && "poppedout",
+  ].filter(Boolean);
+  return `rule-item ${flags.join(" ")}`;
+}
+
 /** A compact traffic-list-style row: method badge + host/path (never the URL
  *  twice), a small action line, and the fire/popped-out markers (issue #72). */
 export function RuleListItem({
   rule,
   selected,
+  checked,
   poppedOut,
   hits,
   draggable,
@@ -320,12 +340,15 @@ export function RuleListItem({
   onDragEnd,
 }: {
   rule: RuleSummary;
+  /** The single active row whose editor is open (dominant highlight). */
   selected: boolean;
+  /** A member of a multi-selection (lighter highlight). */
+  checked?: boolean;
   poppedOut: boolean;
   hits: number;
   draggable: boolean;
   dragOver: boolean;
-  onSelect: () => void;
+  onSelect: (event: ReactMouseEvent) => void;
   onOpen: () => void;
   onToggle: (enabled: boolean) => void;
   onContextMenu: (event: ReactMouseEvent) => void;
@@ -337,15 +360,17 @@ export function RuleListItem({
   const parts = ruleRowParts(rule);
   const { primary, secondary } = ruleRowLines(parts, rule.enabled);
   const label = ruleLabel(rule.matcher.url);
-  const cls = `rule-item ${selected ? "selected" : ""} ${dragOver ? "dragover" : ""} ${
-    poppedOut ? "poppedout" : ""
-  }`;
+  const cls = ruleItemClass({ selected, checked: !!checked, dragOver, poppedOut });
   return (
     <div
       className={cls}
       onClick={onSelect}
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
+      onMouseDown={(e) => {
+        // Stop shift-click from painting a text selection across rows.
+        if (e.shiftKey) e.preventDefault();
+      }}
       title={`${label}\nDouble-click to open in a separate window`}
       {...ruleDragProps(rule, draggable, { onDragStart, onDragOver, onDrop, onDragEnd })}
     >
@@ -497,20 +522,76 @@ export function useSelectedRule(
   return { rule, loading, saveState, patch, clearPending, flush };
 }
 
-function useRuleSelection(selectRuleId?: string | null) {
+/** Rule-list selection (issue #106). `selectedRuleId` is the single "active" row
+ *  whose editor is open; `selectedIds` is the multi-selection for bulk delete.
+ *  The active id is always a member of the set (or both are empty), so the editor
+ *  shows exactly when `selectedIds.size <= 1`. Click semantics reuse the shared,
+ *  tested pure helpers (`rangeSelection` / `toggleSelection`); the ordered id list
+ *  (the currently shown, filtered rules) is passed in at call time. */
+export function useRuleSelection(selectRuleId?: string | null) {
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
+  const anchorRef = useRef<string | null>(null);
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<RuleSearchScope>("all");
   const [dragId, setDragId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
 
+  const selectOne = useCallback((id: string | null) => {
+    setSelectedRuleId(id);
+    setSelectedIds(id ? new Set([id]) : new Set());
+    anchorRef.current = id;
+  }, []);
+
   useEffect(() => {
-    if (selectRuleId) setSelectedRuleId(selectRuleId);
-  }, [selectRuleId]);
+    if (selectRuleId) selectOne(selectRuleId);
+  }, [selectRuleId, selectOne]);
+
+  function onRowClick(order: string[], id: string, e: ReactMouseEvent) {
+    const patch = clickSelection(order, selectedIds, selectedRuleId, anchorRef.current, id, e);
+    setSelectedIds(patch.selectedIds);
+    setSelectedRuleId(patch.selectedId);
+    anchorRef.current = patch.anchor;
+  }
+
+  function selectAll(order: string[]) {
+    if (order.length === 0) return;
+    setSelectedIds(new Set(order));
+    setSelectedRuleId(order[order.length - 1]);
+    anchorRef.current = order[0];
+  }
+
+  const clearSelection = useCallback(() => selectOne(null), [selectOne]);
+
+  /** Keep the selection scoped to the rows the user can currently see: drop ids
+   *  that were filtered out, deleted here, or removed from a detached window, and
+   *  re-home the active row / anchor onto a surviving member (issue #106). Bulk
+   *  Delete and the "N selected" count then never include invisible rows. Reads
+   *  the current state, so it must NOT be memoized. */
+  function retainVisible(presentOrder: string[]) {
+    const patch = pruneSelection(presentOrder, selectedIds, selectedRuleId, anchorRef.current);
+    if (!patch) return;
+    setSelectedIds(patch.selectedIds);
+    setSelectedRuleId(patch.selectedId);
+    anchorRef.current = patch.anchor;
+  }
+
+  const ensureSelected = useCallback(
+    (id: string) => {
+      if (!selectedIds.has(id)) selectOne(id);
+    },
+    [selectedIds, selectOne],
+  );
 
   return {
+    selectedIds,
     selectedRuleId,
-    setSelectedRuleId,
+    selectOne,
+    onRowClick,
+    selectAll,
+    clearSelection,
+    retainVisible,
+    ensureSelected,
     query,
     setQuery,
     scope,
@@ -620,13 +701,26 @@ interface RuleMenuActions {
   onDuplicate: (id: string) => void;
   onToggle: (id: string, enabled: boolean) => void;
   onDelete: (id: string) => void;
+  onDeleteSelected: () => void;
 }
 
 function ruleMenuItems(
   rule: RuleSummary,
   canReorder: boolean,
   actions: RuleMenuActions,
+  selectedCount: number,
 ): MenuItem[] {
+  // With several rules selected the single-rule actions (move/duplicate/toggle)
+  // don't apply — offer only the bulk delete so the menu can't lie about scope.
+  if (selectedCount > 1) {
+    return [
+      {
+        label: `Delete ${selectedCount} rules`,
+        onClick: () => actions.onDeleteSelected(),
+        danger: true,
+      },
+    ];
+  }
   const items: MenuItem[] = [];
   if (canReorder) {
     items.push(
@@ -650,6 +744,7 @@ function ruleMenuItems(
 function useRuleMenu(
   canReorder: boolean,
   actions: RuleMenuActions,
+  selection: { selectedIds: Set<string>; ensureSelected: (id: string) => void },
 ): {
   openMenu: (event: ReactMouseEvent, rule: RuleSummary) => void;
   menuElement: ReactElement | null;
@@ -658,22 +753,36 @@ function useRuleMenu(
   function openMenu(event: ReactMouseEvent, rule: RuleSummary) {
     event.preventDefault();
     event.stopPropagation();
+    // Right-clicking a row outside the current selection acts on just that row.
+    selection.ensureSelected(rule.id);
     setMenu({ x: event.clientX, y: event.clientY, rule });
   }
+  // The count reflects the selection as of the click (ensureSelected collapses an
+  // outside-click to 1); a right-click inside a multi-selection keeps it.
+  const count = menu
+    ? selection.selectedIds.has(menu.rule.id)
+      ? selection.selectedIds.size
+      : 1
+    : 0;
   const menuElement = menu ? (
     <ContextMenu
       x={menu.x}
       y={menu.y}
-      items={ruleMenuItems(menu.rule, canReorder, actions)}
+      items={ruleMenuItems(menu.rule, canReorder, actions, count)}
       onClose={() => setMenu(null)}
     />
   ) : null;
   return { openMenu, menuElement };
 }
 
-interface RuleListBehavior {
+export interface RuleListBehavior {
   selectedRuleId: string | null;
-  setSelectedRuleId: (id: string | null) => void;
+  selectedIds: Set<string>;
+  onRowClick: (id: string, event: ReactMouseEvent) => void;
+  ensureSelected: (id: string) => void;
+  onSelectAll: () => void;
+  onDeleteSelected: () => void;
+  onClearSelection: () => void;
   openWindowRuleIds: Set<string>;
   onOpen: (id: string) => void;
   canReorder: boolean;
@@ -791,7 +900,32 @@ function RuleList({
   );
 }
 
-function VirtualRuleList({
+/** Ctrl/⌘+A, Delete and Escape act on the focused rule list (issue #106).
+ *  stopPropagation shields them from the window-level shortcut handler, which
+ *  would otherwise route Ctrl+A to the traffic list's select-all. */
+function handleRuleListKeys(
+  e: ReactKeyboardEvent,
+  b: Pick<
+    RuleListBehavior,
+    "selectedIds" | "onSelectAll" | "onDeleteSelected" | "onClearSelection"
+  >,
+): void {
+  if ((e.ctrlKey || e.metaKey) && (e.key === "a" || e.key === "A")) {
+    e.preventDefault();
+    e.stopPropagation();
+    b.onSelectAll();
+  } else if (e.key === "Delete" || e.key === "Backspace") {
+    if (b.selectedIds.size === 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    b.onDeleteSelected();
+  } else if (e.key === "Escape" && b.selectedIds.size > 0) {
+    e.preventDefault();
+    b.onClearSelection();
+  }
+}
+
+export function VirtualRuleList({
   rules,
   behavior,
 }: {
@@ -800,7 +934,12 @@ function VirtualRuleList({
 }) {
   const {
     selectedRuleId,
-    setSelectedRuleId,
+    selectedIds,
+    onRowClick,
+    ensureSelected,
+    onSelectAll,
+    onDeleteSelected,
+    onClearSelection,
     openWindowRuleIds,
     onOpen,
     canReorder,
@@ -816,14 +955,13 @@ function VirtualRuleList({
     onMoveToBottom,
     onReorder,
   } = behavior;
-  const { openMenu, menuElement } = useRuleMenu(canReorder, {
-    onMoveToTop,
-    onMoveToBottom,
-    onDuplicate,
-    onToggle,
-    onDelete,
-  });
+  const { openMenu, menuElement } = useRuleMenu(
+    canReorder,
+    { onMoveToTop, onMoveToBottom, onDuplicate, onToggle, onDelete, onDeleteSelected },
+    { selectedIds, ensureSelected },
+  );
   const scrollRef = useRef<HTMLDivElement>(null);
+  const single = selectedIds.size <= 1;
   const selectedIndex = rules.findIndex((rule) => rule.id === selectedRuleId);
   const virtualizer = useVirtualizer({
     count: rules.length,
@@ -840,7 +978,16 @@ function VirtualRuleList({
   }, [selectedIndex, virtualizer]);
 
   return (
-    <div ref={scrollRef} className="rule-list-viewport">
+    <div
+      ref={scrollRef}
+      className="rule-list-viewport"
+      tabIndex={0}
+      role="listbox"
+      aria-multiselectable
+      onKeyDown={(e) =>
+        handleRuleListKeys(e, { selectedIds, onSelectAll, onDeleteSelected, onClearSelection })
+      }
+    >
       <div className="rule-list-canvas" style={{ height: virtualizer.getTotalSize() }}>
         {virtualizer.getVirtualItems().map((item) => {
           const rule = rules[item.index];
@@ -852,12 +999,16 @@ function VirtualRuleList({
             >
               <RuleListItem
                 rule={rule}
-                selected={rule.id === selectedRuleId}
+                selected={single && rule.id === selectedRuleId}
+                checked={selectedIds.has(rule.id)}
                 poppedOut={openWindowRuleIds.has(rule.id)}
                 hits={ruleHits[rule.id] ?? 0}
                 draggable={canReorder}
                 dragOver={overId === rule.id && dragId !== rule.id}
-                onSelect={() => setSelectedRuleId(rule.id)}
+                onSelect={(event) => {
+                  onRowClick(rule.id, event);
+                  scrollRef.current?.focus({ preventScroll: true });
+                }}
                 onOpen={() => onOpen(rule.id)}
                 onToggle={(enabled) => onToggle(rule.id, enabled)}
                 onContextMenu={(event) => openMenu(event, rule)}
@@ -885,6 +1036,8 @@ function VirtualRuleList({
 interface RuleEditorPaneProps {
   scenarioId: string;
   selectedRule: Rule | null;
+  /** Size of the multi-selection; > 1 disables editing and shows the bulk panel. */
+  selectedCount: number;
   loading: boolean;
   ruleHits: Record<string, number>;
   poppedOut: boolean;
@@ -893,23 +1046,33 @@ interface RuleEditorPaneProps {
   onCollapse: () => void;
   onPatchRule: (p: Partial<Rule>, tag?: HistoryTag) => void;
   onDeleteRule: (id: string) => void;
+  onDeleteSelected: () => void;
+  onClearSelection: () => void;
 }
 
 function RuleDetailHead({
   selectedRule,
+  selectedCount,
   layout,
   onOpen,
   onCollapse,
-}: Pick<RuleEditorPaneProps, "selectedRule" | "layout" | "onOpen" | "onCollapse">) {
+}: Pick<
+  RuleEditorPaneProps,
+  "selectedRule" | "selectedCount" | "layout" | "onOpen" | "onCollapse"
+>) {
   const collapseTitle =
     layout === "stacked" ? "Collapse details (hide below)" : "Collapse details (hide on the right)";
+  const title =
+    selectedCount > 1
+      ? `${selectedCount} rules selected`
+      : selectedRule
+        ? ruleLabel(selectedRule.matcher.url)
+        : "Details";
   return (
     <div className="rule-detail-head">
-      <span className="rule-detail-title">
-        {selectedRule ? ruleLabel(selectedRule.matcher.url) : "Details"}
-      </span>
+      <span className="rule-detail-title">{title}</span>
       <div className="spacer" />
-      {selectedRule && (
+      {selectedRule && selectedCount <= 1 && (
         <button
           className="btn ghost small"
           title="Open this rule in a separate window"
@@ -937,6 +1100,38 @@ function RuleLockedNotice({ ruleId, onOpen }: { ruleId: string; onOpen: (id: str
   );
 }
 
+/** Shown in the detail pane while several rules are selected: editing a single
+ *  rule doesn't apply, so offer the bulk action (delete) instead (issue #106). */
+export function RuleBulkSelection({
+  count,
+  onDelete,
+  onClear,
+}: {
+  count: number;
+  onDelete: () => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="rule-detail-body">
+      <div className="rule-bulk pad">
+        <p className="rule-bulk-count">{count} rules selected</p>
+        <p className="muted small">
+          Editing is disabled while multiple rules are selected. Ctrl/⌘-click or Shift-click to
+          adjust the selection, Del to delete, or Esc to clear.
+        </p>
+        <div className="row">
+          <button className="btn danger" onClick={onDelete}>
+            Delete {count} rules
+          </button>
+          <button className="btn" onClick={onClear}>
+            Clear selection
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RuleDetailBody({
   scenarioId,
   selectedRule,
@@ -946,7 +1141,10 @@ function RuleDetailBody({
   onOpen,
   onPatchRule,
   onDeleteRule,
-}: Omit<RuleEditorPaneProps, "layout" | "onCollapse" | "poppedOut"> & { locked: boolean }) {
+}: Omit<
+  RuleEditorPaneProps,
+  "layout" | "onCollapse" | "poppedOut" | "selectedCount" | "onDeleteSelected" | "onClearSelection"
+> & { locked: boolean }) {
   if (locked && selectedRule) {
     return (
       <div className="rule-detail-body">
@@ -979,26 +1177,35 @@ function RuleDetailBody({
 }
 
 function RuleEditorPane(props: RuleEditorPaneProps) {
-  const { selectedRule, layout, poppedOut, onOpen, onCollapse } = props;
+  const { selectedRule, selectedCount, layout, poppedOut, onOpen, onCollapse } = props;
   const locked = !!selectedRule && poppedOut;
   return (
     <section className="rule-editor">
       <RuleDetailHead
         selectedRule={selectedRule}
+        selectedCount={selectedCount}
         layout={layout}
         onOpen={onOpen}
         onCollapse={onCollapse}
       />
-      <RuleDetailBody
-        scenarioId={props.scenarioId}
-        selectedRule={selectedRule}
-        loading={props.loading}
-        ruleHits={props.ruleHits}
-        locked={locked}
-        onOpen={onOpen}
-        onPatchRule={props.onPatchRule}
-        onDeleteRule={props.onDeleteRule}
-      />
+      {selectedCount > 1 ? (
+        <RuleBulkSelection
+          count={selectedCount}
+          onDelete={props.onDeleteSelected}
+          onClear={props.onClearSelection}
+        />
+      ) : (
+        <RuleDetailBody
+          scenarioId={props.scenarioId}
+          selectedRule={selectedRule}
+          loading={props.loading}
+          ruleHits={props.ruleHits}
+          locked={locked}
+          onOpen={onOpen}
+          onPatchRule={props.onPatchRule}
+          onDeleteRule={props.onDeleteRule}
+        />
+      )}
     </section>
   );
 }
@@ -1063,7 +1270,10 @@ function useScenarioWorkspace(
 ) {
   const selection = useRuleSelection(selectRuleId);
   const selectedId = selection.selectedRuleId;
-  const selectedPopped = selectedId ? openWindowRuleIds.has(selectedId) : false;
+  // Editing is disabled while several rules are selected (issue #106): feed the
+  // editor a null id so it neither loads nor saves against the multi-selection.
+  const editingRuleId = selection.selectedIds.size <= 1 ? selectedId : null;
+  const selectedPopped = editingRuleId ? openWindowRuleIds.has(editingRuleId) : false;
 
   // When the selected rule's detached window closes, the inline copy loaded here
   // is stale (the window saved a newer version). Bump a reload nonce on that
@@ -1078,19 +1288,19 @@ function useScenarioWorkspace(
 
   const editor = useSelectedRule(
     active.id,
-    selectedId,
+    editingRuleId,
     ruleActions.load,
     ruleActions.update,
     (reloadToken ?? 0) + externalReload,
   );
 
-  // The selected rule vanished (deleted here, or from its detached window) — drop
-  // the selection so the inline editor doesn't keep a phantom, editable copy that
-  // would save against a non-existent rule id.
+  // The editing rule was genuinely deleted (here or from its detached window):
+  // discard its pending debounced edit so it can't save against a dead id. A
+  // filter merely *hiding* the rule is NOT a deletion — active.rules is unchanged
+  // there — so the pending edit still flushes normally.
   useEffect(() => {
-    if (selectedId && !active.rules.some((r) => r.id === selectedId)) {
+    if (selectedId !== null && !active.rules.some((r) => r.id === selectedId)) {
       editor.clearPending();
-      selection.setSelectedRuleId(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active.rules, selectedId]);
@@ -1119,9 +1329,19 @@ function useScenarioWorkspace(
     [active.rules, selection.query, selection.scope, deepIds],
   );
 
+  // Selection follows visibility (issue #106, mirroring the traffic list's issue
+  // #90 rule): whenever the shown set changes — a filter hid rows, or rules were
+  // deleted — drop the now-invisible rows from the selection and re-home the
+  // active row, so bulk Delete and the "N selected" count only ever act on rows
+  // the user can actually see.
+  useEffect(() => {
+    selection.retainVisible(shownRules.map((r) => r.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shownRules]);
+
   async function addRule() {
     const created = await ruleActions.create(active.id);
-    if (created) selection.setSelectedRuleId(created.id);
+    if (created) selection.selectOne(created.id);
   }
 
   async function toggleRule(id: string, enabled: boolean) {
@@ -1139,15 +1359,25 @@ function useScenarioWorkspace(
   async function duplicateRule(id: string) {
     if (editor.rule?.id === id) await editor.flush();
     const created = await ruleActions.duplicate(active.id, id);
-    if (created) selection.setSelectedRuleId(created.id);
+    if (created) selection.selectOne(created.id);
   }
 
   function deleteRule(id: string) {
     if (selection.selectedRuleId === id) {
       editor.clearPending();
-      selection.setSelectedRuleId(null);
+      selection.selectOne(null);
     }
     ruleActions.delete(active.id, id);
+  }
+
+  function deleteSelected() {
+    const ids = [...selection.selectedIds];
+    if (ids.length === 0) return;
+    // Cancel any in-flight debounced save for a rule about to vanish, then clear
+    // the selection before the delete so the editor can't flash a dead rule.
+    editor.clearPending();
+    selection.clearSelection();
+    ruleActions.deleteMany(active.id, ids);
   }
 
   return {
@@ -1161,6 +1391,7 @@ function useScenarioWorkspace(
     toggleRule,
     duplicateRule,
     deleteRule,
+    deleteSelected,
   };
 }
 
@@ -1263,6 +1494,8 @@ function ScenarioRuleWorkspace({
   onOpenRuleWindow: (ruleId: string) => void;
 }) {
   const { selection, editor, listResize, listResizeV } = workspace;
+  // Shift/Ctrl-click select operates over the currently shown (filtered) rows.
+  const shownIds = workspace.shownRules.map((r) => r.id);
   // Flush the inline editor's pending debounced edit before popping a rule out,
   // so the detached window loads the just-typed value rather than a stale one.
   const openWindow = (ruleId: string) => {
@@ -1271,7 +1504,12 @@ function ScenarioRuleWorkspace({
   };
   const behavior: RuleListBehavior = {
     selectedRuleId: selection.selectedRuleId,
-    setSelectedRuleId: selection.setSelectedRuleId,
+    selectedIds: selection.selectedIds,
+    onRowClick: (id, event) => selection.onRowClick(shownIds, id, event),
+    ensureSelected: selection.ensureSelected,
+    onSelectAll: () => selection.selectAll(shownIds),
+    onDeleteSelected: workspace.deleteSelected,
+    onClearSelection: selection.clearSelection,
     openWindowRuleIds,
     onOpen: openWindow,
     canReorder: !selection.query.trim(),
@@ -1327,6 +1565,7 @@ function ScenarioRuleWorkspace({
           <RuleEditorPane
             scenarioId={active.id}
             selectedRule={editor.rule}
+            selectedCount={selection.selectedIds.size}
             loading={editor.loading}
             ruleHits={ruleHits}
             poppedOut={editor.rule ? openWindowRuleIds.has(editor.rule.id) : false}
@@ -1335,6 +1574,8 @@ function ScenarioRuleWorkspace({
             onCollapse={onToggleCollapse}
             onPatchRule={editor.patch}
             onDeleteRule={workspace.deleteRule}
+            onDeleteSelected={workspace.deleteSelected}
+            onClearSelection={selection.clearSelection}
           />
         </>
       )}

@@ -385,6 +385,25 @@ pub fn delete_rule(
 }
 
 #[tauri::command]
+pub fn delete_rules(
+    state: State<'_, AppState>,
+    scenario_id: String,
+    rule_ids: Vec<String>,
+    history_tag: HistoryTag,
+) -> Result<(), String> {
+    // Persist first (idempotent DELETEs, so missing ids are harmless), then apply
+    // the whole batch inside one history step so it undoes as a single action.
+    for rule_id in &rule_ids {
+        state.rule_store.delete_rule(&scenario_id, rule_id)?;
+    }
+    state.controller.with_history(history_tag, |c| {
+        c.delete_rules(&scenario_id, &rule_ids)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
 pub async fn duplicate_rule(
     state: State<'_, AppState>,
     scenario_id: String,
