@@ -1017,10 +1017,16 @@ pub fn blank_rule(id: String) -> Rule {
         enabled: true,
         fire_limit: None,
         repeat: false,
+        // Contains (the friendly default): an empty pattern matches every
+        // request, which is what a freshly-added rule wants (and what the
+        // editor's "empty URL matches every request" hint promises). Exact with
+        // an empty URL would match *nothing* (`url == ""` is never true) — a
+        // silent no-op footgun. `respond_rule_from_flow` overrides to Exact
+        // because it seeds a specific full URL.
         matcher: Matcher {
             method: None,
             url: String::new(),
-            url_match: MatchKind::Exact,
+            url_match: MatchKind::Contains,
         },
         action: Action::Respond {
             status: 200,
@@ -1597,6 +1603,17 @@ mod tests {
         let rule = blank_rule("id".into());
         assert_eq!(rule.matcher.url, "");
         assert_eq!(rule.label(), "*");
+    }
+
+    #[test]
+    fn blank_rule_matches_every_request() {
+        // A freshly-created rule (empty URL) must match, so a hand-written rule
+        // fires without the user first filling in a URL. Its default match kind
+        // is Contains — Exact with an empty URL would silently match nothing.
+        let rule = blank_rule("id".into());
+        assert_eq!(rule.matcher.url_match, MatchKind::Contains);
+        assert!(rule.matcher.matches(&req("GET", "https", "api.example.com", "/users?page=1")));
+        assert!(rule.matcher.matches(&req("POST", "http", "other.test", "/")));
     }
 
     #[test]
