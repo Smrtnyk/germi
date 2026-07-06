@@ -173,46 +173,63 @@ function fireBadge(rule: RuleSummary): string | null {
   return rule.fireLimit === 1 ? "once" : `x${rule.fireLimit}`;
 }
 
+/** Warnings about a matcher that would silently never (or always) match. */
+function matcherWarnings(matcher: Rule["matcher"]): string[] {
+  if (!matcher.url.trim()) {
+    // An empty pattern matches everything under Contains/Regex, but *nothing*
+    // under Exact (`url == ""` is never true) — a silent no-op the user won't
+    // expect, so flag it instead of falsely claiming it matches every request.
+    return matcher.urlMatch === "exact"
+      ? [
+          "URL pattern is empty with Exact match — this rule matches nothing. Switch Match to Contains, or fill in a URL.",
+        ]
+      : ["URL pattern is empty — this rule matches every request."];
+  }
+  if (matcher.urlMatch !== "regex") return [];
+  // The engine compiles with the Rust `regex` crate, whose dialect differs from
+  // JS. Normalize Rust-style named groups ((?P<n>…)) before the JS validity
+  // check so they don't false-warn, and flag lookaround/backreferences — valid
+  // JS but unsupported by Rust, so the rule would look fine here yet never match.
+  try {
+    RegExp(matcher.url.replace(/\(\?P</g, "(?<"));
+    return /\(\?<?[=!]|\\[1-9]/.test(matcher.url)
+      ? [
+          "URL regex uses lookaround/backreferences, which the engine doesn't support — this rule will never match.",
+        ]
+      : [];
+  } catch {
+    return ["URL regex is invalid — this rule will never match."];
+  }
+}
+
+/** Warnings about a Respond action's Headers table clashing with dedicated fields. */
+function respondHeaderWarnings(headers: [string, string][]): string[] {
+  const w: string[] = [];
+  const names = headers.map(([n]) => n.trim().toLowerCase()).filter(Boolean);
+  const dup = names.find((n, i) => names.indexOf(n) !== i);
+  if (dup) w.push(`Duplicate header "${dup}" — only the last value is sent.`);
+  if (names.includes("content-type")) {
+    w.push("Content-Type is in the Headers table — use the dedicated field to avoid duplicates.");
+  }
+  if (names.includes("content-encoding")) {
+    w.push(
+      "Content-Encoding is in the Headers table — use the dedicated toggle below to avoid duplicates.",
+    );
+  }
+  return w;
+}
+
 /** Non-blocking lint of a rule — surfaced as inline warnings in the editor so
  *  silently-never-matching or duplicate-header mistakes are caught early. */
 function ruleWarnings(rule: Rule): string[] {
-  const w: string[] = [];
-  if (!rule.matcher.url.trim()) {
-    w.push("URL pattern is empty — this rule matches every request.");
-  } else if (rule.matcher.urlMatch === "regex") {
-    // The engine compiles with the Rust `regex` crate, whose dialect differs from
-    // JS. Normalize Rust-style named groups ((?P<n>…)) before the JS validity
-    // check so they don't false-warn, and flag lookaround/backreferences — valid
-    // JS but unsupported by Rust, so the rule would look fine here yet never match.
-    const pat = rule.matcher.url;
-    try {
-      RegExp(pat.replace(/\(\?P</g, "(?<"));
-      if (/\(\?<?[=!]|\\[1-9]/.test(pat)) {
-        w.push(
-          "URL regex uses lookaround/backreferences, which the engine doesn't support — this rule will never match.",
-        );
-      }
-    } catch {
-      w.push("URL regex is invalid — this rule will never match.");
-    }
-  }
+  const w = matcherWarnings(rule.matcher);
   if (rule.action.kind === "cors" && rule.matcher.method) {
     w.push(
       "A method-specific matcher splits Allow CORS in half — preflights are OPTIONS while the stamped responses are GET/POST etc. Clear Method to cover both.",
     );
   }
   if (rule.action.kind === "respond") {
-    const names = rule.action.headers.map(([n]) => n.trim().toLowerCase()).filter(Boolean);
-    const dup = names.find((n, i) => names.indexOf(n) !== i);
-    if (dup) w.push(`Duplicate header "${dup}" — only the last value is sent.`);
-    if (names.includes("content-type")) {
-      w.push("Content-Type is in the Headers table — use the dedicated field to avoid duplicates.");
-    }
-    if (names.includes("content-encoding")) {
-      w.push(
-        "Content-Encoding is in the Headers table — use the dedicated toggle below to avoid duplicates.",
-      );
-    }
+    w.push(...respondHeaderWarnings(rule.action.headers));
   }
   return w;
 }
