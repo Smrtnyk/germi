@@ -66,7 +66,7 @@ import type {
   ScenarioSummary,
 } from "./types";
 
-export type RightTab = "inspector" | "autoresponder" | "filters";
+export type RightTab = "inspector" | "autoresponder" | "filters" | "scripts";
 export type RightMode = "single" | "split";
 /** Where the autoresponder rule detail sits relative to the list (issue #72). */
 export type AutoLayout = "side" | "stacked";
@@ -1243,7 +1243,11 @@ function useCapturedDelete(
 
 function useViewState() {
   const [rightTab, setRightTabState] = useState<RightTab>(() =>
-    loadString("germi.rightTab", ["inspector", "autoresponder", "filters"] as const, "inspector"),
+    loadString(
+      "germi.rightTab",
+      ["inspector", "autoresponder", "filters", "scripts"] as const,
+      "inspector",
+    ),
   );
   const setRightTab = useCallback((tab: RightTab) => {
     setRightTabState(tab);

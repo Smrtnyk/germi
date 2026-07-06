@@ -18,6 +18,8 @@ import type {
   RuleSearchScope,
   RuleSummary,
   ScenarioSummary,
+  Script,
+  ScriptDiagnostic,
   TestInput,
   TestResult,
 } from "./types";
@@ -69,6 +71,9 @@ export const api = {
   setSettings: (settings: ProxySettings) => invoke<void>("set_settings", { settings }),
   exportSettings: () => invoke<boolean>("export_settings"),
   importSettings: () => invoke<ProxySettings>("import_settings"),
+  getScripts: () => invoke<Script[]>("get_scripts"),
+  setScripts: (scripts: Script[]) => invoke<ScriptDiagnostic[]>("set_scripts", { scripts }),
+  checkScript: (source: string) => invoke<string | null>("check_script", { source }),
   testScenario: (scenarioId: string, input: TestInput) =>
     invoke<TestResult>("test_scenario", { scenarioId, input }),
   mockFlows: (

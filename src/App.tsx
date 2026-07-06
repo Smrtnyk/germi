@@ -18,6 +18,8 @@ import { FiltersPanel, type FiltersPanelProps } from "./components/FiltersPanel"
 import { TrafficList } from "./components/TrafficList";
 import { FlowInspector } from "./components/FlowInspector";
 import { AutoresponderPanel, type AutoresponderPanelProps } from "./components/AutoresponderPanel";
+import { ScriptsContainer } from "./components/ScriptsContainer";
+import { openOrFocusScriptsWindow } from "./scriptWindows";
 import { CaDialog } from "./components/CaDialog";
 import { SettingsDialog, type SettingsDialogProps } from "./components/SettingsDialog";
 import { StatusBar } from "./components/StatusBar";
@@ -362,6 +364,24 @@ function FiltersTab({
   );
 }
 
+/** The Scripts tab button: user request/response hooks (issue #98). */
+function ScriptsTab({
+  rightTab,
+  setRightTab,
+}: {
+  rightTab: RightTab;
+  setRightTab: (tab: RightTab) => void;
+}) {
+  return (
+    <button
+      className={rightTab === "scripts" ? "tab active" : "tab"}
+      onClick={() => setRightTab("scripts")}
+    >
+      Scripts
+    </button>
+  );
+}
+
 /** The Inspector/Autoresponder side of the tab strip: two tabs in single mode,
  *  one combined "Inspector + Autoresponder" tab in split mode. Flow-drags pull
  *  the panel back over from the Filters tab so the mock drop target is visible. */
@@ -442,6 +462,7 @@ function RightPanelHeader({
           activeScenario={activeScenario}
         />
         <FiltersTab rightTab={rightTab} setRightTab={setRightTab} soloActive={soloActive} />
+        <ScriptsTab rightTab={rightTab} setRightTab={setRightTab} />
       </div>
       <div className="spacer" />
       {inspectorShown && <FindInRequestButton onOpenFind={onOpenFind} />}
@@ -529,11 +550,14 @@ function ViewerPanel({
  *  mode shows the active tab. */
 function paneVisibility(rightTab: RightTab, split: boolean) {
   const filters = rightTab === "filters";
+  const scripts = rightTab === "scripts";
+  const workbench = !filters && !scripts;
   return {
     filters,
-    inspector: !filters && (split || rightTab === "inspector"),
-    auto: !filters && (split || rightTab === "autoresponder"),
-    splitPair: split && !filters,
+    scripts,
+    inspector: workbench && (split || rightTab === "inspector"),
+    auto: workbench && (split || rightTab === "autoresponder"),
+    splitPair: split && workbench,
   };
 }
 
@@ -597,6 +621,9 @@ function RightPanel({
         </div>
         <div className={panes.filters ? "pane" : "pane hidden"}>
           <FiltersPanel {...filters} />
+        </div>
+        <div className={panes.scripts ? "pane" : "pane hidden"}>
+          <ScriptsContainer onPopOut={() => void openOrFocusScriptsWindow()} />
         </div>
       </div>
     </div>

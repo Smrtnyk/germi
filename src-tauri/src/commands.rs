@@ -12,7 +12,7 @@ use base64::Engine;
 use proxy_core::{
     AutoResponderSummary, BodyComparison, FlowDetail, FlowEvent, FlowSummary, HistoryStep,
     HistoryTag, MockResult, ProxySettings, Rule, RuleSearchScope, RuleSummary, Scenario,
-    ScenarioSummary, SearchSide, TestInput, TestResult,
+    ScenarioSummary, Script, ScriptDiagnostic, SearchSide, TestInput, TestResult,
 };
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -461,6 +461,28 @@ pub fn set_settings(state: State<'_, AppState>, settings: ProxySettings) {
     }
     state.controller.set_settings(settings.clone());
     crate::persist::save_settings(&state.ca_dir, &settings);
+}
+
+#[tauri::command]
+pub fn get_scripts(state: State<'_, AppState>) -> Vec<Script> {
+    state.controller.get_scripts()
+}
+
+#[tauri::command]
+pub fn set_scripts(state: State<'_, AppState>, scripts: Vec<Script>) -> Vec<ScriptDiagnostic> {
+    // A viewer shares scripts.json with the capturing instance; don't let it
+    // persist a stale snapshot (the same clobber guard as set_settings, issue #71).
+    if state.viewer {
+        return Vec::new();
+    }
+    let diagnostics = state.controller.set_scripts(scripts.clone());
+    crate::persist::save_scripts(&state.ca_dir, &scripts);
+    diagnostics
+}
+
+#[tauri::command]
+pub fn check_script(state: State<'_, AppState>, source: String) -> Option<String> {
+    state.controller.check_script(&source)
 }
 
 #[tauri::command]

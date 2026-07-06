@@ -40,6 +40,7 @@ import {
   LuPanelRightOpen,
   LuPower,
   LuSave,
+  LuScrollText,
   LuSquare,
   LuTriangleAlert,
   LuUnlink,
@@ -65,6 +66,7 @@ export const IconCert = make(FcKey);
 
 export const IconStop = make(LuSquare, { color: "var(--danger)", fill: "currentColor", size: 13 });
 export const IconMock = make(LuZap, { color: "var(--warn)", fill: "currentColor", size: 14 });
+export const IconScript = make(LuScrollText, { color: "var(--s3)", size: 14 });
 export const IconWarn = make(LuTriangleAlert, { color: "var(--warn)" });
 export const IconCheck = make(LuCheck, { color: "var(--s2)" });
 export const IconInfo = make(LuInfo, { color: "var(--s3)" });

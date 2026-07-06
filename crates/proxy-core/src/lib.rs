@@ -30,6 +30,7 @@ mod import;
 mod reissue;
 mod rules;
 mod rules_export;
+mod scripting;
 mod session;
 mod settings;
 mod shared;
@@ -59,6 +60,7 @@ pub use rules::{
     RuleSearchScope, RuleSet, RuleSummary, Scenario, ScenarioSummary,
 };
 pub use rules_export::RulesExport;
+pub use scripting::{Script, ScriptDiagnostic};
 pub use settings::ProxySettings;
 pub use tester::{test_rules, SequenceStep, TestInput, TestResponse, TestResult};
 
@@ -982,6 +984,32 @@ impl ProxyController {
         if !evicted.is_empty() {
             let _ = self.shared.events.send(FlowEvent::Removed { ids: evicted });
         }
+    }
+
+    // ---- user scripts (request/response hooks) ----
+
+    /// The stored scripts (source and all), in order.
+    pub fn get_scripts(&self) -> Vec<Script> {
+        self.shared
+            .scripts
+            .read()
+            .map(|engine| engine.scripts())
+            .unwrap_or_default()
+    }
+
+    /// Replace the whole script set (compiling each) and take effect immediately
+    /// for new traffic. Returns a compile diagnostic per script so the editor can
+    /// flag the ones that failed. Persistence is the Tauri layer's concern.
+    pub fn set_scripts(&self, scripts: Vec<Script>) -> Vec<ScriptDiagnostic> {
+        match self.shared.scripts.write() {
+            Ok(mut engine) => engine.set_scripts(scripts),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Compile `source` without storing it; `Some(message)` if it doesn't compile.
+    pub fn check_script(&self, source: &str) -> Option<String> {
+        self.shared.scripts.read().ok().and_then(|engine| engine.check(source))
     }
 
     /// Build mock rules without changing live state. Callers can report progress,

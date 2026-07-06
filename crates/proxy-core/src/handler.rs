@@ -22,6 +22,7 @@ use hudsucker::{
 
 use crate::flow::{now_ms, CapturedRequest, CapturedResponse, Flow};
 use crate::rules::{RequestOutcome, SyntheticResponse};
+use crate::scripting::{Effects, HeaderOp};
 use crate::shared::Shared;
 
 /// A body is buffered into memory (to capture it and run rewrite rules) up to
@@ -103,7 +104,7 @@ impl HttpHandler for CaptureHandler {
             .uri
             .path_and_query().map_or_else(|| parts.uri.path().to_string(), |p| p.as_str().to_string());
 
-        let captured = CapturedRequest {
+        let mut captured = CapturedRequest {
             method: parts.method.as_str().to_string(),
             uri: parts.uri.to_string(),
             scheme,
@@ -114,6 +115,10 @@ impl HttpHandler for CaptureHandler {
             body: body_bytes.clone(),
             timestamp_ms: now_ms(),
         };
+
+        // User scripts run before the autoresponder, so a script may rewrite the
+        // request the rules match on (and what's recorded/forwarded).
+        self.run_request_scripts(&mut parts.headers, &mut captured);
 
         let outcome = {
             let ar = self.shared.autoresponder.read();
@@ -128,6 +133,14 @@ impl HttpHandler for CaptureHandler {
 
         let id = self.shared.next_id();
         let start = Instant::now();
+
+        // Mocks never reach handle_response, so response-phase scripts run over
+        // them here; keep the request for that (it's about to move into the Flow).
+        let req_for_scripts = matches!(
+            outcome,
+            RequestOutcome::Respond { .. } | RequestOutcome::Block { .. }
+        )
+        .then(|| captured.clone());
 
         // Emit the request immediately (response pending).
         self.shared.record_new(Flow {
@@ -145,8 +158,7 @@ impl HttpHandler for CaptureHandler {
 
         match outcome {
             RequestOutcome::Respond { rule, response, .. } => {
-                let out = build_response(&response);
-                self.complete_synthetic(&id, &rule, response);
+                let out = self.serve_synthetic(&id, &rule, response, req_for_scripts.as_ref());
                 self.inflight = None;
                 out.into()
             }
@@ -156,23 +168,16 @@ impl HttpHandler for CaptureHandler {
                     headers: vec![("content-type".to_string(), "text/plain".to_string())],
                     body: b"Blocked by Germi".to_vec(),
                 };
-                self.complete_synthetic(&id, &rule, synthetic.clone());
+                let out = self.serve_synthetic(&id, &rule, synthetic, req_for_scripts.as_ref());
                 self.inflight = None;
-                build_response(&synthetic).into()
+                out.into()
             }
             RequestOutcome::Continue { set_headers } => {
                 self.inflight = Some(Inflight {
                     id: id.clone(),
                     start,
                 });
-                for (k, v) in &set_headers {
-                    if let (Ok(name), Ok(val)) = (
-                        HeaderName::from_bytes(k.as_bytes()),
-                        HeaderValue::from_str(v),
-                    ) {
-                        parts.headers.insert(name, val);
-                    }
-                }
+                apply_set_headers(&mut parts.headers, &set_headers);
                 // A successful WebSocket upgrade hands the connection to the WS
                 // handler and `handle_response` never fires, which would strand a
                 // forever-"pending" row. Record a tentative 101 now; if a real
@@ -269,6 +274,17 @@ impl HttpHandler for CaptureHandler {
             }
         }
 
+        // User scripts get the last word on the response the client sees.
+        let script_res_effects = match self.shared.scripts.read() {
+            Ok(engine) if engine.wants_response() => {
+                Some(engine.run_response(req.as_ref(), &captured))
+            }
+            _ => None,
+        };
+        if let Some(effects) = script_res_effects {
+            apply_response_effects(&mut captured, effects);
+        }
+
         let mut out = build_captured_response(&captured);
 
         // A HEAD response (and a 304) legitimately declares a Content-Length that
@@ -360,6 +376,59 @@ impl CaptureHandler {
         };
         self.shared
             .record_complete(id, captured, 0, Some(0), Some(rule.to_string()));
+    }
+
+    /// Run response-phase scripts over a rule-synthesized (mock/block) response so
+    /// a mock gets the same treatment (e.g. CORS headers) as a real upstream one —
+    /// the second call site that makes the response hook truly global, since mocks
+    /// never reach `handle_response`.
+    fn run_scripts_on_synthetic(&self, req: &CapturedRequest, synthetic: &mut SyntheticResponse) {
+        let Ok(engine) = self.shared.scripts.read() else {
+            return;
+        };
+        if !engine.wants_response() {
+            return;
+        }
+        let mut captured = CapturedResponse {
+            status: synthetic.status,
+            version: "HTTP/1.1".to_string(),
+            headers: std::mem::take(&mut synthetic.headers),
+            body: std::mem::take(&mut synthetic.body),
+            timestamp_ms: now_ms(),
+        };
+        let effects = engine.run_response(Some(req), &captured);
+        drop(engine);
+        apply_response_effects(&mut captured, effects);
+        synthetic.status = captured.status;
+        synthetic.headers = captured.headers;
+        synthetic.body = captured.body;
+    }
+
+    /// Run request-phase scripts over `captured`, replaying their header effects
+    /// onto the forwarded wire headers and the captured copy.
+    fn run_request_scripts(&self, wire: &mut HeaderMap, captured: &mut CapturedRequest) {
+        let effects = match self.shared.scripts.read() {
+            Ok(engine) if engine.wants_request() => engine.run_request(captured),
+            _ => return,
+        };
+        apply_request_effects(wire, &mut captured.headers, effects);
+    }
+
+    /// Finalize a rule-synthesized response: run response-phase scripts over it,
+    /// record it, and build the wire response the client receives.
+    fn serve_synthetic(
+        &self,
+        id: &str,
+        rule: &str,
+        mut response: SyntheticResponse,
+        req: Option<&CapturedRequest>,
+    ) -> Response<Body> {
+        if let Some(req) = req {
+            self.run_scripts_on_synthetic(req, &mut response);
+        }
+        let out = build_response(&response);
+        self.complete_synthetic(id, rule, response);
+        out
     }
 }
 
@@ -568,10 +637,138 @@ fn build_parts(status: u16, headers: &[(String, String)], body: &[u8]) -> Respon
         .unwrap_or_else(|_| Response::new(Body::from(body.to_vec())))
 }
 
+/// Replay a script's header effects onto both the forwarded request (`wire`, a
+/// `HeaderMap`) and the captured copy (`captured`, the recorded `Vec`), so the
+/// edits reach upstream AND show in the inspector. `Effects::status` is ignored
+/// for requests.
+fn apply_request_effects(
+    wire: &mut HeaderMap,
+    captured: &mut Vec<(String, String)>,
+    effects: Effects,
+) {
+    for op in effects.header_ops {
+        match op {
+            HeaderOp::Set(name, value) => {
+                remove_header_ci(captured, &name);
+                captured.push((name.clone(), value.clone()));
+                if let (Ok(n), Ok(v)) = (
+                    HeaderName::from_bytes(name.as_bytes()),
+                    HeaderValue::from_bytes(value.as_bytes()),
+                ) {
+                    wire.insert(n, v);
+                }
+            }
+            HeaderOp::Add(name, value) => {
+                captured.push((name.clone(), value.clone()));
+                if let (Ok(n), Ok(v)) = (
+                    HeaderName::from_bytes(name.as_bytes()),
+                    HeaderValue::from_bytes(value.as_bytes()),
+                ) {
+                    wire.append(n, v);
+                }
+            }
+            HeaderOp::Remove(name) => {
+                remove_header_ci(captured, &name);
+                if let Ok(n) = HeaderName::from_bytes(name.as_bytes()) {
+                    wire.remove(&n);
+                }
+            }
+        }
+    }
+}
+
+/// Replay a script's header/status effects onto a captured response. The wire
+/// response is rebuilt from this by `build_captured_response`, so mutating the
+/// captured copy is enough.
+fn apply_response_effects(captured: &mut CapturedResponse, effects: Effects) {
+    for op in effects.header_ops {
+        match op {
+            HeaderOp::Set(name, value) => {
+                remove_header_ci(&mut captured.headers, &name);
+                captured.headers.push((name, value));
+            }
+            HeaderOp::Add(name, value) => captured.headers.push((name, value)),
+            HeaderOp::Remove(name) => remove_header_ci(&mut captured.headers, &name),
+        }
+    }
+    if let Some(status) = effects.status {
+        captured.status = status;
+    }
+}
+
+fn remove_header_ci(headers: &mut Vec<(String, String)>, name: &str) {
+    headers.retain(|(k, _)| !k.eq_ignore_ascii_case(name));
+}
+
+/// Apply rule-supplied `set_headers` (a request-phase rewrite) to the wire request.
+fn apply_set_headers(headers: &mut HeaderMap, set_headers: &[(String, String)]) {
+    for (k, v) in set_headers {
+        if let (Ok(name), Ok(val)) =
+            (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v))
+        {
+            headers.insert(name, val);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use http_body_util::BodyExt;
+
+    #[test]
+    fn apply_response_effects_sets_replaces_adds_removes_and_status() {
+        let mut captured = CapturedResponse {
+            status: 200,
+            version: "HTTP/1.1".into(),
+            headers: vec![
+                ("content-type".into(), "text/html".into()),
+                ("x-drop".into(), "1".into()),
+            ],
+            body: Vec::new(),
+            timestamp_ms: 0,
+        };
+        let effects = Effects {
+            header_ops: vec![
+                HeaderOp::Set("Content-Type".into(), "application/json".into()),
+                HeaderOp::Add("set-cookie".into(), "a=1".into()),
+                HeaderOp::Remove("X-Drop".into()),
+            ],
+            status: Some(201),
+        };
+        apply_response_effects(&mut captured, effects);
+        assert_eq!(captured.status, 201);
+        // Set replaced the existing header (case-insensitively), not duplicated it.
+        let content_types: Vec<_> = captured
+            .headers
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .collect();
+        assert_eq!(content_types.len(), 1);
+        assert_eq!(content_types[0].1, "application/json");
+        assert!(captured.headers.iter().any(|(k, v)| k == "set-cookie" && v == "a=1"));
+        assert!(!captured.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("x-drop")));
+    }
+
+    #[test]
+    fn apply_request_effects_mutates_wire_and_capture_together() {
+        let mut wire = HeaderMap::new();
+        wire.insert(HeaderName::from_static("x-old"), HeaderValue::from_static("1"));
+        let mut captured = vec![("x-old".to_string(), "1".to_string())];
+        let effects = Effects {
+            header_ops: vec![
+                HeaderOp::Set("x-new".into(), "2".into()),
+                HeaderOp::Remove("x-old".into()),
+            ],
+            // status is meaningless for requests and must be ignored here.
+            status: Some(500),
+        };
+        apply_request_effects(&mut wire, &mut captured, effects);
+        assert_eq!(wire.get("x-new").and_then(|v| v.to_str().ok()), Some("2"));
+        assert!(wire.get("x-old").is_none());
+        assert!(captured.iter().any(|(k, v)| k == "x-new" && v == "2"));
+        assert!(!captured.iter().any(|(k, _)| k == "x-old"));
+    }
 
     #[tokio::test]
     async fn buffer_capped_small_body_is_fully_captured() {

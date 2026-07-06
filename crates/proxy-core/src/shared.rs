@@ -14,12 +14,14 @@ use crate::flow::{
 };
 use crate::history::History;
 use crate::rules::{AutoResponder, RuleCursors};
+use crate::scripting::ScriptEngine;
 use crate::settings::ProxySettings;
 use crate::store::FlowStore;
 
 pub struct Shared {
     pub store: Mutex<FlowStore>,
     pub autoresponder: RwLock<AutoResponder>,
+    pub scripts: RwLock<ScriptEngine>,
     pub settings: RwLock<ProxySettings>,
     pub cursors: Mutex<RuleCursors>,
     pub history: Mutex<History>,
@@ -42,6 +44,7 @@ impl Shared {
         Arc::new(Self {
             store: Mutex::new(FlowStore::new(max_flows)),
             autoresponder: RwLock::new(autoresponder),
+            scripts: RwLock::new(ScriptEngine::new()),
             settings: RwLock::new(settings),
             cursors: Mutex::new(RuleCursors::default()),
             history: Mutex::new(History::default()),

@@ -5,9 +5,10 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use proxy_core::ProxySettings;
+use proxy_core::{ProxySettings, Script};
 
 const SETTINGS_FILE: &str = "settings.json";
+const SCRIPTS_FILE: &str = "scripts.json";
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -49,5 +50,26 @@ pub fn save_settings(dir: &Path, settings: &ProxySettings) {
     });
     if let Err(e) = result {
         tracing::warn!("failed to persist settings: {e}");
+    }
+}
+
+/// Load saved user scripts, or `None` if absent / unreadable / malformed. Every
+/// `Script` field is `#[serde(default)]`, so a file written by an older build
+/// still loads.
+pub fn load_scripts(dir: &Path) -> Option<Vec<Script>> {
+    let text = std::fs::read_to_string(dir.join(SCRIPTS_FILE)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Best-effort save of user scripts (creates the app-data dir if missing). Uses
+/// the same atomic write as settings so a crash mid-write can't truncate the file
+/// and silently drop every script.
+pub fn save_scripts(dir: &Path, scripts: &[Script]) {
+    let result = std::fs::create_dir_all(dir).and_then(|()| {
+        let text = serde_json::to_string_pretty(scripts).map_err(std::io::Error::other)?;
+        write_atomic(&dir.join(SCRIPTS_FILE), text.as_bytes())
+    });
+    if let Err(e) = result {
+        tracing::warn!("failed to persist scripts: {e}");
     }
 }

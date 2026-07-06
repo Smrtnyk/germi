@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for the Germi main window, detached rule-editor windows, and the compare window",
-  "windows": ["main", "rule-*", "compare"],
+  "description": "Default capabilities for the Germi main window, detached rule-editor windows, the compare window, and the scripts window",
+  "windows": ["main", "rule-*", "compare", "scripts"],
   "permissions": [
     "core:default",
     "core:webview:allow-create-webview-window",
