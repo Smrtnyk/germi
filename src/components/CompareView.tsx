@@ -32,7 +32,10 @@ import { useToast, type Notify } from "../toast";
 import { CompareDiff } from "./CompareDiff";
 import { CompareGutter } from "./CompareGutter";
 import { ComparePane, type ComparePaneProps } from "./ComparePane";
+import { CaptureDropOverlay } from "./CaptureDropOverlay";
 import { IconArrowLeft, IconChevronRight, IconCompare, IconDiff, IconOpen } from "./icons";
+import { readFileAsBase64, useCaptureDrop } from "../captureDrop";
+import type { CaptureExt } from "../dnd";
 import type { FlowSummary, ResourceKind } from "../types";
 
 type Side = "left" | "right";
@@ -220,10 +223,10 @@ function useComparePanes(initialLeft: FlowSummary[], initialRight: FlowSummary[]
 function useCompareFile(appendRight: (flows: FlowSummary[]) => void, notify: Notify) {
   const [loading, setLoading] = useState(false);
 
-  async function loadFile() {
+  async function ingest(load: () => Promise<FlowSummary[] | null>) {
     setLoading(true);
     try {
-      const flows = await api.appendCapture();
+      const flows = await load();
       if (flows === null) return;
       if (flows.length === 0) {
         notify("info", "The file contained no requests");
@@ -241,7 +244,11 @@ function useCompareFile(appendRight: (flows: FlowSummary[]) => void, notify: Not
     }
   }
 
-  return { loading, loadFile };
+  const loadFile = () => ingest(() => api.appendCapture());
+  const loadDropped = (file: File, ext: CaptureExt) =>
+    ingest(async () => api.appendDroppedCapture(await readFileAsBase64(file), ext));
+
+  return { loading, loadFile, loadDropped };
 }
 
 interface CompareKeyActions {
@@ -385,6 +392,11 @@ export function CompareView({ initialLeft, initialRight, onClose }: CompareViewP
   const panes = useComparePanes(initialLeft, initialRight);
   const [diffOpen, setDiffOpen] = useState(false);
   const file = useCompareFile(panes.appendRight, notify);
+  const fileDrop = useCaptureDrop({
+    onFile: file.loadDropped,
+    onReject: (reason) => notify("info", reason),
+    disabled: diffOpen,
+  });
 
   const { left, right } = panes.sides;
   const canDiff = left.focused !== null && right.focused !== null;
@@ -472,6 +484,12 @@ export function CompareView({ initialLeft, initialRight, onClose }: CompareViewP
             ? urlSimilarity(flowUrl(left.focused), flowUrl(right.focused))
             : null
         }
+      />
+
+      <CaptureDropOverlay
+        active={fileDrop.dragging}
+        title="Drop to add to the comparison"
+        hint=".germi, .har, or .saz — appended to side B"
       />
     </div>
   );

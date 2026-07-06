@@ -9,6 +9,8 @@ import {
   type CommandId,
 } from "./shortcuts";
 import { hasFlowDrag } from "./dnd";
+import { useCaptureDrop } from "./captureDrop";
+import { CaptureDropOverlay } from "./components/CaptureDropOverlay";
 import type { CaInfo, FlowDetail, FlowSummary } from "./types";
 import { Toolbar } from "./components/Toolbar";
 import { FilterChips } from "./components/FilterChips";
@@ -651,6 +653,11 @@ export function App() {
   const reverse = useMemo(() => reverseLookup(s.shortcuts), [s.shortcuts]);
   const cmdActions = commandActions(s, setPaletteOpen);
 
+  const fileDrop = useCaptureDrop({
+    onFile: s.requestOpenDropped,
+    onReject: (reason) => s.notify("info", reason),
+  });
+
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => {});
   keyRef.current = (e: KeyboardEvent) => handleShortcut(e, s, reverse, cmdActions, setCheatOpen);
 
@@ -885,12 +892,18 @@ export function App() {
             message={`Opening a capture replaces all ${s.flowStore.orderRef.current.length} captured flow(s). Traffic is never auto-saved, so this can't be undone — use Save first if you want to keep it.`}
             confirmLabel="Open…"
             onConfirm={s.confirmOpenCapture}
-            onCancel={() => s.setConfirmOpen(false)}
+            onCancel={s.cancelOpenCapture}
           />
         )}
 
         {paletteOpen && <CommandPalette actions={actions} onClose={() => setPaletteOpen(false)} />}
         {cheatOpen && <Shortcuts bindings={s.shortcuts} onClose={() => setCheatOpen(false)} />}
+
+        <CaptureDropOverlay
+          active={fileDrop.dragging}
+          title="Drop to open this capture"
+          hint="Replaces current traffic · .germi, .har, or .saz"
+        />
       </div>
 
       <ToastHost toasts={s.toasts} onDismiss={s.dismissToast} />

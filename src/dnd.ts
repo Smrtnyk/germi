@@ -2,6 +2,28 @@ export const FLOW_DRAG_MIME = "application/x-germi-flows";
 export const RULE_DRAG_MIME = "application/x-germi-rule";
 export const COLOR_DRAG_MIME = "application/x-germi-color";
 
+/** Capture formats we accept as a drag-dropped file (issue #100), matching the
+ *  native picker's filter — HAR, Fiddler SAZ, and our own `.germi` session. */
+const CAPTURE_EXTS = ["germi", "har", "saz"] as const;
+export type CaptureExt = (typeof CAPTURE_EXTS)[number];
+
+/** A drag carrying OS files (vs. an in-app flow / rule / color drag). The
+ *  browser exposes `"Files"` in `dataTransfer.types` for filesystem drags; the
+ *  in-app drags carry only their custom MIME (+ `text/plain`), so this cleanly
+ *  separates a capture-file drop from the row/swatch drags on the same window. */
+export function hasFileDrag(types: readonly string[]): boolean {
+  return types.includes("Files");
+}
+
+/** The capture format of a dropped file by its name, or `null` if it isn't one
+ *  we can load. Case-insensitive; the extension is what disambiguates a HAR
+ *  from a `.germi` (both JSON) for the engine. */
+export function captureExtFromName(name: string): CaptureExt | null {
+  const dot = name.lastIndexOf(".");
+  const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
+  return (CAPTURE_EXTS as readonly string[]).includes(ext) ? (ext as CaptureExt) : null;
+}
+
 export function dragFlowIds(
   rowId: string,
   selectedIds: Set<string>,
