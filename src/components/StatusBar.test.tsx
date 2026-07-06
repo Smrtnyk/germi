@@ -12,6 +12,7 @@ const base = {
   viewer: false,
   flowCount: 0,
   activeScenario: null,
+  generalActive: false,
   onOpenPalette: noop,
   onShowShortcuts: noop,
   paletteAccel: "Ctrl+K",
@@ -56,9 +57,22 @@ describe("StatusBar", () => {
     await expect.element(screen.getByText("Prod")).toBeVisible();
   });
 
-  it("falls back to Off when no scenario is active", async () => {
+  it("falls back to Off when no scenario is active and General is off", async () => {
     const screen = await render(<StatusBar {...base} />);
     await expect.element(screen.getByText("Off")).toBeVisible();
+  });
+
+  it("surfaces the General rules layer when it is enabled with no active scenario", async () => {
+    const screen = await render(<StatusBar {...base} generalActive />);
+    await expect.element(screen.getByText("General rules")).toBeVisible();
+    // General on ⇒ the autoresponder is not "Off".
+    expect(screen.container.textContent).not.toContain("Off");
+  });
+
+  it("shows both the active scenario and the General layer when both are live", async () => {
+    const screen = await render(<StatusBar {...base} activeScenario="Prod" generalActive />);
+    await expect.element(screen.getByText("Prod")).toBeVisible();
+    await expect.element(screen.getByText("General rules")).toBeVisible();
   });
 
   it("opens the command palette when the palette key is clicked", async () => {

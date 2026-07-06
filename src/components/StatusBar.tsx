@@ -7,10 +7,34 @@ interface Props {
   viewer: boolean;
   flowCount: number;
   activeScenario: string | null;
+  /** Whether the built-in General rules layer is on (stacks on the active scenario). */
+  generalActive: boolean;
   onOpenPalette: () => void;
   onShowShortcuts: () => void;
   /** Pretty label of the configurable command-palette shortcut, for the tooltip. */
   paletteAccel: string;
+}
+
+/** What the autoresponder is doing: the active scenario, the General layer, both
+ *  (stacked), or Off. General on with no active scenario is NOT "Off" — the
+ *  General rules still apply, so it's surfaced in its place. */
+function AutoresponderStatus({
+  activeScenario,
+  generalActive,
+}: {
+  activeScenario: string | null;
+  generalActive: boolean;
+}) {
+  if (!activeScenario && !generalActive) {
+    return <span className="muted">Off</span>;
+  }
+  return (
+    <>
+      {activeScenario && <strong className="scenario-live">{activeScenario}</strong>}
+      {activeScenario && generalActive && " + "}
+      {generalActive && <strong className="scenario-live">General rules</strong>}
+    </>
+  );
 }
 
 export function StatusBar({
@@ -20,6 +44,7 @@ export function StatusBar({
   viewer,
   flowCount,
   activeScenario,
+  generalActive,
   onOpenPalette,
   onShowShortcuts,
   paletteAccel,
@@ -46,11 +71,7 @@ export function StatusBar({
         <>
           <span>
             Autoresponder:{" "}
-            {activeScenario ? (
-              <strong className="scenario-live">{activeScenario}</strong>
-            ) : (
-              <span className="muted">Off</span>
-            )}
+            <AutoresponderStatus activeScenario={activeScenario} generalActive={generalActive} />
           </span>
           <span className="sep">·</span>
         </>
