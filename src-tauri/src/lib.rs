@@ -107,6 +107,7 @@ pub fn run() {
             commands::create_rule,
             commands::update_rule,
             commands::delete_rule,
+            commands::delete_rules,
             commands::duplicate_rule,
             commands::reorder_rule,
             commands::reset_rule_state,

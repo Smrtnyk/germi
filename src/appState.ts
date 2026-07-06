@@ -867,6 +867,28 @@ function useAutoresponder(
     [refresh, setError],
   );
 
+  const deleteRules = useCallback(
+    (scenarioId: string, ruleIds: string[]) => {
+      if (ruleIds.length === 0) return;
+      // A single id keeps the descriptive "Delete rule "<url>"" label + path.
+      if (ruleIds.length === 1) {
+        deleteRule(scenarioId, ruleIds[0]);
+        return;
+      }
+      const label = `Delete ${plural(ruleIds.length, "rule")}`;
+      setAutoresponder((current) =>
+        ruleIds.reduce((acc, id) => removeRuleSummary(acc, scenarioId, id), current),
+      );
+      // Any detached window on a deleted rule shows "deleted" instead of a zombie.
+      for (const id of ruleIds) emitRulesChanged(currentWindowLabel(), id);
+      void api.deleteRules(scenarioId, ruleIds, { label }).catch((e) => {
+        setError(String(e));
+        void refresh();
+      });
+    },
+    [deleteRule, refresh, setError],
+  );
+
   const duplicateRule = useCallback(
     async (scenarioId: string, ruleId: string): Promise<RuleSummary | null> => {
       try {
@@ -962,6 +984,7 @@ function useAutoresponder(
     loadRule,
     updateRule,
     deleteRule,
+    deleteRules,
     duplicateRule,
     reorderRule,
     mockFlows,

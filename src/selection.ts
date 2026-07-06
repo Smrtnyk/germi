@@ -63,3 +63,51 @@ export function toggleSelection(
   selected.add(id);
   return { selectedIds: selected, selectedId: id, anchor: id };
 }
+
+function singleSelection(id: string): SelectionPatch {
+  return { selectedIds: new Set([id]), selectedId: id, anchor: id };
+}
+
+/** Prune a selection down to the rows still present (given in display order),
+ *  re-homing the active row and the anchor onto a surviving member when they
+ *  were dropped — so "the active id is always a member of the selection" holds,
+ *  and bulk actions / counts never include rows the user can't see (filtered
+ *  out) or that were deleted. Returns null when nothing needed pruning. */
+export function pruneSelection(
+  presentOrder: string[],
+  selectedIds: Set<string>,
+  selectedId: string | null,
+  anchor: string | null,
+): SelectionPatch | null {
+  const kept = presentOrder.filter((id) => selectedIds.has(id));
+  if (kept.length === selectedIds.size) return null;
+  const keptSet = new Set(kept);
+  const fallback = kept.length > 0 ? kept[kept.length - 1] : null;
+  return {
+    selectedIds: keptSet,
+    selectedId: selectedId !== null && keptSet.has(selectedId) ? selectedId : fallback,
+    anchor: anchor !== null && keptSet.has(anchor) ? anchor : fallback,
+  };
+}
+
+/** Resolve a row click into the next selection given its modifier keys: shift
+ *  range-extends from the anchor, ctrl/⌘ toggles the row, and a plain click
+ *  selects just that row. A shift-click whose anchor is gone falls back to a
+ *  fresh single selection (the caller re-anchors). */
+export function clickSelection(
+  order: string[],
+  selectedIds: Set<string>,
+  selectedId: string | null,
+  anchor: string | null,
+  id: string,
+  mods: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean },
+): SelectionPatch {
+  if (mods.shiftKey && anchor) {
+    const range = rangeSelection(order, anchor, id);
+    return range ? { selectedIds: range, selectedId: id, anchor } : singleSelection(id);
+  }
+  if (mods.ctrlKey || mods.metaKey) {
+    return toggleSelection(order, selectedIds, selectedId, id);
+  }
+  return singleSelection(id);
+}

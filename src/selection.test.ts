@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { nextIdAfterDelete, toggleSelection } from "./selection";
+import { clickSelection, nextIdAfterDelete, pruneSelection, toggleSelection } from "./selection";
 
 const order = ["a", "b", "c", "d", "e"];
 
@@ -93,5 +93,89 @@ describe("toggleSelection", () => {
     const input = new Set(["a", "b"]);
     toggleSelection(order, input, "b", "b");
     expect(input).toEqual(new Set(["a", "b"]));
+  });
+});
+
+describe("clickSelection", () => {
+  const plain = { shiftKey: false, ctrlKey: false, metaKey: false };
+
+  it("a plain click selects only that row and re-anchors there", () => {
+    expect(clickSelection(order, new Set(["a", "b"]), "b", "a", "d", plain)).toEqual({
+      selectedIds: new Set(["d"]),
+      selectedId: "d",
+      anchor: "d",
+    });
+  });
+
+  it("ctrl-click toggles the row into the selection", () => {
+    expect(
+      clickSelection(order, new Set(["a"]), "a", "a", "c", { ...plain, ctrlKey: true }),
+    ).toEqual({ selectedIds: new Set(["a", "c"]), selectedId: "c", anchor: "c" });
+  });
+
+  it("meta-click toggles too (macOS ⌘)", () => {
+    expect(
+      clickSelection(order, new Set(["a", "c"]), "c", "c", "c", { ...plain, metaKey: true }),
+    ).toEqual({ selectedIds: new Set(["a"]), selectedId: "a", anchor: "c" });
+  });
+
+  it("shift-click selects the inclusive range from the anchor, keeping the anchor", () => {
+    expect(
+      clickSelection(order, new Set(["b"]), "b", "b", "d", { ...plain, shiftKey: true }),
+    ).toEqual({ selectedIds: new Set(["b", "c", "d"]), selectedId: "d", anchor: "b" });
+  });
+
+  it("shift-click with no anchor falls back to a fresh single selection", () => {
+    expect(clickSelection(order, new Set(), null, null, "c", { ...plain, shiftKey: true })).toEqual(
+      {
+        selectedIds: new Set(["c"]),
+        selectedId: "c",
+        anchor: "c",
+      },
+    );
+  });
+
+  it("shift-click whose anchor was evicted re-anchors on the clicked row", () => {
+    expect(
+      clickSelection(order, new Set(["c"]), "c", "gone", "d", { ...plain, shiftKey: true }),
+    ).toEqual({ selectedIds: new Set(["d"]), selectedId: "d", anchor: "d" });
+  });
+});
+
+describe("pruneSelection", () => {
+  it("returns null when every selected row is still present (no work to do)", () => {
+    expect(pruneSelection(order, new Set(["b", "d"]), "d", "b")).toBeNull();
+  });
+
+  it("drops rows that are no longer shown, in display order", () => {
+    expect(pruneSelection(["a", "c", "e"], new Set(["a", "b", "c"]), "a", "a")).toEqual({
+      selectedIds: new Set(["a", "c"]),
+      selectedId: "a",
+      anchor: "a",
+    });
+  });
+
+  it("re-homes the active row onto the last survivor when it was dropped", () => {
+    expect(pruneSelection(["a", "b"], new Set(["a", "b", "c"]), "c", "c")).toEqual({
+      selectedIds: new Set(["a", "b"]),
+      selectedId: "b",
+      anchor: "b",
+    });
+  });
+
+  it("keeps a surviving active row and anchor untouched while pruning others", () => {
+    expect(pruneSelection(["a", "c", "d"], new Set(["a", "c", "e"]), "c", "a")).toEqual({
+      selectedIds: new Set(["a", "c"]),
+      selectedId: "c",
+      anchor: "a",
+    });
+  });
+
+  it("clears the active row and anchor when nothing survives", () => {
+    expect(pruneSelection(["x", "y"], new Set(["a", "b"]), "a", "b")).toEqual({
+      selectedIds: new Set(),
+      selectedId: null,
+      anchor: null,
+    });
   });
 });

@@ -36,6 +36,7 @@ mod shared;
 mod store;
 mod tester;
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -852,6 +853,34 @@ impl ProxyController {
         }
         self.reconcile_rule_cursors(previous_active.as_deref(), &ar);
         Ok(())
+    }
+
+    /// Delete several rules from a scenario in one shot (multi-select delete).
+    /// Ids that aren't present are skipped rather than aborting the batch — a
+    /// stale selection shouldn't leave the delete half-applied — and the count of
+    /// rules actually removed is returned so the caller can label the undo step.
+    /// Wrapping the whole batch in a single [`with_history`](Self::with_history)
+    /// makes it one undo entry.
+    pub fn delete_rules(&self, scenario_id: &str, rule_ids: &[String]) -> Result<usize> {
+        let mut ar = self
+            .shared
+            .autoresponder
+            .write()
+            .map_err(|_| anyhow!("autoresponder lock poisoned"))?;
+        let previous_active = ar.active_scenario_id.clone();
+        let scenario = ar
+            .scenarios
+            .iter_mut()
+            .find(|scenario| scenario.id == scenario_id)
+            .ok_or_else(|| anyhow!("scenario not found"))?;
+        let doomed: HashSet<&str> = rule_ids.iter().map(String::as_str).collect();
+        let before = scenario.rules.len();
+        scenario.rules.retain(|rule| !doomed.contains(rule.id.as_str()));
+        let removed = before - scenario.rules.len();
+        if removed > 0 {
+            self.reconcile_rule_cursors(previous_active.as_deref(), &ar);
+        }
+        Ok(removed)
     }
 
     pub fn duplicate_rule(&self, scenario_id: &str, rule_id: &str) -> Result<(Rule, RuleSummary)> {
@@ -2246,6 +2275,72 @@ mod tests {
         let mut rule = respond_rule("r1");
         rule.matcher.url = url.to_string();
         rule
+    }
+
+    #[test]
+    fn delete_rules_removes_many_skips_missing_and_undoes_as_one_step() {
+        let c = controller();
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario(
+                "A",
+                vec![respond_rule("r1"), respond_rule("r2"), respond_rule("r3")],
+            )],
+            active_scenario_id: Some("A".to_string()),
+        });
+
+        let removed = c
+            .with_history(HistoryTag::new("Delete 2 rules", None), |ctrl| {
+                // "gone" isn't a rule id — it must be skipped, not abort the batch.
+                ctrl.delete_rules("A", &["r1".to_string(), "gone".to_string(), "r3".to_string()])
+            })
+            .expect("delete_rules");
+        assert_eq!(removed, 2, "only the two present ids are counted as removed");
+
+        let remaining: Vec<String> = c
+            .get_autoresponder()
+            .scenarios
+            .iter()
+            .find(|s| s.id == "A")
+            .expect("scenario A")
+            .rules
+            .iter()
+            .map(|rule| rule.id.clone())
+            .collect();
+        assert_eq!(remaining, vec!["r2".to_string()], "r1 and r3 are gone, r2 stays");
+        assert_eq!(c.history_view().entries.len(), 1, "a batch delete is a single undo entry");
+
+        c.undo().expect("undo");
+        let restored: Vec<String> = c
+            .get_autoresponder()
+            .scenarios
+            .iter()
+            .find(|s| s.id == "A")
+            .expect("scenario A")
+            .rules
+            .iter()
+            .map(|rule| rule.id.clone())
+            .collect();
+        assert_eq!(
+            restored,
+            vec!["r1".to_string(), "r2".to_string(), "r3".to_string()],
+            "one undo restores every deleted rule in order"
+        );
+    }
+
+    #[test]
+    fn delete_rules_all_missing_records_no_history() {
+        let c = controller();
+        seed_one_rule(&c);
+        let removed = c
+            .with_history(HistoryTag::new("Delete rules", None), |ctrl| {
+                ctrl.delete_rules("A", &["nope".to_string()])
+            })
+            .expect("delete_rules");
+        assert_eq!(removed, 0, "nothing present to remove");
+        assert!(
+            c.history_view().entries.is_empty(),
+            "a batch that removes nothing records no undo entry"
+        );
     }
 
     #[test]
