@@ -874,6 +874,7 @@ export function App() {
           viewer={s.viewer}
           flowCount={s.flowStore.orderRef.current.length}
           activeScenario={s.activeScenario}
+          generalActive={s.ar.autoresponder.generalActive}
           paletteAccel={prettyShortcut(s.shortcuts.palette)}
           onOpenPalette={() => setPaletteOpen(true)}
           onShowShortcuts={() => setCheatOpen(true)}
