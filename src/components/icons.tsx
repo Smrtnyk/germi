@@ -24,7 +24,6 @@ import {
   LuCircleCheck,
   LuCircleHelp,
   LuCircleSlash2,
-  LuColumns2,
   LuCopy,
   LuExternalLink,
   LuEye,
@@ -79,7 +78,6 @@ export const IconClose = make(LuX);
 export const IconCopy = make(LuCopy, { size: 14 });
 export const IconMaximize = make(LuMaximize2, { size: 14 });
 export const IconRestore = make(LuMinimize2, { size: 14 });
-export const IconSplit = make(LuColumns2, { size: 15 });
 export const IconPanelCollapse = make(LuPanelRightClose);
 export const IconPanelExpand = make(LuPanelRightOpen);
 export const IconGrip = make(LuGripVertical, { size: 14 });

@@ -3180,19 +3180,6 @@ body.resizing.resizing-v * {
   color: var(--accent);
 }
 
-/* ---- right panel split mode ---- */
-.right-content.split {
-  flex-direction: column;
-}
-.right-content.split > .pane {
-  flex: 1 1 50%;
-  min-height: 0;
-  border-top: 1px solid var(--line);
-}
-.right-content.split > .pane:first-child {
-  border-top: none;
-}
-
 .panel-rail {
   display: flex;
   justify-content: center;
