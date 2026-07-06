@@ -1,7 +1,18 @@
-import type { AutoResponderSummary, RuleSummary } from "./types";
+import { GENERAL_SCENARIO_ID, type AutoResponderSummary, type RuleSummary } from "./types";
 
 export function ruleLabel(url: string): string {
   return url || "*";
+}
+
+/**
+ * Whether the currently-selected autoresponder tab's rules are enabled: the
+ * General layer → its own toggle; a scenario → whether it's the active one;
+ * nothing selected → whether any scenario is active. Drives the Off/On button.
+ */
+export function selectedTabEnabled(viewedId: string | null, ar: AutoResponderSummary): boolean {
+  if (viewedId === GENERAL_SCENARIO_ID) return ar.generalActive;
+  if (viewedId === null) return ar.activeScenarioId !== null;
+  return viewedId === ar.activeScenarioId;
 }
 
 function updateScenarioRules(
