@@ -2658,6 +2658,68 @@ code {
   box-shadow: 0 0 6px var(--accent);
 }
 
+/* The built-in General layer tab: a dashed accent marks it as machine-managed
+   (undeletable), split into a select-to-edit label and an on/off toggle. */
+.stab.general {
+  padding: 0;
+  gap: 0;
+  border-style: dashed;
+  border-color: var(--s3);
+}
+.stab.general.active {
+  border-style: solid;
+  border-color: var(--accent);
+}
+.stab.general.layer-off {
+  opacity: 0.68;
+}
+.stab .stab-label,
+.stab .stab-toggle {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.stab .stab-label {
+  padding: 7px 8px 7px 14px;
+}
+.stab .stab-toggle {
+  padding: 7px 11px 7px 7px;
+  margin-left: 2px;
+  color: var(--muted);
+  border-left: 1px solid var(--line);
+}
+.stab .stab-toggle.on {
+  color: var(--accent);
+}
+.stab .stab-toggle:hover {
+  color: var(--text);
+}
+.scenario-name.general-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 600;
+  color: var(--text);
+}
+.general-badge {
+  font-size: var(--fs-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 7px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.general-badge.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .scenario-body {
   flex: 1;
   min-height: 0;

@@ -307,6 +307,7 @@ mod tests {
         AutoResponder {
             scenarios: Vec::new(),
             active_scenario_id: active.map(str::to_string),
+            general_active: true,
         }
     }
 

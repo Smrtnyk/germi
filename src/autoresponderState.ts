@@ -90,5 +90,5 @@ export function appendBulkRuleSummaries(
           : scenario,
       )
     : [...state.scenarios, { id: scenarioId, name: "My mocks", rules }];
-  return { scenarios, activeScenarioId: scenarioId };
+  return { ...state, scenarios, activeScenarioId: scenarioId };
 }
