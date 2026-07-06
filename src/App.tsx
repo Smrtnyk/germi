@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
-import { useAppState, type RightMode, type RightTab } from "./appState";
+import { useAppState, type RightTab } from "./appState";
 import {
   accelFromEvent,
   prettyShortcut,
@@ -8,8 +8,9 @@ import {
   type Accel,
   type CommandId,
 } from "./shortcuts";
-import { hasFlowDrag } from "./dnd";
+import { paneVisibility } from "./rightPanel";
 import { useCaptureDrop } from "./captureDrop";
+import { WorkbenchTabs } from "./components/WorkbenchTabs";
 import { CaptureDropOverlay } from "./components/CaptureDropOverlay";
 import type { CaInfo, FlowDetail, FlowSummary } from "./types";
 import { Toolbar } from "./components/Toolbar";
@@ -25,7 +26,7 @@ import { SettingsDialog, type SettingsDialogProps } from "./components/SettingsD
 import { StatusBar } from "./components/StatusBar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
-import { IconPanelCollapse, IconPanelExpand, IconSearch, IconSplit } from "./components/icons";
+import { IconPanelCollapse, IconPanelExpand, IconSearch } from "./components/icons";
 import { Shortcuts } from "./components/Shortcuts";
 import { ToastHost, ToastProvider } from "./toast";
 
@@ -52,7 +53,7 @@ function buildActions(s: AppStateValue): PaletteAction[] {
           run: s.proxy.toggleSystemProxy,
         },
       ];
-  // The autoresponder is disabled in viewer mode — drop its view commands too.
+  // The autoresponder is disabled in viewer mode — drop its view command too.
   const autoViewActions: PaletteAction[] = s.viewer
     ? []
     : [
@@ -62,12 +63,6 @@ function buildActions(s: AppStateValue): PaletteAction[] {
           label: "Show Autoresponder",
           shortcut: prettyShortcut(s.shortcuts["show-autoresponder"]),
           run: () => s.setRightTab("autoresponder"),
-        },
-        {
-          id: "split",
-          group: "View",
-          label: s.rightMode === "split" ? "Use single panel" : "Split panels",
-          run: () => s.setRightMode(s.rightMode === "split" ? "single" : "split"),
         },
       ];
   const actions: PaletteAction[] = [
@@ -382,61 +377,9 @@ function ScriptsTab({
   );
 }
 
-/** The Inspector/Autoresponder side of the tab strip: two tabs in single mode,
- *  one combined "Inspector + Autoresponder" tab in split mode. Flow-drags pull
- *  the panel back over from the Filters tab so the mock drop target is visible. */
-function WorkbenchTabs({
-  rightTab,
-  setRightTab,
-  split,
-  activeScenario,
-}: {
-  rightTab: RightTab;
-  setRightTab: (tab: RightTab) => void;
-  split: boolean;
-  activeScenario: string | null;
-}) {
-  if (split) {
-    return (
-      <button
-        className={rightTab !== "filters" ? "tab active" : "tab"}
-        onClick={() => setRightTab("inspector")}
-        onDragEnter={(e) => {
-          if (hasFlowDrag(e.dataTransfer.types)) setRightTab("inspector");
-        }}
-      >
-        Inspector + Autoresponder
-        {activeScenario && <span className="live-dot" />}
-      </button>
-    );
-  }
-  return (
-    <>
-      <button
-        className={rightTab === "inspector" ? "tab active" : "tab"}
-        onClick={() => setRightTab("inspector")}
-      >
-        Inspector
-      </button>
-      <button
-        className={rightTab === "autoresponder" ? "tab active" : "tab"}
-        onClick={() => setRightTab("autoresponder")}
-        onDragEnter={(e) => {
-          if (hasFlowDrag(e.dataTransfer.types)) setRightTab("autoresponder");
-        }}
-      >
-        Autoresponder
-        {activeScenario && <span className="live-dot" />}
-      </button>
-    </>
-  );
-}
-
 function RightPanelHeader({
   rightTab,
   setRightTab,
-  split,
-  setRightMode,
   activeScenario,
   soloActive,
   onCollapse,
@@ -444,35 +387,24 @@ function RightPanelHeader({
 }: {
   rightTab: RightTab;
   setRightTab: (tab: RightTab) => void;
-  split: boolean;
-  setRightMode: (mode: RightMode) => void;
   activeScenario: string | null;
   soloActive: boolean;
   onCollapse: () => void;
   onOpenFind: () => void;
 }) {
-  const inspectorShown = split ? rightTab !== "filters" : rightTab === "inspector";
   return (
     <div className="right-header">
       <div className="tabs">
         <WorkbenchTabs
           rightTab={rightTab}
           setRightTab={setRightTab}
-          split={split}
           activeScenario={activeScenario}
         />
         <FiltersTab rightTab={rightTab} setRightTab={setRightTab} soloActive={soloActive} />
         <ScriptsTab rightTab={rightTab} setRightTab={setRightTab} />
       </div>
       <div className="spacer" />
-      {inspectorShown && <FindInRequestButton onOpenFind={onOpenFind} />}
-      <button
-        className={split ? "btn active small" : "btn ghost small"}
-        title={split ? "Show one panel at a time" : "Show Inspector and Autoresponder together"}
-        onClick={() => setRightMode(split ? "single" : "split")}
-      >
-        <IconSplit /> Split
-      </button>
+      {rightTab === "inspector" && <FindInRequestButton onOpenFind={onOpenFind} />}
       <CollapsePanelButton onCollapse={onCollapse} />
     </div>
   );
@@ -545,27 +477,9 @@ function ViewerPanel({
   );
 }
 
-/** Which panes show for a tab/mode combination: the Filters tab replaces both
- *  workbench panes (even in split), otherwise split shows the pair and single
- *  mode shows the active tab. */
-function paneVisibility(rightTab: RightTab, split: boolean) {
-  const filters = rightTab === "filters";
-  const scripts = rightTab === "scripts";
-  const workbench = !filters && !scripts;
-  return {
-    filters,
-    scripts,
-    inspector: workbench && (split || rightTab === "inspector"),
-    auto: workbench && (split || rightTab === "autoresponder"),
-    splitPair: split && workbench,
-  };
-}
-
 function RightPanel({
   rightTab,
   setRightTab,
-  rightMode,
-  setRightMode,
   activeScenario,
   onCollapse,
   inspector,
@@ -575,8 +489,6 @@ function RightPanel({
 }: {
   rightTab: RightTab;
   setRightTab: (tab: RightTab) => void;
-  rightMode: RightMode;
-  setRightMode: (mode: RightMode) => void;
   activeScenario: string | null;
   onCollapse: () => void;
   inspector: InspectorProps;
@@ -596,23 +508,20 @@ function RightPanel({
     );
   }
 
-  const split = rightMode === "split";
-  const panes = paneVisibility(rightTab, split);
+  const panes = paneVisibility(rightTab);
 
   return (
     <div className="right-panel">
       <RightPanelHeader
         rightTab={rightTab}
         setRightTab={setRightTab}
-        split={split}
-        setRightMode={setRightMode}
         activeScenario={activeScenario}
         soloActive={filters.soloId !== null}
         onCollapse={onCollapse}
         onOpenFind={() => inspector.inspectorFindRef.current?.openFind(undefined, "body")}
       />
 
-      <div className={`right-content ${panes.splitPair ? "split" : ""}`}>
+      <div className="right-content">
         <div className={panes.inspector ? "pane" : "pane hidden"}>
           <FlowInspector {...inspector} viewer={false} />
         </div>
@@ -798,8 +707,6 @@ export function App() {
             <RightPanel
               rightTab={s.rightTab}
               setRightTab={s.setRightTab}
-              rightMode={s.rightMode}
-              setRightMode={s.setRightMode}
               activeScenario={s.activeScenario}
               onCollapse={() => s.setRightCollapsed(true)}
               viewer={s.viewer}

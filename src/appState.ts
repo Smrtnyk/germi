@@ -67,7 +67,6 @@ import type {
 } from "./types";
 
 export type RightTab = "inspector" | "autoresponder" | "filters" | "scripts";
-export type RightMode = "single" | "split";
 /** Where the autoresponder rule detail sits relative to the list (issue #72). */
 export type AutoLayout = "side" | "stacked";
 
@@ -1295,13 +1294,6 @@ function useViewState() {
     setRightTabState(tab);
     persist("germi.rightTab", tab);
   }, []);
-  const [rightMode, setRightModeState] = useState<RightMode>(() =>
-    loadString("germi.rightMode", ["single", "split"] as const, "single"),
-  );
-  const setRightMode = useCallback((mode: RightMode) => {
-    setRightModeState(mode);
-    persist("germi.rightMode", mode);
-  }, []);
   const [autoLayout, setAutoLayoutState] = useState<AutoLayout>(() =>
     loadString("germi.autoLayout", ["side", "stacked"] as const, "side"),
   );
@@ -1332,8 +1324,6 @@ function useViewState() {
   return {
     rightTab,
     setRightTab,
-    rightMode,
-    setRightMode,
     autoLayout,
     setAutoLayout,
     decode,
@@ -1532,8 +1522,6 @@ export function useAppState() {
   const {
     rightTab,
     setRightTab,
-    rightMode,
-    setRightMode,
     autoLayout,
     setAutoLayout,
     decode,
@@ -1628,7 +1616,7 @@ export function useAppState() {
     !viewer,
   );
   useProxyIndicator(proxy.systemProxy);
-  const autoresponderActive = !viewer && (rightTab === "autoresponder" || rightMode === "split");
+  const autoresponderActive = !viewer && rightTab === "autoresponder";
   const ar = useAutoresponder(setError, setRightTab, notify, autoresponderActive);
   const ruleWindows = useRuleWindows(ar.autoresponder, ar.refresh, setError);
   const history = useHistory(ar.refresh, setError);
@@ -1688,15 +1676,13 @@ export function useAppState() {
   function handleRowClick(id: string, e: ReactMouseEvent) {
     setFullBody(false);
     selection.onRowClick(id, e);
-    // In split mode both panes are visible, so don't yank the user out of the
-    // rule they're editing; only force the Inspector tab in single mode.
-    if (rightMode === "single") setRightTab("inspector");
+    setRightTab("inspector");
   }
 
   function handleKeySelect(id: string, extend: boolean) {
     setFullBody(false);
     selection.selectByKeyboard(id, extend);
-    if (rightMode === "single" && !extend) setRightTab("inspector");
+    if (!extend) setRightTab("inspector");
   }
 
   function selectAllVisible() {
@@ -1706,7 +1692,7 @@ export function useAppState() {
       ? visible.filter((f) => matched.has(f.id)).map((f) => f.id)
       : visible.map((f) => f.id);
     selection.selectAll(ids);
-    if (ids.length > 1 && rightMode === "single") setRightTab("inspector");
+    if (ids.length > 1) setRightTab("inspector");
   }
 
   function mockFlow(id: string) {
@@ -1747,11 +1733,11 @@ export function useAppState() {
     notify("success", "URL copied");
   }
 
-  // F2: reveal the Autoresponder (un-collapse / switch to its tab in single
-  // mode), then focus the mock response-body editor if a respond rule is open.
+  // F2: reveal the Autoresponder (un-collapse / switch to its tab), then focus
+  // the mock response-body editor if a respond rule is open.
   function focusMockBody() {
     if (rightCollapsed) setRightCollapsed(false);
-    if (rightMode === "single") setRightTab("autoresponder");
+    setRightTab("autoresponder");
     focusMockResponseBody();
   }
 
@@ -1848,8 +1834,6 @@ export function useAppState() {
     availabilityCheck: availability.availabilityCheck,
     rightTab,
     setRightTab,
-    rightMode,
-    setRightMode,
     autoLayout,
     setAutoLayout,
     openRuleWindows: ruleWindows.openRuleWindows,
