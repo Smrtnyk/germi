@@ -17,6 +17,10 @@ jobs:
   portable-exe:
     runs-on: windows-2025
     timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
 
@@ -57,6 +61,15 @@ jobs:
         run: |
           $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { $env:GITHUB_SHA.Substring(0, 7) }
           Copy-Item target/release/germi.exe "Germi-portable-$version-windows-x64.exe"
+
+      # Provenance: proves this exact exe was built by this workflow at this
+      # commit. Verify with `gh attestation verify <exe> -R Smrtnyk/germi`.
+      # NOTE: needs a public repo (or GitHub Enterprise Cloud) — drop this
+      # step if the repo goes private on a plain github.com plan.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: Germi-portable-*.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
