@@ -1,5 +1,7 @@
 import type { RefObject } from "react";
 
+import { Button } from "./ui/Button";
+import { IconButton } from "./ui/IconButton";
 import { FilterHelp } from "./FilterHelp";
 import {
   IconCert,
@@ -67,23 +69,24 @@ function ProxyControls({
 }: ProxyControlsProps) {
   return (
     <div className="tb-group" role="group" aria-label="Proxy">
-      <button
-        className={running ? "btn danger" : "btn primary"}
+      <Button
+        variant={running ? "default" : "primary"}
+        danger={running}
         onClick={onToggleProxy}
         disabled={busy}
         title={running ? "Stop the proxy" : "Start the proxy"}
       >
         {proxyButtonLabel(running, busy)}
-      </button>
+      </Button>
 
-      <button
-        className={systemProxy ? "btn active" : "btn"}
+      <Button
+        active={systemProxy}
         onClick={onToggleSystemProxy}
         disabled={!running}
         title="Route the OS system proxy through Germi"
       >
         {systemProxy ? "System proxy: ON" : "System proxy: off"}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -127,56 +130,53 @@ export function Toolbar(props: ToolbarProps) {
       <div className="tb-sep" />
 
       <div className="tb-group" role="group" aria-label="Session">
-        <button
-          className="btn ghost"
+        <Button
+          variant="ghost"
           onClick={onOpen}
           title="Open a .germi session, HAR or Fiddler SAZ archive (replaces current traffic)"
         >
           <IconOpen /> Open
-        </button>
-        <button
-          className="btn ghost"
+        </Button>
+        <Button
+          variant="ghost"
           onClick={onSaveSession}
           title="Save current traffic to a .germi session"
         >
           <IconSave /> Save
-        </button>
-        <button className="btn ghost danger" onClick={onClear} title="Clear captured traffic">
+        </Button>
+        <Button variant="ghost" danger onClick={onClear} title="Clear captured traffic">
           <IconClear /> Clear
-        </button>
+        </Button>
       </div>
 
       <div className="tb-sep" />
 
       <div className="tb-group" role="group" aria-label="View">
-        <button
-          className={decode ? "btn active" : "btn ghost"}
+        <Button
+          variant={decode ? "default" : "ghost"}
+          active={decode}
           onClick={onToggleDecode}
           title="Decompress gzip / brotli / deflate response bodies"
         >
           Decode
-        </button>
-        <button
-          className="btn ghost"
-          onClick={onInstallCa}
-          title="Trust the Germi root CA for HTTPS"
-        >
+        </Button>
+        <Button variant="ghost" onClick={onInstallCa} title="Trust the Germi root CA for HTTPS">
           <IconCert /> CA cert
-        </button>
-        <button
-          className="btn ghost"
+        </Button>
+        <Button
+          variant="ghost"
           onClick={onLaunchViewer}
           title="Open a second, proxy-less Germi window for inspecting saved captures"
         >
           <IconViewer /> New viewer
-        </button>
-        <button
-          className="btn ghost"
+        </Button>
+        <Button
+          variant="ghost"
           onClick={onOpenSettings}
           title="Settings — connections, certificates, interception, capture"
         >
           <IconSettings /> Settings
-        </button>
+        </Button>
       </div>
 
       <div className="spacer" />
@@ -197,14 +197,13 @@ export function Toolbar(props: ToolbarProps) {
           title="Tokens: host: path: method: scheme: status: (4xx, >=400) mime: kind: ext: is:imported is:captured rule: larger-than: slower-than: body: req-body: resp-body: header: req-header: resp-header: — bare words match the URL, /regex/ for regex, leading - negates. Ctrl/⌘ Enter saves the filter."
         />
         {filter && (
-          <button
+          <IconButton
             className="filter-clear"
+            label="Clear filter"
             onClick={() => onFilterChange("")}
-            title="Clear filter"
-            aria-label="Clear filter"
           >
             <IconClose />
-          </button>
+          </IconButton>
         )}
       </div>
       <FilterHelp filter={filter} onPick={onFilterChange} inputRef={filterInputRef} />

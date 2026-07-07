@@ -129,8 +129,40 @@ pnpm test -t "treats an Escape"             # by test name
 ```
 
 First time / CI: `pnpm exec playwright install chromium` (browsers aren't
-bundled; CI does this before `pnpm test`). After a failing run vitest may leave
-`.vitest-attachments/` and `**/__screenshots__/` — both are git-ignored.
+bundled; CI does this before `pnpm test`). After a *failing* screenshot run
+vitest leaves actual/diff images under `.vitest/` and `.vitest-attachments/` —
+both git-ignored. Committed **reference** screenshots (under
+`src/components/ui/**/__screenshots__/`) are NOT ignored — they are the
+visual-regression baselines.
+
+## Screenshot tests (generic `ui/` primitives ONLY)
+
+The reusable primitives in `src/components/ui/` (`Button`, `SegmentedControl`,
+`Chip`) are pixel-locked with `toMatchScreenshot` so their look can't regress
+(issue #64). **Only these generic components get screenshot tests** — never a
+feature component. The idiom:
+
+```tsx
+import "../../styles.css";                 // screenshots need the real CSS
+// render a compact gallery of every variant into a fixed-size element…
+await expect.element(screen.getByTestId("gallery")).toMatchScreenshot("button-gallery");
+```
+
+- Each `ui/<Name>.test.tsx` mixes a few DOM/behavior `it`s (roles, `.on`/variant
+  classes, `onClick`) with **one** `toMatchScreenshot` gallery `it`.
+- **Reference images are generated on the CI image**, not your machine — glyph
+  anti-aliasing differs across OS/FreeType versions. Regenerate them in the
+  pinned Playwright container so CI sees ~0 diff:
+  ```sh
+  podman run --rm --ipc=host --cap-add=SYS_ADMIN -v "$PWD":/work:Z -w /work \
+    mcr.microsoft.com/playwright:v1.61.1-noble \
+    bash -lc './node_modules/.bin/vitest run src/components/ui/'
+  ```
+  Run it **twice** (first run creates the reference and "fails"; second passes),
+  then commit the PNGs under `__screenshots__/`. `vitest.config.ts` sets a
+  `pixelmatch` tolerance (`threshold: 0.2`, `allowedMismatchedPixelRatio: 0.08`)
+  that absorbs a local machine's rendering while still catching real
+  color/shape regressions.
 
 ## Gotchas seen in this repo
 

@@ -7,6 +7,7 @@ import { flowUrl } from "../flowUrl";
 import { statusCls } from "../filter";
 import { isTypingTarget } from "../hotkey";
 import { BodyDiffSection, DiffBlock, type DiffMode } from "./DiffView";
+import { SegmentedControl } from "./ui/SegmentedControl";
 import type { BodyComparison, FlowDetail, FlowSummary, MessageDetail } from "../types";
 
 const MODE_KEY = "germi.compareDiffMode";
@@ -40,14 +41,15 @@ function DiffModeSwitch({
   onSwitch: (mode: DiffMode) => void;
 }) {
   return (
-    <div className="seg diff-mode">
-      <button className={mode === "split" ? "on" : ""} onClick={() => onSwitch("split")}>
-        Side by side
-      </button>
-      <button className={mode === "unified" ? "on" : ""} onClick={() => onSwitch("unified")}>
-        Unified
-      </button>
-    </div>
+    <SegmentedControl
+      className="diff-mode"
+      options={[
+        { value: "split", label: "Side by side" },
+        { value: "unified", label: "Unified" },
+      ]}
+      value={mode}
+      onChange={(v) => onSwitch(v as DiffMode)}
+    />
   );
 }
 

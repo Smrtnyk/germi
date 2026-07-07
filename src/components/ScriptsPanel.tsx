@@ -3,6 +3,7 @@ import { lazy, Suspense, useState } from "react";
 import { SCRIPT_EXAMPLES, type ScriptExample } from "../scriptsState";
 import type { Script } from "../types";
 import { IconClose, IconScript, IconWarn } from "./icons";
+import { Button } from "./ui/Button";
 
 // Keep CodeMirror out of the startup bundle (same boundary as the mock editor).
 const BodyEditor = lazy(() => import("./BodyEditor").then((m) => ({ default: m.BodyEditor })));
@@ -114,21 +115,23 @@ function ScriptsToolbar({
         <IconScript /> Scripts
       </span>
       <div className="spacer" />
-      <button
-        className={showGuide ? "btn small active" : "btn ghost small"}
+      <Button
+        variant={showGuide ? "default" : "ghost"}
+        size="small"
+        active={showGuide}
         title="How scripts work, the API, and examples"
         onClick={onToggleGuide}
       >
         Guide
-      </button>
+      </Button>
       {onPopOut && (
-        <button className="btn ghost small" title="Edit in a separate window" onClick={onPopOut}>
+        <Button variant="ghost" size="small" title="Edit in a separate window" onClick={onPopOut}>
           Open window
-        </button>
+        </Button>
       )}
-      <button className="btn small" onClick={onNew}>
+      <Button size="small" onClick={onNew}>
         New
-      </button>
+      </Button>
     </div>
   );
 }
@@ -164,8 +167,9 @@ function ScriptRow({
           <IconWarn />
         </span>
       )}
-      <button
-        className="btn ghost small"
+      <Button
+        variant="ghost"
+        size="small"
         title={`Delete ${script.name}`}
         aria-label={`Delete ${script.name}`}
         onClick={(e) => {
@@ -174,7 +178,7 @@ function ScriptRow({
         }}
       >
         <IconClose />
-      </button>
+      </Button>
     </div>
   );
 }
@@ -262,13 +266,13 @@ function ScriptsGuide({ onInsert }: { onInsert: (example: ScriptExample) => void
               <span className="script-example-name">{example.name}</span>
               <span className="script-example-desc muted small">{example.description}</span>
             </div>
-            <button
-              className="btn small"
+            <Button
+              size="small"
               aria-label={`Insert ${example.name}`}
               onClick={() => onInsert(example)}
             >
               Insert
-            </button>
+            </Button>
           </div>
         ))}
       </div>

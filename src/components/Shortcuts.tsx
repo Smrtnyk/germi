@@ -1,6 +1,7 @@
 import { prettyShortcut, type Bindings } from "../shortcuts";
 import { IconClose } from "./icons";
-import { useModalDialog } from "./useModalDialog";
+import { Button } from "./ui/Button";
+import { Modal } from "./ui/Modal";
 
 /** The configurable rows pull their keys from `bindings`; the rest (list
  *  navigation, undo/redo, the `/` and `?` aliases) are fixed and stay literal. */
@@ -53,33 +54,36 @@ function buildGroups(b: Bindings): { title: string; rows: { keys: string; desc: 
 }
 
 export function Shortcuts({ bindings, onClose }: { bindings: Bindings; onClose: () => void }) {
-  const ref = useModalDialog(onClose);
   const groups = buildGroups(bindings);
   return (
-    <dialog ref={ref} className="modal shortcuts-modal" aria-labelledby="shortcuts-title">
-      <div className="modal-head">
-        <h3 id="shortcuts-title">Keyboard shortcuts</h3>
-        <button className="btn ghost" onClick={() => ref.current?.close()} aria-label="Close">
-          <IconClose />
-        </button>
-      </div>
-      <div className="shortcuts-grid">
-        {groups.map((g) => (
-          <div className="shortcuts-group" key={g.title}>
-            <h4>{g.title}</h4>
-            {g.rows.map((r) => (
-              <div className="shortcuts-row" key={r.desc}>
-                <kbd>{r.keys}</kbd>
-                <span>{r.desc}</span>
+    <Modal className="shortcuts-modal" ariaLabelledby="shortcuts-title" onClose={onClose}>
+      {(close) => (
+        <>
+          <div className="modal-head">
+            <h3 id="shortcuts-title">Keyboard shortcuts</h3>
+            <Button variant="ghost" onClick={close} aria-label="Close">
+              <IconClose />
+            </Button>
+          </div>
+          <div className="shortcuts-grid">
+            {groups.map((g) => (
+              <div className="shortcuts-group" key={g.title}>
+                <h4>{g.title}</h4>
+                {g.rows.map((r) => (
+                  <div className="shortcuts-row" key={r.desc}>
+                    <kbd>{r.keys}</kbd>
+                    <span>{r.desc}</span>
+                  </div>
+                ))}
               </div>
             ))}
           </div>
-        ))}
-      </div>
-      <p className="muted small">
-        Tip: <kbd>{prettyShortcut(bindings.palette)}</kbd> opens the command palette for every
-        action. Rebind these under Settings → Shortcuts.
-      </p>
-    </dialog>
+          <p className="muted small">
+            Tip: <kbd>{prettyShortcut(bindings.palette)}</kbd> opens the command palette for every
+            action. Rebind these under Settings → Shortcuts.
+          </p>
+        </>
+      )}
+    </Modal>
   );
 }

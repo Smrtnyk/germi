@@ -55,6 +55,8 @@ import {
 import { MaximizedOverlay } from "./MaximizedOverlay";
 import { RuleTester } from "./RuleTester";
 import { Tooltip } from "./Tooltip";
+import { Button } from "./ui/Button";
+import { Chip } from "./ui/Chip";
 
 // Lazy-loaded so CodeMirror (and its language packs) is a separate chunk fetched
 // only when a mock body is actually edited — keeps app startup light.
@@ -851,9 +853,9 @@ function RuleListToolbar({
 }) {
   return (
     <>
-      <button className="btn primary block" onClick={onAdd}>
+      <Button variant="primary" block onClick={onAdd}>
         + Add rule
-      </button>
+      </Button>
       <div className="rule-search-row">
         <input
           className="rule-search"
@@ -1101,17 +1103,18 @@ function RuleDetailHead({
       <span className="rule-detail-title">{title}</span>
       <div className="spacer" />
       {selectedRule && selectedCount <= 1 && (
-        <button
-          className="btn ghost small"
+        <Button
+          variant="ghost"
+          size="small"
           title="Open this rule in a separate window"
           onClick={() => onOpen(selectedRule.id)}
         >
           <IconExternal />
-        </button>
+        </Button>
       )}
-      <button className="btn ghost small" title={collapseTitle} onClick={onCollapse}>
+      <Button variant="ghost" size="small" title={collapseTitle} onClick={onCollapse}>
         <IconPanelCollapse />
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1121,9 +1124,9 @@ function RuleLockedNotice({ ruleId, onOpen }: { ruleId: string; onOpen: (id: str
     <div className="rule-locked muted pad">
       <IconExternal />
       <p>This rule is open in a separate window. Close that window to edit it here.</p>
-      <button className="btn small" onClick={() => onOpen(ruleId)}>
+      <Button size="small" onClick={() => onOpen(ruleId)}>
         Focus window
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1148,12 +1151,10 @@ export function RuleBulkSelection({
           adjust the selection, Del to delete, or Esc to clear.
         </p>
         <div className="row">
-          <button className="btn danger" onClick={onDelete}>
+          <Button danger onClick={onDelete}>
             Delete {count} rules
-          </button>
-          <button className="btn" onClick={onClear}>
-            Clear selection
-          </button>
+          </Button>
+          <Button onClick={onClear}>Clear selection</Button>
         </div>
       </div>
     </div>
@@ -1475,16 +1476,15 @@ function GeneralScenarioHeader({
       </span>
       <ScenarioSaveStatus active={active} nameSaveState="idle" ruleSaveState={ruleSaveState} />
       <div className="scenario-actions">
-        <button className="btn" title="Clear per-rule hit counters." onClick={onReset}>
+        <Button title="Clear per-rule hit counters." onClick={onReset}>
           Reset state
-        </button>
-        <button
-          className="btn"
+        </Button>
+        <Button
           title="Export the General rules to a shareable .germi-rules file"
           onClick={onExport}
         >
           Export rules
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -1554,23 +1554,21 @@ function ScenarioHeader({
         ruleSaveState={ruleSaveState}
       />
       <div className="scenario-actions">
-        <button
-          className="btn"
+        <Button
           title="Clear per-rule hit counters so match-once / sequenced rules fire from the start again."
           onClick={actions.reset}
         >
           Reset state
-        </button>
-        <button
-          className="btn"
+        </Button>
+        <Button
           title="Export this scenario to a shareable .germi-rules file"
           onClick={actions.export}
         >
           Export scenario
-        </button>
-        <button className="btn danger" onClick={actions.requestDelete}>
+        </Button>
+        <Button danger onClick={actions.requestDelete}>
           Delete scenario
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -1890,28 +1888,28 @@ function ScenarioTabs({
       >
         <IconPower /> {enabled ? "Off" : "On"}
       </button>
-      <button
-        className="btn small"
+      <Button
+        size="small"
         title="Import scenarios from a .germi-rules file (added to your existing scenarios)"
         onClick={onImport}
       >
         Import
-      </button>
-      <button
-        className="btn small"
+      </Button>
+      <Button
+        size="small"
         title="Replace all scenarios with the contents of a .germi-rules file"
         onClick={onReplace}
       >
         Replace…
-      </button>
-      <button
-        className="btn small"
+      </Button>
+      <Button
+        size="small"
         title="Export all scenarios to a shareable .germi-rules file"
         disabled={ar.scenarios.length === 0}
         onClick={onExportAll}
       >
         Export all
-      </button>
+      </Button>
     </div>
   );
 }
@@ -2079,9 +2077,9 @@ function AutoresponderOffState({
         live, create a new one, or drag requests here to mock them.
       </p>
       {empty && (
-        <button className="btn primary" onClick={onCreate}>
+        <Button variant="primary" onClick={onCreate}>
           + Create a scenario
-        </button>
+        </Button>
       )}
     </div>
   );
@@ -2244,9 +2242,9 @@ export function RuleEditor({
   return (
     <div className="editor-form">
       <div className="row end">
-        <button className="btn danger" onClick={onDelete}>
+        <Button danger onClick={onDelete}>
           Delete
-        </button>
+        </Button>
       </div>
 
       {warnings.length > 0 && (
@@ -2389,14 +2387,14 @@ function StatusField({ status, onChange }: { status: number; onChange: (s: numbe
       </div>
       <div className="status-presets">
         {STATUS_PRESETS.map((s) => (
-          <button
+          <Chip
             key={s}
-            className={`chip ${s === status ? "on" : ""}`}
+            on={s === status}
             onClick={() => onChange(s)}
             title={`${s} ${STATUS_REASON[s] ?? ""}`}
           >
             {s}
-          </button>
+          </Chip>
         ))}
       </div>
     </div>
@@ -2480,12 +2478,12 @@ function HeadersTable({
     <div className="headers-table">
       <div className="row">
         <label>Headers</label>
-        <button
-          className="btn small"
+        <Button
+          size="small"
           onClick={() => emit([...rows, { id: nextId.current++, name: "", value: "" }])}
         >
           + Add header
-        </button>
+        </Button>
       </div>
       {rows.map((row) => (
         <div className="header-row" key={row.id}>
@@ -2503,13 +2501,13 @@ function HeadersTable({
               emit(rows.map((r) => (r.id === row.id ? { ...r, value: e.target.value } : r)))
             }
           />
-          <button
-            className="btn ghost"
+          <Button
+            variant="ghost"
             title="Remove header"
             onClick={() => emit(rows.filter((r) => r.id !== row.id))}
           >
             <IconClose />
-          </button>
+          </Button>
         </div>
       ))}
     </div>
@@ -2559,9 +2557,7 @@ function MapLocalFields({
           value={path}
           onChange={(e) => setAction({ path: e.target.value })}
         />
-        <button className="btn" onClick={browse}>
-          Browse…
-        </button>
+        <Button onClick={browse}>Browse…</Button>
       </div>
       {path && exists === false && (
         <div className="warn-text small">
@@ -2617,8 +2613,8 @@ function RespondFields({
         <>
           <div className="row body-head">
             <label>Body</label>
-            <button
-              className="btn small"
+            <Button
+              size="small"
               title="Pretty-print JSON"
               onClick={() => {
                 const f = formatJson(action.body);
@@ -2626,21 +2622,22 @@ function RespondFields({
               }}
             >
               Format
-            </button>
-            <button
-              className={wrap ? "btn small active" : "btn small"}
+            </Button>
+            <Button
+              size="small"
+              active={wrap}
               title="Toggle word wrap"
               onClick={() => setWrap((w) => !w)}
             >
               Wrap
-            </button>
-            <button
-              className="btn small"
+            </Button>
+            <Button
+              size="small"
               title="Maximize editor (full view)"
               onClick={() => setMaximized(true)}
             >
               <IconMaximize /> Maximize
-            </button>
+            </Button>
           </div>
           {maximized ? (
             <MaximizedOverlay title="Response body" onClose={() => setMaximized(false)}>

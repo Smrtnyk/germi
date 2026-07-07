@@ -4,6 +4,8 @@ import { compact } from "es-toolkit";
 import type { ProxySettings } from "../types";
 import { allColumns, PRESETS } from "../columns";
 import { IconArrowDown, IconArrowUp, IconClose } from "./icons";
+import { Button } from "./ui/Button";
+import { IconButton } from "./ui/IconButton";
 
 interface Props {
   order: string[];
@@ -74,9 +76,9 @@ export function ColumnsSettings({ order, onOrderChange, settings, onSettingsChan
       <div className="col-presets">
         <span className="muted small">Presets:</span>
         {PRESETS.map((p) => (
-          <button key={p.name} className="btn small" onClick={() => onOrderChange(p.columns)}>
+          <Button key={p.name} size="small" onClick={() => onOrderChange(p.columns)}>
             {p.name}
-          </button>
+          </Button>
         ))}
       </div>
 
@@ -86,24 +88,22 @@ export function ColumnsSettings({ order, onOrderChange, settings, onSettingsChan
           <li key={c.id}>
             <span className="col-name">{c.label}</span>
             <span className="col-actions">
-              <button className="x" title="Move up" disabled={i === 0} onClick={() => move(i, -1)}>
+              <IconButton label="Move up" disabled={i === 0} onClick={() => move(i, -1)}>
                 <IconArrowUp />
-              </button>
-              <button
-                className="x"
-                title="Move down"
+              </IconButton>
+              <IconButton
+                label="Move down"
                 disabled={i === visible.length - 1}
                 onClick={() => move(i, 1)}
               >
                 <IconArrowDown />
-              </button>
-              <button
-                className="x"
-                title="Hide"
+              </IconButton>
+              <IconButton
+                label="Hide"
                 onClick={() => onOrderChange(order.filter((x) => x !== c.id))}
               >
                 <IconClose />
-              </button>
+              </IconButton>
             </span>
           </li>
         ))}
@@ -114,13 +114,13 @@ export function ColumnsSettings({ order, onOrderChange, settings, onSettingsChan
           <div className="col-section-label">Add</div>
           <div className="col-add-list">
             {hidden.map((c) => (
-              <button
+              <Button
                 key={c.id}
-                className="btn small"
+                size="small"
                 onClick={() => !order.includes(c.id) && onOrderChange([...order, c.id])}
               >
                 + {c.label}
-              </button>
+              </Button>
             ))}
           </div>
         </>
@@ -146,22 +146,18 @@ export function ColumnsSettings({ order, onOrderChange, settings, onSettingsChan
           <option value="resp">Response</option>
           <option value="req">Request</option>
         </select>
-        <button className="btn" onClick={addHeaderColumn} disabled={!hdr.trim()}>
+        <Button onClick={addHeaderColumn} disabled={!hdr.trim()}>
           Add
-        </button>
+        </Button>
       </div>
       {settings.headerColumns.length > 0 && (
         <ul className="excluded-list">
           {settings.headerColumns.map((spec) => (
             <li key={spec}>
               <span className="ehost">{spec}</span>
-              <button
-                className="x"
-                title={`Remove ${spec}`}
-                onClick={() => removeHeaderColumn(spec)}
-              >
+              <IconButton danger label={`Remove ${spec}`} onClick={() => removeHeaderColumn(spec)}>
                 <IconClose />
-              </button>
+              </IconButton>
             </li>
           ))}
         </ul>

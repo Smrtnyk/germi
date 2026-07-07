@@ -1,6 +1,7 @@
 import { useRef } from "react";
 
-import { useModalDialog } from "./useModalDialog";
+import { Button } from "./ui/Button";
+import { Modal } from "./ui/Modal";
 
 interface Props {
   title: string;
@@ -20,28 +21,34 @@ export function ConfirmDialog({
   onCancel,
 }: Props) {
   const confirmed = useRef(false);
-  const ref = useModalDialog(() => {
-    if (!confirmed.current) onCancel();
-  });
 
   return (
-    <dialog ref={ref} className="modal confirm-modal" aria-labelledby="confirm-title">
-      <h3 id="confirm-title">{title}</h3>
-      <p className="muted">{message}</p>
-      <div className="modal-foot">
-        <button className="btn" onClick={() => ref.current?.close()}>
-          Cancel
-        </button>
-        <button
-          className={danger ? "btn danger" : "btn primary"}
-          onClick={() => {
-            confirmed.current = true;
-            onConfirm();
-          }}
-        >
-          {confirmLabel}
-        </button>
-      </div>
-    </dialog>
+    <Modal
+      className="confirm-modal"
+      ariaLabelledby="confirm-title"
+      onClose={() => {
+        if (!confirmed.current) onCancel();
+      }}
+    >
+      {(close) => (
+        <>
+          <h3 id="confirm-title">{title}</h3>
+          <p className="muted">{message}</p>
+          <div className="modal-foot">
+            <Button onClick={close}>Cancel</Button>
+            <Button
+              variant={danger ? "default" : "primary"}
+              danger={danger}
+              onClick={() => {
+                confirmed.current = true;
+                onConfirm();
+              }}
+            >
+              {confirmLabel}
+            </Button>
+          </div>
+        </>
+      )}
+    </Modal>
   );
 }

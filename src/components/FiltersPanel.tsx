@@ -5,6 +5,8 @@ import { xor } from "es-toolkit";
 import { KIND_CHIPS, STATUS_CHIPS } from "../filter";
 import { hasContentTerms, savedFilterLabel, type SavedFilter } from "../savedFilters";
 import { IconChevronDown, IconChevronRight, IconClose } from "./icons";
+import { Button } from "./ui/Button";
+import { FilterChip } from "./ui/FilterChip";
 
 export interface FiltersPanelProps {
   filters: SavedFilter[];
@@ -52,24 +54,25 @@ function SavedFilterEditor({
       />
       <div className="sf-chips">
         {KIND_CHIPS.map(({ kind, label }) => (
-          <button
+          <FilterChip
             key={kind}
-            className={`fchip ${f.kinds.includes(kind) ? "on" : ""}`}
+            on={f.kinds.includes(kind)}
             onClick={() => onUpdate(f.id, { kinds: xor(f.kinds, [kind]) })}
           >
             {label}
-          </button>
+          </FilterChip>
         ))}
       </div>
       <div className="sf-chips">
         {STATUS_CHIPS.map((c) => (
-          <button
+          <FilterChip
             key={c}
-            className={`fchip s-${c} ${f.statuses.includes(c) ? "on" : ""}`}
+            status={c}
+            on={f.statuses.includes(c)}
             onClick={() => onUpdate(f.id, { statuses: xor(f.statuses, [c]) })}
           >
             {c}
-          </button>
+          </FilterChip>
         ))}
       </div>
       {hasContentTerms(f.query) && (
@@ -187,8 +190,9 @@ export function FiltersPanel({
       <div className="filters-head">
         <span className="filters-title">Saved filters</span>
         <div className="spacer" />
-        <button
-          className="btn primary small"
+        <Button
+          variant="primary"
+          size="small"
           disabled={!canSaveCurrent}
           onClick={onSaveCurrent}
           title={
@@ -198,7 +202,7 @@ export function FiltersPanel({
           }
         >
           + Save current filter
-        </button>
+        </Button>
       </div>
       {filters.length === 0 ? (
         <div className="filters-empty">

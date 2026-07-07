@@ -31,6 +31,8 @@ import {
   IconMaximize,
   IconMock,
 } from "./icons";
+import { Button } from "./ui/Button";
+import { SegmentedControl } from "./ui/SegmentedControl";
 import {
   bodyOccurrences,
   combineMatches,
@@ -222,13 +224,12 @@ const SCOPES: { id: FindScope; label: string }[] = [
 
 function ScopeChips({ scope, setScope }: { scope: FindScope; setScope: (s: FindScope) => void }) {
   return (
-    <div className="seg find-scope">
-      {SCOPES.map((sc) => (
-        <button key={sc.id} className={scope === sc.id ? "on" : ""} onClick={() => setScope(sc.id)}>
-          {sc.label}
-        </button>
-      ))}
-    </div>
+    <SegmentedControl
+      className="find-scope"
+      options={SCOPES.map((sc) => ({ value: sc.id, label: sc.label }))}
+      value={scope}
+      onChange={setScope}
+    />
   );
 }
 
@@ -247,36 +248,32 @@ function FindBar({ find, rawMode }: { find: InspectorFind; rawMode: boolean }) {
         }}
       />
       {!rawMode && <ScopeChips scope={find.scope} setScope={find.setScope} />}
-      <button
-        className={find.caseSensitive ? "btn find-case on" : "btn ghost find-case"}
+      <Button
+        variant={find.caseSensitive ? "default" : "ghost"}
+        className={find.caseSensitive ? "find-case on" : "find-case"}
         title="Match case"
         aria-pressed={find.caseSensitive}
         onClick={find.toggleCase}
       >
         Aa
-      </button>
+      </Button>
       <span className="vfind-count">
         {query ? (total ? `${Math.min(activeIndex + 1, total)}/${total}` : "0/0") : ""}
       </span>
-      <button
-        className="btn ghost"
+      <Button
+        variant="ghost"
         title="Previous (Shift+Enter)"
         onClick={() => find.step(-1)}
         disabled={!total}
       >
         <IconArrowUp />
-      </button>
-      <button
-        className="btn ghost"
-        title="Next (Enter)"
-        onClick={() => find.step(1)}
-        disabled={!total}
-      >
+      </Button>
+      <Button variant="ghost" title="Next (Enter)" onClick={() => find.step(1)} disabled={!total}>
         <IconArrowDown />
-      </button>
-      <button className="btn ghost" title="Close (Esc)" onClick={find.close}>
+      </Button>
+      <Button variant="ghost" title="Close (Esc)" onClick={find.close}>
         <IconClose />
-      </button>
+      </Button>
     </div>
   );
 }
@@ -663,13 +660,15 @@ function MetaPanel({
       <div className="kv-block">
         <div className="kv-label">
           Headers <span className="muted">· {msg.headers.length}</span>
-          <button
-            className="btn ghost small kv-copy"
+          <Button
+            variant="ghost"
+            size="small"
+            className="kv-copy"
             title="Copy headers"
             onClick={() => copy("Headers", headersToText(msg.headers))}
           >
             <IconCopy />
-          </button>
+          </Button>
         </div>
         <MessageHeaders headers={msg.headers} find={find} />
       </div>
@@ -679,14 +678,14 @@ function MetaPanel({
 
 function PrettyRawToggle({ view, setView }: { view: BodyView; setView: (v: BodyView) => void }) {
   return (
-    <div className="seg">
-      <button className={view === "pretty" ? "on" : ""} onClick={() => setView("pretty")}>
-        Pretty
-      </button>
-      <button className={view === "raw" ? "on" : ""} onClick={() => setView("raw")}>
-        Raw
-      </button>
-    </div>
+    <SegmentedControl
+      options={[
+        { value: "pretty", label: "Pretty" },
+        { value: "raw", label: "Raw" },
+      ]}
+      value={view}
+      onChange={setView}
+    />
   );
 }
 
@@ -714,13 +713,15 @@ function TextActions({
   setWrap: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
   return (
-    <button
-      className={wrap ? "btn active small" : "btn ghost small"}
+    <Button
+      variant={wrap ? "default" : "ghost"}
+      active={wrap}
+      size="small"
       title="Toggle word wrap"
       onClick={() => setWrap((w) => !w)}
     >
       Wrap
-    </button>
+    </Button>
   );
 }
 
@@ -761,17 +762,18 @@ function BodyBar({
         {kind === "text" && canPretty && <PrettyRawToggle view={view} setView={setView} />}
         {kind === "binary" && <HexToggle showHex={showHex} setShowHex={setShowHex} />}
         {kind === "text" && <TextActions wrap={wrap} setWrap={setWrap} />}
-        <button
-          className="btn ghost small"
+        <Button
+          variant="ghost"
+          size="small"
           title="Copy body"
           onClick={() => copy("Body", msg.bodyText)}
         >
           Copy body
-        </button>
+        </Button>
         {onMaximize && (
-          <button className="btn ghost small" title="Maximize (full view)" onClick={onMaximize}>
+          <Button variant="ghost" size="small" title="Maximize (full view)" onClick={onMaximize}>
             <IconMaximize />
-          </button>
+          </Button>
         )}
       </div>
     </div>
@@ -911,21 +913,23 @@ function RawView({
         </span>
         <div className="body-actions">
           <TextActions wrap={wrap} setWrap={setWrap} />
-          <button
-            className="btn ghost small"
+          <Button
+            variant="ghost"
+            size="small"
             title="Copy raw message"
             onClick={() => copy(side === "request" ? "Raw request" : "Raw response", rawText)}
           >
             Copy
-          </button>
+          </Button>
           {!inMaximize && (
-            <button
-              className="btn ghost small"
+            <Button
+              variant="ghost"
+              size="small"
               title="Maximize (full view)"
               onClick={() => setMaximized(true)}
             >
               <IconMaximize />
-            </button>
+            </Button>
           )}
         </div>
       </div>
@@ -1083,13 +1087,14 @@ function RequestHead({
         {ttfb !== null && <span className="muted timing">TTFB {ttfb} ms</span>}
         {detail.durationMs !== null && <span className="muted timing">{detail.durationMs} ms</span>}
         {!viewer && (
-          <button
-            className="btn primary mock-btn"
+          <Button
+            variant="primary"
+            className="mock-btn"
             onClick={() => onMock(detail)}
             title="Create an autoresponder rule seeded from this response"
           >
             <IconMock /> Mock this →
-          </button>
+          </Button>
         )}
       </div>
       <div className="req-url">
@@ -1097,16 +1102,22 @@ function RequestHead({
           {urlQuery ? highlight(url, urlQuery, find.urlActive, caseSensitive) : url}
         </span>
         <div className="url-actions">
-          <button className="btn ghost url-copy" title="Copy URL" onClick={() => copy("URL", url)}>
+          <Button
+            variant="ghost"
+            className="url-copy"
+            title="Copy URL"
+            onClick={() => copy("URL", url)}
+          >
             <IconCopy /> URL
-          </button>
-          <button
-            className="btn ghost url-copy"
+          </Button>
+          <Button
+            variant="ghost"
+            className="url-copy"
             title="Copy as cURL"
             onClick={() => copy("cURL command", toCurl(detail))}
           >
             cURL
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -1129,13 +1140,15 @@ function AvailabilityPanel({ availability, url }: { availability: Availability; 
         <span className="muted">re-check {availability.status}</span>
       )}
       {availability.location && <span className="muted avail-loc">→ {availability.location}</span>}
-      <button
-        className="btn ghost small avail-open"
+      <Button
+        variant="ghost"
+        size="small"
+        className="avail-open"
         title="Open this URL in your default browser (without the captured session's cookies)"
         onClick={() => void openUrl(url)}
       >
         <IconExternal /> Open in browser
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1196,12 +1209,12 @@ function MultiSelectView({
           </span>
           <div className="multi-actions">
             {!viewer && (
-              <button className="btn primary" onClick={() => onMockMany(flows.map((f) => f.id))}>
+              <Button variant="primary" onClick={() => onMockMany(flows.map((f) => f.id))}>
                 <IconMock /> Mock all
-              </button>
+              </Button>
             )}
-            <button
-              className="btn ghost"
+            <Button
+              variant="ghost"
               onClick={onCompare}
               title={
                 flows.length === 2
@@ -1210,13 +1223,13 @@ function MultiSelectView({
               }
             >
               <IconCompare /> Compare
-            </button>
-            <button className="btn ghost" onClick={copyUrls}>
+            </Button>
+            <Button variant="ghost" onClick={copyUrls}>
               Copy URLs
-            </button>
-            <button className="btn ghost" onClick={onClearSelection}>
+            </Button>
+            <Button variant="ghost" onClick={onClearSelection}>
               Clear
-            </button>
+            </Button>
           </div>
         </div>
         <div className="multi-stats">
@@ -1364,18 +1377,18 @@ function SideToggle({
   hasResponse: boolean;
 }) {
   return (
-    <div className="seg">
-      <button className={side === "request" ? "on" : ""} onClick={() => setSide("request")}>
-        Request
-      </button>
-      <button
-        className={side === "response" ? "on" : ""}
-        onClick={() => setSide("response")}
-        disabled={!hasResponse}
-      >
-        Response {hasResponse ? "" : "(pending)"}
-      </button>
-    </div>
+    <SegmentedControl
+      options={[
+        { value: "request", label: "Request" },
+        {
+          value: "response",
+          label: <>Response {hasResponse ? "" : "(pending)"}</>,
+          disabled: !hasResponse,
+        },
+      ]}
+      value={side}
+      onChange={setSide}
+    />
   );
 }
 
@@ -1395,14 +1408,14 @@ function ViewToggle({
   setMsgView: (v: MsgView) => void;
 }) {
   return (
-    <div className="seg">
-      <button className={msgView === "parsed" ? "on" : ""} onClick={() => setMsgView("parsed")}>
-        Parsed
-      </button>
-      <button className={msgView === "raw" ? "on" : ""} onClick={() => setMsgView("raw")}>
-        Raw
-      </button>
-    </div>
+    <SegmentedControl
+      options={[
+        { value: "parsed", label: "Parsed" },
+        { value: "raw", label: "Raw" },
+      ]}
+      value={msgView}
+      onChange={setMsgView}
+    />
   );
 }
 

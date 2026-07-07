@@ -2,6 +2,8 @@ import type { AvailabilityProgress, ResourceKind } from "../types";
 import { KIND_CHIPS, rawSegments, STATUS_CHIPS } from "../filter";
 import type { FilterViewMode } from "../savedFilters";
 import { IconClose } from "./icons";
+import { FilterChip } from "./ui/FilterChip";
+import { SegmentedControl } from "./ui/SegmentedControl";
 
 /** The issue-90 view controls riding the chips row: the hide/dim switch, the
  *  save-filter action, and the solo'd ("only") saved filter, if any. */
@@ -56,13 +58,13 @@ interface CapturedDelete {
 function DeleteCapturedButton({ capturedCount, importedCount, onDelete }: CapturedDelete) {
   if (importedCount === 0 || capturedCount === 0) return null;
   return (
-    <button
-      className="fchip delete-captured"
+    <FilterChip
+      className="delete-captured"
       onClick={onDelete}
       title="Remove every live-captured request, keeping the imported ones (undo with Ctrl/⌘ Z)"
     >
       Delete captured ({capturedCount})
-    </button>
+    </FilterChip>
   );
 }
 
@@ -74,14 +76,14 @@ function AvailabilityCheckButton({
   progress: AvailabilityProgress | null;
 }) {
   return (
-    <button
-      className="fchip availability-check"
+    <FilterChip
+      className="availability-check"
       onClick={onCheck}
       disabled={progress !== null}
       title="Re-issue the selected or filtered requests (or all unchecked doc requests) without your cookies/auth to test whether they are publicly reachable"
     >
       {progress ? `Checking ${progress.completed}/${progress.total}…` : "Check availability"}
-    </button>
+    </FilterChip>
   );
 }
 
@@ -89,22 +91,24 @@ function AvailabilityCheckButton({
  *  entirely (Fiddler-style, the default) or stay visible but dimmed. */
 function ViewModeSwitch({ view }: { view: FilterViewControls }) {
   return (
-    <div className="seg filter-mode" role="group" aria-label="Non-matching requests">
-      <button
-        className={view.mode === "hide" ? "on" : ""}
-        onClick={() => view.onMode("hide")}
-        title={`Remove non-matching requests from the list (${view.accel} toggles)`}
-      >
-        Hide
-      </button>
-      <button
-        className={view.mode === "dim" ? "on" : ""}
-        onClick={() => view.onMode("dim")}
-        title={`Keep non-matching requests visible but dimmed (${view.accel} toggles)`}
-      >
-        Dim
-      </button>
-    </div>
+    <SegmentedControl
+      className="filter-mode"
+      ariaLabel="Non-matching requests"
+      options={[
+        {
+          value: "hide",
+          label: "Hide",
+          title: `Remove non-matching requests from the list (${view.accel} toggles)`,
+        },
+        {
+          value: "dim",
+          label: "Dim",
+          title: `Keep non-matching requests visible but dimmed (${view.accel} toggles)`,
+        },
+      ]}
+      value={view.mode}
+      onChange={view.onMode}
+    />
   );
 }
 
@@ -118,15 +122,16 @@ function SoloChip({
   onClear: () => void;
 }) {
   return (
-    <button
-      className="fchip solo-chip on"
+    <FilterChip
+      className="solo-chip"
+      on
       onClick={onClear}
       title={`Showing only requests matching "${solo.label}" — click to show everything`}
     >
       <span className="solo-dot" style={{ background: solo.color }} />
       only: <span className="solo-label">{solo.label}</span>
       <IconClose />
-    </button>
+    </FilterChip>
   );
 }
 
@@ -163,13 +168,13 @@ function FilterStatus({
       )}
       {view.barActive && <ViewModeSwitch view={view} />}
       {view.barActive && (
-        <button
-          className="fchip save-filter"
+        <FilterChip
+          className="save-filter"
           onClick={view.onSave}
           title="Store this filter + chips in the Filters tab under a color; matching rows get tinted"
         >
           + Save filter
-        </button>
+        </FilterChip>
       )}
       {active && (
         <button className="chips-clear" onClick={onClearAll} title="Clear all filters">
@@ -224,23 +229,15 @@ export function FilterChips({
       )}
       <div className="filter-chips">
         {KIND_CHIPS.map(({ kind, label }) => (
-          <button
-            key={kind}
-            className={`fchip ${typeChips.has(kind) ? "on" : ""}`}
-            onClick={() => onToggleType(kind)}
-          >
+          <FilterChip key={kind} on={typeChips.has(kind)} onClick={() => onToggleType(kind)}>
             {label}
-          </button>
+          </FilterChip>
         ))}
         <span className="fchip-sep" />
         {STATUS_CHIPS.map((c) => (
-          <button
-            key={c}
-            className={`fchip s-${c} ${statusChips.has(c) ? "on" : ""}`}
-            onClick={() => onToggleStatus(c)}
-          >
+          <FilterChip key={c} status={c} on={statusChips.has(c)} onClick={() => onToggleStatus(c)}>
             {c}
-          </button>
+          </FilterChip>
         ))}
         {view.solo && <SoloChip solo={view.solo} onClear={view.onClearSolo} />}
         <AvailabilityCheckButton onCheck={onCheckAvailability} progress={availabilityCheck} />

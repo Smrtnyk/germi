@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { api } from "../ipc";
 import type { SequenceStep, TestInput, TestResult } from "../types";
 import { IconRefresh } from "./icons";
+import { Button } from "./ui/Button";
 
 interface Props {
   /** The backend-owned scenario to simulate as a whole, in order. */
@@ -102,9 +103,9 @@ export function RuleTester({ scenarioId, seedMethod, seedUrl }: Props) {
             if (e.key === "Enter") void run();
           }}
         />
-        <button className="btn primary" onClick={run} title="Run test (Enter)">
+        <Button variant="primary" onClick={run} title="Run test (Enter)">
           Run test
-        </button>
+        </Button>
       </div>
 
       <div className="row col">

@@ -16,6 +16,7 @@ import {
   type PaneSelection,
 } from "../comparePane";
 import { IconSortAsc, IconSortDesc, IconSortNone } from "./icons";
+import { FilterChip } from "./ui/FilterChip";
 import type { SortState } from "../sort";
 import type { FlowSummary, ResourceKind } from "../types";
 
@@ -59,13 +60,9 @@ function PaneTools({
       />
       <div className="compare-chips">
         {KIND_CHIPS.map(({ kind, label }) => (
-          <button
-            key={kind}
-            className={query.kinds.has(kind) ? "fchip on" : "fchip"}
-            onClick={() => onToggleKind(kind)}
-          >
+          <FilterChip key={kind} on={query.kinds.has(kind)} onClick={() => onToggleKind(kind)}>
             {label}
-          </button>
+          </FilterChip>
         ))}
       </div>
     </div>

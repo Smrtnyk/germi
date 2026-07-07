@@ -28,6 +28,7 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
 import { IconPanelCollapse, IconPanelExpand, IconSearch } from "./components/icons";
 import { Shortcuts } from "./components/Shortcuts";
+import { Button } from "./components/ui/Button";
 import { ToastHost, ToastProvider } from "./toast";
 
 type AppStateValue = ReturnType<typeof useAppState>;
@@ -314,25 +315,27 @@ function handleShortcut(
 
 function FindInRequestButton({ onOpenFind }: { onOpenFind: () => void }) {
   return (
-    <button
-      className="btn ghost small"
+    <Button
+      variant="ghost"
+      size="small"
       title="Search the inspected request & response (Ctrl/⌘ F)"
       onClick={onOpenFind}
     >
       <IconSearch /> Search
-    </button>
+    </Button>
   );
 }
 
 function CollapsePanelButton({ onCollapse }: { onCollapse: () => void }) {
   return (
-    <button
-      className="btn ghost small"
+    <Button
+      variant="ghost"
+      size="small"
       title="Hide panel — widen the traffic list"
       onClick={onCollapse}
     >
       <IconPanelCollapse />
-    </button>
+    </Button>
   );
 }
 
