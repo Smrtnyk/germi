@@ -5,6 +5,7 @@ import { render } from "vitest-browser-react";
 import "../../styles.css";
 import { Button } from "./Button";
 import { Modal } from "./Modal";
+import { loadScreenshotFont } from "./screenshotFont";
 
 function Confirm({ onClose }: { onClose: () => void }) {
   return (
@@ -58,6 +59,7 @@ describe("Modal", () => {
   });
 
   it("matches the modal card screenshot", async () => {
+    await loadScreenshotFont();
     const screen = await render(<Confirm onClose={vi.fn()} />);
     await expect.element(screen.getByRole("dialog")).toMatchScreenshot("modal-card");
   });

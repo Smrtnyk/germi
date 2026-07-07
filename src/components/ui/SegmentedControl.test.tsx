@@ -5,6 +5,7 @@ import { render } from "vitest-browser-react";
 
 import "../../styles.css";
 import { SegmentedControl } from "./SegmentedControl";
+import { loadScreenshotFont } from "./screenshotFont";
 
 const gallery: CSSProperties = {
   display: "flex",
@@ -121,6 +122,7 @@ describe("SegmentedControl", () => {
   });
 
   it("matches the gallery screenshot", async () => {
+    await loadScreenshotFont();
     const screen = await render(<Gallery />);
     await expect.element(screen.getByTestId("gallery")).toMatchScreenshot("segmented-gallery");
   });

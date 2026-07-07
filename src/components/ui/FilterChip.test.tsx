@@ -4,6 +4,7 @@ import { render } from "vitest-browser-react";
 
 import "../../styles.css";
 import { FilterChip } from "./FilterChip";
+import { loadScreenshotFont } from "./screenshotFont";
 
 const gallery: CSSProperties = {
   display: "flex",
@@ -69,6 +70,7 @@ describe("FilterChip", () => {
   });
 
   it("matches the gallery screenshot", async () => {
+    await loadScreenshotFont();
     const screen = await render(<Gallery />);
     await expect.element(screen.getByTestId("gallery")).toMatchScreenshot("filterchip-gallery");
   });
