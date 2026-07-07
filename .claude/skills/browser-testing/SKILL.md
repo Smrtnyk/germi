@@ -150,6 +150,14 @@ await expect.element(screen.getByTestId("gallery")).toMatchScreenshot("button-ga
 
 - Each `ui/<Name>.test.tsx` mixes a few DOM/behavior `it`s (roles, `.on`/variant
   classes, `onClick`) with **one** `toMatchScreenshot` gallery `it`.
+- **A text gallery must `await loadScreenshotFont()` before rendering** (see
+  `ui/screenshotFont.ts`). It pins a bundled Open Sans on `<body>` so text
+  metrics — and therefore element **dimensions** — are identical everywhere. CI
+  (ubuntu-noble) substitutes a different `system-ui` than a dev box; without the
+  bundled font the galleries render a few px shorter/taller and
+  `toMatchScreenshot` **hard-fails on mismatched dimensions before the pixel
+  tolerance even applies**. An icon-only gallery (IconButton) has no text, so it
+  skips this.
 - **Reference images are generated on the CI image**, not your machine — glyph
   anti-aliasing differs across OS/FreeType versions. Regenerate them in the
   pinned Playwright container so CI sees ~0 diff:
