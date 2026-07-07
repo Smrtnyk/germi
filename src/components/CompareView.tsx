@@ -34,6 +34,7 @@ import { CompareDiff } from "./CompareDiff";
 import { CompareGutter } from "./CompareGutter";
 import { ComparePane, type ComparePaneProps } from "./ComparePane";
 import { CaptureDropOverlay } from "./CaptureDropOverlay";
+import { Button } from "./ui/Button";
 import { IconArrowLeft, IconChevronRight, IconCompare, IconDiff, IconOpen } from "./icons";
 import { readFileAsBase64, useCaptureDrop } from "../captureDrop";
 import type { CaptureExt } from "../dnd";
@@ -287,9 +288,9 @@ function CompareHead({
       <IconCompare />
       <span className="compare-title">Compare requests</span>
       {diffOpen ? (
-        <button className="btn ghost small" onClick={onBack}>
+        <Button variant="ghost" size="small" onClick={onBack}>
           <IconArrowLeft /> Back to picker (Esc)
-        </button>
+        </Button>
       ) : (
         <span className="muted compare-subtitle">
           pick one request on each side, then diff them
@@ -297,18 +298,18 @@ function CompareHead({
       )}
       <div className="spacer" />
       {!diffOpen && (
-        <button
-          className="btn primary"
+        <Button
+          variant="primary"
           disabled={!canDiff}
           onClick={onDiff}
           title="Diff the focused pair (Enter)"
         >
           <IconDiff /> Diff
-        </button>
+        </Button>
       )}
-      <button className="btn ghost small" onClick={onClose}>
+      <Button variant="ghost" size="small" onClick={onClose}>
         Close (Esc)
-      </button>
+      </Button>
     </div>
   );
 }
@@ -432,13 +433,14 @@ export function CompareView({ initialLeft, initialRight, onClose }: CompareViewP
           <ComparePane
             {...paneProps("right")}
             actions={
-              <button
-                className="btn ghost small"
+              <Button
+                variant="ghost"
+                size="small"
                 disabled={file.loading}
                 onClick={() => void file.loadFile()}
               >
                 <IconOpen /> Load file…
-              </button>
+              </Button>
             }
           />
         </div>

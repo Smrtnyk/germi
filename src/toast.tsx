@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useRef, useState } from "react"
 import type { ReactNode } from "react";
 
 import { IconCheck, IconClose, IconInfo, IconWarn } from "./components/icons";
+import { IconButton } from "./components/ui/IconButton";
 
 export type ToastKind = "success" | "error" | "info";
 
@@ -110,13 +111,9 @@ export function ToastHost({
             {ICON[t.kind]}
           </span>
           <span className="toast-msg">{t.message}</span>
-          <button
-            className="toast-x"
-            aria-label="Dismiss notification"
-            onClick={() => onDismiss(t.id)}
-          >
+          <IconButton label="Dismiss notification" onClick={() => onDismiss(t.id)}>
             <IconClose />
-          </button>
+          </IconButton>
         </div>
       ))}
     </div>

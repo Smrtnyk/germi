@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import { IconRestore } from "./icons";
+import { Button } from "./ui/Button";
 import { useModalDialog } from "./useModalDialog";
 
 /**
@@ -22,9 +23,9 @@ export function MaximizedOverlay({
     <dialog ref={ref} className="maximize-dialog">
       <div className="maximize-head">
         <span className="maximize-title">{title}</span>
-        <button className="btn ghost small" title="Restore (Esc)" onClick={onClose}>
+        <Button variant="ghost" size="small" title="Restore (Esc)" onClick={onClose}>
           <IconRestore /> Restore
-        </button>
+        </Button>
       </div>
       <div className="maximize-content">{children}</div>
     </dialog>

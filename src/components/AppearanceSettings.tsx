@@ -21,6 +21,7 @@ import {
   type HighlightColorSpec,
 } from "../theme";
 import type { ProxySettings } from "../types";
+import { Button } from "./ui/Button";
 
 const GROUPS: { id: HighlightColorSpec["group"]; label: string }[] = [
   { id: "rows", label: "Traffic rows" },
@@ -81,9 +82,9 @@ export function AppearanceSettings({
         </Fragment>
       ))}
       <div className="col-add-list">
-        <button className="btn small" onClick={resetAll} disabled={!anyOverridden}>
+        <Button size="small" onClick={resetAll} disabled={!anyOverridden}>
           Reset all to defaults
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -226,9 +227,9 @@ function ColorRow({
         onChange={(e) => update({ ...draft, alphaPct: Number(e.target.value) })}
       />
       <span className="color-pct">{draft.alphaPct}%</span>
-      <button className="btn small" onClick={() => onCommit(null)} disabled={!overridden}>
+      <Button size="small" onClick={() => onCommit(null)} disabled={!overridden}>
         Reset
-      </button>
+      </Button>
     </li>
   );
 }

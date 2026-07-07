@@ -12,6 +12,7 @@ import {
   type SplitPair,
 } from "../diff";
 import type { MessageDetail } from "../types";
+import { Button } from "./ui/Button";
 
 // Pure renderers for the compare view's diff screen (issue #86). No IPC — the
 // data-fetching container lives in CompareDiff.tsx, so these stay browser-
@@ -311,9 +312,9 @@ export function BodyDiffSection({
         {binary && " · binary"}
       </span>
       {!binary && (
-        <button type="button" className="btn ghost small" onClick={onToggle}>
+        <Button variant="ghost" size="small" onClick={onToggle}>
           {shown ? "Hide body diff" : "Show body diff"}
-        </button>
+        </Button>
       )}
       {shown && !binary && <BodyHunks a={a} b={b} mode={mode} />}
     </div>

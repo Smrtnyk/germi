@@ -222,6 +222,31 @@ body {
   width: 100%;
 }
 
+/* Bare icon-only button (close ×, list remove, clear) — the IconButton primitive. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 3px 5px;
+  border-radius: var(--radius-xs);
+  line-height: 1;
+}
+.icon-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-2);
+}
+.icon-btn.danger:hover:not(:disabled) {
+  color: var(--danger);
+  background: none;
+}
+.icon-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
 input,
 select,
 textarea {
@@ -252,16 +277,6 @@ textarea {
   right: 4px;
   top: 50%;
   transform: translateY(-50%);
-  border: none;
-  background: none;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: var(--fs-xs);
-  line-height: 1;
-  padding: 3px 4px;
-}
-.filter-clear:hover {
-  color: var(--text);
 }
 .count {
   min-width: 42px;
@@ -2191,19 +2206,6 @@ textarea {
 .settings-head h3 {
   margin: 0;
 }
-.settings-close {
-  border: none;
-  background: none;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: var(--fs-lg);
-  padding: 4px 7px;
-  border-radius: var(--radius-sm);
-}
-.settings-close:hover {
-  color: var(--text);
-  background: var(--bg-2);
-}
 .settings-body {
   flex: 1;
   min-height: 0;
@@ -2335,23 +2337,6 @@ textarea {
   display: inline-flex;
   gap: var(--space-1);
 }
-.col-actions .x {
-  border: none;
-  background: none;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: var(--fs-sm);
-  padding: 1px 6px;
-  border-radius: var(--radius-xs);
-}
-.col-actions .x:hover:not(:disabled) {
-  color: var(--text);
-  background: var(--bg-3);
-}
-.col-actions .x:disabled {
-  opacity: 0.3;
-  cursor: default;
-}
 .col-add-list {
   display: flex;
   flex-wrap: wrap;
@@ -2395,17 +2380,6 @@ textarea {
 .excluded-list .ehost {
   font-family: var(--mono);
   font-size: var(--fs-sm);
-}
-.excluded-list .x {
-  border: none;
-  background: none;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: var(--fs-sm);
-  padding: 2px 4px;
-}
-.excluded-list .x:hover {
-  color: #f87171;
 }
 code {
   font-family: var(--mono);
@@ -3034,19 +3008,6 @@ body.resizing.resizing-v * {
   min-width: 0;
   word-break: break-word;
 }
-.toast-x {
-  border: none;
-  background: none;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: var(--fs-xs);
-  padding: 0 2px;
-  line-height: 1.4;
-}
-.toast-x:hover {
-  color: var(--text);
-}
-
 /* ---- inspector: copy actions, timing, query/cookie tables ---- */
 .url-actions {
   display: inline-flex;
@@ -3472,11 +3433,8 @@ kbd {
 .rail-btn,
 .ctx-item,
 .settings-nav-item,
-.settings-close,
-.toast-x,
+.icon-btn,
 .chips-clear,
-.col-actions .x,
-.excluded-list .x,
 .rsection-head,
 .palette-item,
 .filter-pill,
@@ -3488,7 +3446,6 @@ kbd {
     transform var(--dur-fast),
     filter var(--dur-fast);
 }
-.filter-clear,
 .follow-pill,
 .error-bar {
   transition:
@@ -3526,15 +3483,11 @@ kbd {
   filter: brightness(0.92);
 }
 /* Bare icon closers and inline links: a faint darken only — no box, no move. */
-.settings-close:active,
-.toast-x:active,
+.icon-btn:active:not(:disabled),
 .chips-clear:active,
-.col-actions .x:active:not(:disabled),
-.excluded-list .x:active,
 .link:active {
   filter: brightness(0.85);
 }
-.filter-clear:active,
 .follow-pill:active,
 .error-bar:active,
 .flow-canvas .flow-row:active,

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { useModalDialog } from "./useModalDialog";
+import { Modal } from "./ui/Modal";
 
 export interface PaletteAction {
   id: string;
@@ -18,7 +18,6 @@ export function CommandPalette({
   actions: PaletteAction[];
   onClose: () => void;
 }) {
-  const ref = useModalDialog(onClose);
   const [q, setQ] = useState("");
   const [idx, setIdx] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
@@ -44,7 +43,7 @@ export function CommandPalette({
   }
 
   return (
-    <dialog ref={ref} className="modal palette-modal" aria-label="Command palette">
+    <Modal onClose={onClose} className="palette-modal" ariaLabel="Command palette">
       <input
         autoFocus
         className="palette-input"
@@ -85,6 +84,6 @@ export function CommandPalette({
           </button>
         ))}
       </div>
-    </dialog>
+    </Modal>
   );
 }

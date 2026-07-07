@@ -20,7 +20,9 @@ import { AppearanceSettings } from "./AppearanceSettings";
 import { ColumnsSettings } from "./ColumnsSettings";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { IconClose, IconWarn } from "./icons";
-import { useModalDialog } from "./useModalDialog";
+import { Button } from "./ui/Button";
+import { IconButton } from "./ui/IconButton";
+import { Modal } from "./ui/Modal";
 
 interface SectionProps {
   settings: ProxySettings;
@@ -274,9 +276,9 @@ function CaptureSection({ settings, onChange }: SectionProps) {
             }
           }}
         />
-        <button className="btn" onClick={addFilter} disabled={!draft.trim()}>
+        <Button onClick={addFilter} disabled={!draft.trim()}>
           Add
-        </button>
+        </Button>
       </div>
       {filter.length === 0 ? (
         <div className="muted small excluded-empty">
@@ -287,9 +289,9 @@ function CaptureSection({ settings, onChange }: SectionProps) {
           {filter.map((h) => (
             <li key={h}>
               <span className="ehost">{h}</span>
-              <button
-                className="x"
-                title={`Remove ${h}`}
+              <IconButton
+                danger
+                label={`Remove ${h}`}
                 onClick={() =>
                   onChange({
                     ...settings,
@@ -298,7 +300,7 @@ function CaptureSection({ settings, onChange }: SectionProps) {
                 }
               >
                 <IconClose />
-              </button>
+              </IconButton>
             </li>
           ))}
         </ul>
@@ -330,13 +332,14 @@ function ThrottlingSection({ settings, onChange }: SectionProps) {
       </div>
       <div className="col-add-list">
         {presets.map((p) => (
-          <button
+          <Button
             key={p}
-            className={`btn small ${settings.responseDelayMs === p ? "active" : ""}`}
+            size="small"
+            active={settings.responseDelayMs === p}
             onClick={() => onChange({ ...settings, responseDelayMs: p })}
           >
             {p === 0 ? "Off" : `${p} ms`}
-          </button>
+          </Button>
         ))}
       </div>
     </div>
@@ -366,13 +369,14 @@ function AutoresponderSection({
       <div className="col-section-label">Detail layout</div>
       <div className="col-add-list">
         {AUTO_LAYOUTS.map((o) => (
-          <button
+          <Button
             key={o.value}
-            className={`btn small ${layout === o.value ? "active" : ""}`}
+            size="small"
+            active={layout === o.value}
             onClick={() => onChange(o.value)}
           >
             {o.label}
-          </button>
+          </Button>
         ))}
       </div>
       <p className="muted small">{AUTO_LAYOUTS.find((o) => o.value === layout)?.hint}</p>
@@ -419,16 +423,16 @@ function HotkeySection({ settings, onChange }: SectionProps) {
         >
           {recording ? "Press keys…" : accel ? prettyAccel(accel) : "Not set"}
         </span>
-        <button className="btn small" onClick={() => setRecording((r) => !r)}>
+        <Button size="small" onClick={() => setRecording((r) => !r)}>
           {recording ? "Cancel" : "Record"}
-        </button>
-        <button
-          className="btn small"
+        </Button>
+        <Button
+          size="small"
           onClick={() => onChange({ ...settings, systemProxyHotkey: "" })}
           disabled={!accel || recording}
         >
           Clear
-        </button>
+        </Button>
       </div>
       <p className="muted small">
         Use Ctrl, Alt, or Win/Super (optionally with Shift) plus a letter, digit, or function key —
@@ -513,16 +517,16 @@ function InAppShortcutsSection({
               <span className={`btn small hotkey-display ${recording ? "recording" : ""}`}>
                 {recording ? "Press keys…" : prettyShortcut(bindings[c.id])}
               </span>
-              <button className="btn small" onClick={() => record(c.id)}>
+              <Button size="small" onClick={() => record(c.id)}>
                 {recording ? "Cancel" : "Record"}
-              </button>
-              <button
-                className="btn small"
+              </Button>
+              <Button
+                size="small"
                 onClick={() => onChange({ ...bindings, [c.id]: DEFAULT_SHORTCUTS[c.id] })}
                 disabled={bindings[c.id] === DEFAULT_SHORTCUTS[c.id] || recording}
               >
                 Reset
-              </button>
+              </Button>
             </li>
           );
         })}
@@ -533,9 +537,9 @@ function InAppShortcutsSection({
         </p>
       )}
       <div className="col-add-list">
-        <button className="btn small" onClick={() => onChange(DEFAULT_SHORTCUTS)}>
+        <Button size="small" onClick={() => onChange(DEFAULT_SHORTCUTS)}>
           Reset all to defaults
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -578,17 +582,15 @@ function CertificatesSection({
         <strong> CA cert</strong> toolbar button has the instructions.
       </p>
       <div className="col-add-list">
-        <button className="btn" onClick={doExport}>
-          Export CA to file…
-        </button>
-        <button
-          className="btn danger"
+        <Button onClick={doExport}>Export CA to file…</Button>
+        <Button
+          danger
           onClick={() => setPendingRegen(true)}
           disabled={running}
           title={running ? "Stop the proxy first" : undefined}
         >
           Regenerate CA
-        </button>
+        </Button>
       </div>
       {running && <p className="muted small">Stop the proxy to regenerate the CA.</p>}
       {pendingRegen && (
@@ -654,9 +656,9 @@ function InterceptionSection({ settings, onChange }: SectionProps) {
             }
           }}
         />
-        <button className="btn" onClick={addHost} disabled={!draft.trim()}>
+        <Button onClick={addHost} disabled={!draft.trim()}>
           Add
-        </button>
+        </Button>
       </div>
 
       {hosts.length === 0 ? (
@@ -666,14 +668,9 @@ function InterceptionSection({ settings, onChange }: SectionProps) {
           {hosts.map((h) => (
             <li key={h}>
               <span className="ehost">{h}</span>
-              <button
-                className="x"
-                title={`Remove ${h}`}
-                aria-label={`Remove ${h}`}
-                onClick={() => removeHost(h)}
-              >
+              <IconButton danger label={`Remove ${h}`} onClick={() => removeHost(h)}>
                 <IconClose />
-              </button>
+              </IconButton>
             </li>
           ))}
         </ul>
@@ -723,7 +720,6 @@ export function SettingsDialog({
   onClose,
 }: SettingsDialogProps) {
   const notify = useToast();
-  const ref = useModalDialog(onClose);
   const [active, setActive] = useState(loadSection);
   const [pendingImport, setPendingImport] = useState(false);
   const section = SECTIONS.find((s) => s.id === active) ?? SECTIONS[0];
@@ -755,74 +751,73 @@ export function SettingsDialog({
   }
 
   return (
-    <dialog ref={ref} className="modal settings-modal" aria-labelledby="settings-title">
-      <div className="settings-head">
-        <h3 id="settings-title">Settings</h3>
-        <button
-          className="settings-close"
-          aria-label="Close settings"
-          onClick={() => ref.current?.close()}
-        >
-          <IconClose />
-        </button>
-      </div>
+    <Modal className="settings-modal" ariaLabelledby="settings-title" onClose={onClose}>
+      {(close) => (
+        <>
+          <div className="settings-head">
+            <h3 id="settings-title">Settings</h3>
+            <IconButton label="Close settings" onClick={close}>
+              <IconClose />
+            </IconButton>
+          </div>
 
-      <div className="settings-body">
-        <nav className="settings-nav" aria-label="Settings sections">
-          {SECTIONS.map((s) => (
-            <button
-              key={s.id}
-              className={`settings-nav-item ${s.id === active ? "on" : ""}`}
-              onClick={() => setActive(s.id)}
-            >
-              {s.label}
-            </button>
-          ))}
-        </nav>
-        <div className="settings-content">
-          {section.render({
-            settings,
-            onChange,
-            columnOrder,
-            onColumnOrderChange,
-            shortcuts,
-            onShortcutsChange,
-            autoLayout,
-            onAutoLayoutChange,
-            running,
-            portError,
-            onCaChanged,
-          })}
-        </div>
-      </div>
+          <div className="settings-body">
+            <nav className="settings-nav" aria-label="Settings sections">
+              {SECTIONS.map((s) => (
+                <button
+                  key={s.id}
+                  className={`settings-nav-item ${s.id === active ? "on" : ""}`}
+                  onClick={() => setActive(s.id)}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </nav>
+            <div className="settings-content">
+              {section.render({
+                settings,
+                onChange,
+                columnOrder,
+                onColumnOrderChange,
+                shortcuts,
+                onShortcutsChange,
+                autoLayout,
+                onAutoLayoutChange,
+                running,
+                portError,
+                onCaChanged,
+              })}
+            </div>
+          </div>
 
-      <div className="settings-foot">
-        <div className="settings-foot-left">
-          <button
-            className="btn"
-            onClick={() => setPendingImport(true)}
-            title="Import settings from a JSON file (overwrites current settings)"
-          >
-            Import…
-          </button>
-          <button className="btn" onClick={exportSettings} title="Export settings to a JSON file">
-            Export…
-          </button>
-        </div>
-        <button className="btn primary" onClick={() => ref.current?.close()}>
-          Done
-        </button>
-      </div>
+          <div className="settings-foot">
+            <div className="settings-foot-left">
+              <Button
+                onClick={() => setPendingImport(true)}
+                title="Import settings from a JSON file (overwrites current settings)"
+              >
+                Import…
+              </Button>
+              <Button onClick={exportSettings} title="Export settings to a JSON file">
+                Export…
+              </Button>
+            </div>
+            <Button variant="primary" onClick={close}>
+              Done
+            </Button>
+          </div>
 
-      {pendingImport && (
-        <ConfirmDialog
-          title="Import settings?"
-          message="This overwrites all current proxy settings (port, exclusions, capture filter, throttling, columns, highlight colors) with the contents of the file you pick. This can't be undone."
-          confirmLabel="Choose file & import"
-          onConfirm={importSettings}
-          onCancel={() => setPendingImport(false)}
-        />
+          {pendingImport && (
+            <ConfirmDialog
+              title="Import settings?"
+              message="This overwrites all current proxy settings (port, exclusions, capture filter, throttling, columns, highlight colors) with the contents of the file you pick. This can't be undone."
+              confirmLabel="Choose file & import"
+              onConfirm={importSettings}
+              onCancel={() => setPendingImport(false)}
+            />
+          )}
+        </>
       )}
-    </dialog>
+    </Modal>
   );
 }

@@ -162,6 +162,19 @@ Engine (proxy-core — these work without the GUI system libs):
   Don't hand-place raw Unicode glyphs as icons or import `react-icons` directly in
   a component — add/reuse an export here. Keyboard-hint typography (`⌘`, the arrow
   keys, `→` inside a sentence/label) is NOT an icon — leave it as text.
+- **Generic UI primitives — `src/components/ui/`:** the reusable, prop-driven
+  building blocks — `Button`, `SegmentedControl`, `Chip`, `FilterChip` (kind /
+  status quick-filters, `.fchip`), `IconButton` (bare icon closers, `.icon-btn`)
+  and `Modal` (the shared `<dialog>` + `useModalDialog` shell, `close()` via a
+  render-prop) — that render the shared design-system classes so every button,
+  segmented switch, pill, icon affordance and dialog looks and behaves the same
+  (issue #64). Reach for these instead of hand-writing `<button className="btn …">`
+  / `<div className="seg">` / `<dialog className="modal">`; context-specific hooks
+  still ride along via `className`. These primitives are
+  the **only** components with screenshot tests (`toMatchScreenshot`) — a pixel
+  baseline that locks their look. Don't screenshot-test feature components, and
+  regenerate the committed references in the pinned Playwright container when a
+  primitive's look changes (see `.claude/skills/browser-testing/SKILL.md`).
 - **Mock rules are one-per-request, full-URL match** (Fiddler-style, no
   collapsing) — see `respond_rule_from_flow` in `rules.rs`. The `respond` action's
   `headers` field is honored by the engine; Content-Type has its own dedicated

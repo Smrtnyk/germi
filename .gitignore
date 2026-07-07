@@ -19,10 +19,11 @@ dist-ssr
 # Fallow cache
 .fallow/
 
-# Vitest browser-mode artifacts (failure screenshots + attachments)
+# Vitest browser-mode failure artifacts (actual/diff images). Committed
+# reference screenshots live in src/components/ui/**/__screenshots__/ and are
+# intentionally NOT ignored — they are the visual-regression baselines.
 .vitest/
 .vitest-attachments/
-**/__screenshots__/
 
 # Logs / OS
 *.log

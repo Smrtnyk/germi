@@ -32,6 +32,20 @@ export default defineConfig({
             provider: playwright(),
             headless: true,
             instances: [{ browser: "chromium" }],
+            // Screenshot tests (generic `src/components/ui/*` primitives only)
+            // compare pixels. Glyph anti-aliasing differs between machines
+            // (fonts + FreeType version): `threshold` ignores those small
+            // per-pixel color deltas, and `allowedMismatchedPixelRatio` allows
+            // the residual. Reference images are committed and generated on the
+            // CI image, so CI sees ~0 diff; the budget only absorbs a
+            // developer's local OS rendering. A real design regression (wrong
+            // color / border / missing variant) moves far more than the budget.
+            expect: {
+              toMatchScreenshot: {
+                comparatorName: "pixelmatch",
+                comparatorOptions: { threshold: 0.2, allowedMismatchedPixelRatio: 0.08 },
+              },
+            },
           },
         },
       },
