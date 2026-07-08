@@ -20,6 +20,7 @@ import type {
   ScenarioSummary,
   Script,
   ScriptDiagnostic,
+  SettingsSectionSummary,
   TestInput,
   TestResult,
 } from "./types";
@@ -73,8 +74,11 @@ export const api = {
   ruleHits: () => invoke<Record<string, number>>("rule_hits"),
   getSettings: () => invoke<ProxySettings>("get_settings"),
   setSettings: (settings: ProxySettings) => invoke<void>("set_settings", { settings }),
-  exportSettings: () => invoke<boolean>("export_settings"),
-  importSettings: () => invoke<ProxySettings>("import_settings"),
+  getSettingsSections: () => invoke<SettingsSectionSummary[]>("get_settings_sections"),
+  exportSettings: (sections: string[]) => invoke<boolean>("export_settings", { sections }),
+  peekSettingsImport: () => invoke<SettingsSectionSummary[] | null>("peek_settings_import"),
+  applySettingsImport: (sections: string[]) =>
+    invoke<ProxySettings>("apply_settings_import", { sections }),
   getScripts: () => invoke<Script[]>("get_scripts"),
   setScripts: (scripts: Script[]) => invoke<ScriptDiagnostic[]>("set_scripts", { scripts }),
   checkScript: (source: string) => invoke<string | null>("check_script", { source }),

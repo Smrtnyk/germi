@@ -250,6 +250,14 @@ export interface ProxySettings {
   highlightColors: Record<string, string>;
 }
 
+/** One settings section in the export checklist / import preview (issue #112). */
+export interface SettingsSectionSummary {
+  id: string;
+  label: string;
+  /** Short human summary of the section's values, e.g. `12 excluded hosts`. */
+  detail: string;
+}
+
 export interface CaInfo {
   certPem: string;
   certPath: string;
