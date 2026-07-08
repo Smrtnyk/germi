@@ -37,11 +37,28 @@ struct HarLog {
 #[serde(rename_all = "camelCase")]
 struct HarEntry {
     #[serde(default, deserialize_with = "null_default")]
+    started_date_time: String,
+    #[serde(default, deserialize_with = "null_default")]
     request: HarRequest,
     #[serde(default, deserialize_with = "null_default")]
     response: HarResponse,
     #[serde(default, deserialize_with = "null_default")]
     time: f64,
+    #[serde(default, deserialize_with = "null_default")]
+    timings: HarTimings,
+    #[serde(default)]
+    comment: Option<String>,
+    /// Germi's own extension field (see `har_export`): the mock rule that
+    /// produced this exchange, so provenance survives a HAR round-trip.
+    #[serde(default, rename = "_matchedRule")]
+    matched_rule: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct HarTimings {
+    /// Time-to-first-byte in HAR terms; `-1` means "not available".
+    #[serde(default, deserialize_with = "null_default")]
+    wait: f64,
 }
 
 #[derive(Deserialize, Default)]
@@ -88,6 +105,10 @@ struct Content {
 struct PostData {
     #[serde(default, deserialize_with = "null_default")]
     text: String,
+    /// Non-standard but mirrored from `content.encoding`: Germi's own exporter
+    /// (and some other tools) base64-encode binary request bodies.
+    #[serde(default)]
+    encoding: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -148,8 +169,21 @@ pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
         let req_body = entry
             .request
             .post_data
-            .map(|p| p.text.into_bytes())
+            .map(|p| {
+                if p.encoding.as_deref() == Some("base64") {
+                    crate::body::base64_lenient(&p.text).unwrap_or_default()
+                } else {
+                    p.text.into_bytes()
+                }
+            })
             .unwrap_or_default();
+
+        let duration_ms = if entry.time > 0.0 {
+            Some(entry.time as u64)
+        } else {
+            None
+        };
+        let ts = crate::flow::rfc3339_to_epoch_ms(&entry.started_date_time).unwrap_or_else(now_ms);
 
         let request = CapturedRequest {
             method: if entry.request.method.is_empty() {
@@ -164,7 +198,7 @@ pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
             version: entry.request.http_version,
             headers: pairs(entry.request.headers),
             body: req_body.into(),
-            timestamp_ms: now_ms(),
+            timestamp_ms: ts,
         };
 
         // No response captured if status is 0 and there are no headers.
@@ -176,7 +210,9 @@ pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
                 version: entry.response.http_version,
                 headers: pairs(entry.response.headers),
                 body: decode_har_body(&entry.response.content).into(),
-                timestamp_ms: now_ms(),
+                // HAR has no response timestamp of its own; the entry's start
+                // plus its total time is the closest reconstruction.
+                timestamp_ms: ts + duration_ms.unwrap_or(0),
             })
         };
 
@@ -185,14 +221,14 @@ pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
             seq: 0,
             request,
             response,
-            matched_rule: None,
-            duration_ms: if entry.time > 0.0 {
-                Some(entry.time as u64)
+            matched_rule: entry.matched_rule,
+            duration_ms,
+            ttfb_ms: if entry.timings.wait > 0.0 {
+                Some(entry.timings.wait as u64)
             } else {
                 None
             },
-            ttfb_ms: None,
-            comment: None,
+            comment: entry.comment.filter(|c| !c.is_empty()),
             availability: None,
             imported: true,
         });

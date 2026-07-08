@@ -39,14 +39,14 @@ describe("useCaptureDrop", () => {
     const onReject = vi.fn();
     const screen = await render(<Harness onFile={onFile} onReject={onReject} />);
 
-    dispatchDrag("dragenter", fileTransfer("session.germi"));
+    dispatchDrag("dragenter", fileTransfer("session.har"));
     await expect.element(screen.getByText("dragging")).toBeVisible();
 
-    dispatchDrag("drop", fileTransfer("session.germi"));
+    dispatchDrag("drop", fileTransfer("session.har"));
     await expect.element(screen.getByText("idle")).toBeVisible();
     expect(onFile).toHaveBeenCalledTimes(1);
     expect(onFile.mock.calls[0][0]).toBeInstanceOf(File);
-    expect(onFile.mock.calls[0][1]).toBe("germi");
+    expect(onFile.mock.calls[0][1]).toBe("har");
     expect(onReject).not.toHaveBeenCalled();
     await screen.unmount();
   });
@@ -78,9 +78,9 @@ describe("useCaptureDrop", () => {
     const onFile = vi.fn();
     const screen = await render(<Harness onFile={onFile} disabled />);
 
-    dispatchDrag("dragenter", fileTransfer("session.germi"));
+    dispatchDrag("dragenter", fileTransfer("session.har"));
     expect(screen.getByText("dragging").elements()).toHaveLength(0);
-    const swallowed = dispatchDrag("drop", fileTransfer("session.germi"));
+    const swallowed = dispatchDrag("drop", fileTransfer("session.har"));
     expect(onFile).not.toHaveBeenCalled();
     expect(swallowed).toBe(true);
     await screen.unmount();

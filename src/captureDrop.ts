@@ -77,7 +77,7 @@ export function useCaptureDrop(opts: CaptureDropOptions): { dragging: boolean } 
       if (!file) return;
       const ext = captureExtFromName(file.name);
       if (!ext) {
-        ref.current.onReject?.(`"${file.name}" isn't a .germi, .har, or .saz capture file`);
+        ref.current.onReject?.(`"${file.name}" isn't a .har or .saz capture file`);
         return;
       }
       ref.current.onFile(file, ext);

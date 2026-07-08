@@ -3,8 +3,8 @@ export const RULE_DRAG_MIME = "application/x-germi-rule";
 export const COLOR_DRAG_MIME = "application/x-germi-color";
 
 /** Capture formats we accept as a drag-dropped file (issue #100), matching the
- *  native picker's filter — HAR, Fiddler SAZ, and our own `.germi` session. */
-const CAPTURE_EXTS = ["germi", "har", "saz"] as const;
+ *  native picker's filter — HAR and Fiddler SAZ. */
+const CAPTURE_EXTS = ["har", "saz"] as const;
 export type CaptureExt = (typeof CAPTURE_EXTS)[number];
 
 /** A drag carrying OS files (vs. an in-app flow / rule / color drag). The
@@ -16,8 +16,8 @@ export function hasFileDrag(types: readonly string[]): boolean {
 }
 
 /** The capture format of a dropped file by its name, or `null` if it isn't one
- *  we can load. Case-insensitive; the extension is what disambiguates a HAR
- *  from a `.germi` (both JSON) for the engine. */
+ *  we can load. Case-insensitive; the extension tells the engine whether to
+ *  parse a HAR or a SAZ. */
 export function captureExtFromName(name: string): CaptureExt | null {
   const dot = name.lastIndexOf(".");
   const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";

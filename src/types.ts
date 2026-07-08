@@ -47,7 +47,7 @@ export interface FlowSummary {
   /** Public-availability verdict for a checked doc flow (drives the 🔓/🔒 icon);
    *  null until checked on demand. */
   availability: Availability | null;
-  /** True when this flow was loaded from a file (HAR/SAZ/.germi) rather than
+  /** True when this flow was loaded from a file (HAR/SAZ) rather than
    *  captured live — drives the "imported" row marker and `is:imported` filter. */
   imported: boolean;
   /** Pinned header-column values, keyed by column spec (e.g. `cf-ray`, `req:referer`). */
