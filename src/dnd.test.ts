@@ -87,10 +87,9 @@ describe("hasFileDrag", () => {
 
 describe("captureExtFromName", () => {
   it("recognises the loadable capture formats, case-insensitively", () => {
-    expect(captureExtFromName("session.germi")).toBe("germi");
     expect(captureExtFromName("dump.har")).toBe("har");
     expect(captureExtFromName("trace.saz")).toBe("saz");
-    expect(captureExtFromName("SESSION.GERMI")).toBe("germi");
+    expect(captureExtFromName("SESSION.HAR")).toBe("har");
     expect(captureExtFromName("weird.name.with.dots.Har")).toBe("har");
   });
 
@@ -99,7 +98,8 @@ describe("captureExtFromName", () => {
     expect(captureExtFromName("notes.txt")).toBeNull();
     expect(captureExtFromName("archive.zip")).toBeNull();
     expect(captureExtFromName("noextension")).toBeNull();
-    expect(captureExtFromName(".germi")).toBe("germi");
-    expect(captureExtFromName("germi")).toBeNull();
+    expect(captureExtFromName("session.germi")).toBeNull();
+    expect(captureExtFromName(".har")).toBe("har");
+    expect(captureExtFromName("har")).toBeNull();
   });
 });

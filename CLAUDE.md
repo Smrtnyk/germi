@@ -119,9 +119,11 @@ Engine (proxy-core — these work without the GUI system libs):
   changes must keep that self-heal working — an existing DB must still load —
   with a `cargo test -p germi` test proving it.
   **Traffic is deliberately NOT auto-persisted** (privacy: captured tokens/bodies
-  shouldn't silently hit disk) — it's explicit Save/Open of a lossless `.germi`
-  session file (`proxy-core/src/session.rs`, base64 bodies). Don't add background
-  flow persistence without a deliberate decision.
+  shouldn't silently hit disk) — it's explicit Save/Open. Save exports a standard
+  HAR 1.2 archive (`proxy-core/src/har_export.rs` — decoded bodies, base64 for
+  binary, comment + `_matchedRule` extension fields; issue #113 removed the old
+  `.germi` format) that round-trips losslessly through `import.rs::parse_har`.
+  Don't add background flow persistence without a deliberate decision.
 - **Body decoding** (gzip/br/deflate) is shared in `proxy-core/src/body.rs`,
   reused by both SAZ import and inspector display. Display bodies are **capped at
   512 KB** (`DISPLAY_CAP` in `flow.rs`) with a `full` fetch flag; base64 is
@@ -195,8 +197,9 @@ traffic columns (timing/TTFB, per-flow comments, pinned-header columns), a
 multi-section Settings panel (Connections incl. allow-remote, Certificates
 export+regenerate, host exclusion, Capture filter + max-flows +
 auto-start-on-launch, response-delay throttling, Shortcuts incl. the
-system-proxy hotkey), settings import/export, and `.germi` session
-save/open. Settings import/export is **partial by section** (issue #112): a
+system-proxy hotkey), settings import/export, and HAR session save/open
+(export is HAR 1.2; open takes HAR or SAZ). Settings import/export is
+**partial by section** (issue #112): a
 checklist dialog (`SettingsSectionsDialog.tsx`) picks what to export, and import
 is two-phase (`peek_settings_import` previews the picked file's sections →
 `apply_settings_import` merges only the selected, present fields — the file text
@@ -235,7 +238,7 @@ copy-across buttons atop the gutter (`CompareGutter.tsx`); re-linking keeps
 the only filled-in filter, preferring the left (`linkSourceSide` /
 `copyPaneFilter` in `comparePane.ts`). Move the selection across via →/← or
 **Load file…**
-(`append_capture` — appends a HAR/SAZ/.germi to the store WITHOUT clearing,
+(`append_capture` — appends a HAR/SAZ to the store WITHOUT clearing,
 unlike `open_capture`), then a raw-HTTP diff (`diff.ts` LCS with folded
 context, `DiffView.tsx`) — **side-by-side by default** (`splitRows` pairs
 del/add runs; toggle to unified, persisted). Bodies are compared decoded in

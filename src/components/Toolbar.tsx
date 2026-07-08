@@ -133,14 +133,14 @@ export function Toolbar(props: ToolbarProps) {
         <Button
           variant="ghost"
           onClick={onOpen}
-          title="Open a .germi session, HAR or Fiddler SAZ archive (replaces current traffic)"
+          title="Open a HAR or Fiddler SAZ archive (replaces current traffic)"
         >
           <IconOpen /> Open
         </Button>
         <Button
           variant="ghost"
           onClick={onSaveSession}
-          title="Save current traffic to a .germi session"
+          title="Save current traffic as a HAR archive"
         >
           <IconSave /> Save
         </Button>

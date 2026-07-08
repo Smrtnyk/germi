@@ -227,7 +227,7 @@ function useComparePanes(initialLeft: FlowSummary[], initialRight: FlowSummary[]
   };
 }
 
-/** "Load file…": append a HAR / SAZ / .germi to the session and feed the new
+/** "Load file…": append a HAR / SAZ to the session and feed the new
  *  rows to the right pane. */
 function useCompareFile(appendRight: (flows: FlowSummary[]) => void, notify: Notify) {
   const [loading, setLoading] = useState(false);
@@ -351,7 +351,7 @@ export interface CompareViewProps {
  * sortable, multi-selectable request table whose rows show how closely their
  * URL matches the other side's focused row (structural, not textual — good
  * matches get a full-row tint). Feed the right side by moving rows across or
- * loading a HAR / SAZ / .germi (appended to the session as imported rows),
+ * loading a HAR / SAZ (appended to the session as imported rows),
  * then diff the focused pair as raw HTTP.
  */
 export function CompareView({ initialLeft, initialRight, onClose }: CompareViewProps) {
@@ -458,7 +458,7 @@ export function CompareView({ initialLeft, initialRight, onClose }: CompareViewP
       <CaptureDropOverlay
         active={fileDrop.dragging}
         title="Drop to add to the comparison"
-        hint=".germi, .har, or .saz — appended to side B"
+        hint=".har or .saz — appended to side B"
       />
     </div>
   );

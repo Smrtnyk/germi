@@ -7,7 +7,7 @@ map local files, rewrite headers/bodies, block or redirect. **Rust + Tauri**, on
 
 > Status: usable and feature-rich — capture/inspect, scenario-based mocking with a
 > rule tester, HAR/SAZ import, filtering + body search, configurable columns, a
-> settings panel, and lossless `.germi` sessions.
+> settings panel, and HAR session export.
 
 ## Architecture
 
@@ -94,7 +94,7 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   **URL matches** the other side's selection (structural — path segments and query
   parameters, so a random id/timestamp still scores high; good matches get a
   full-row tint, a different color per side, and the Match column sorts them to the
-  top). Move the selection across with **→/←** or load a HAR/SAZ/`.germi` into the
+  top). Move the selection across with **→/←** or load a HAR/SAZ into the
   right side, then **Enter** opens a **side-by-side raw-HTTP diff** of request and
   response (a toggle switches to unified). Bodies are compared (decoded,
   backend-side) but stay collapsed — a **Show body diff** button (or **B**) reveals
@@ -115,11 +115,13 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   mocked/imported tints, compare-pane match tints, diff added/removed — each a
   color + opacity pair with direct hex entry, live preview, per-row reset, and
   drag-a-swatch-onto-another-row to copy a hue). Import/export as JSON.
-- **Sessions** — traffic is **not** auto-persisted (privacy). **Save** a lossless
-  `.germi` file; one **Open** loads any supported capture — `.germi`, HAR, or SAZ —
-  replacing the current traffic (it confirms first when traffic is present).
+- **Sessions** — traffic is **not** auto-persisted (privacy). **Save** exports a
+  standard **HAR 1.2** archive any HTTP tool can open (bodies decoded, binary as
+  base64, timings/comments/mock provenance included — a Germi-written HAR reopens
+  in Germi losslessly); one **Open** loads a HAR or Fiddler SAZ, replacing the
+  current traffic (it confirms first when traffic is present).
 - **Viewer mode** — **New viewer** (or launching with `--viewer`) opens a second,
-  proxy-less window for inspecting saved `.germi`/HAR/SAZ captures *alongside* a
+  proxy-less window for inspecting saved HAR/SAZ captures *alongside* a
   capturing instance, without the two fighting over the proxy port or system proxy.
   The proxy controls and the (proxy-dependent) autoresponder are hidden and a
   **Viewer mode** badge makes the state obvious.

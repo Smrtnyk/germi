@@ -25,13 +25,13 @@ mod body;
 mod ca;
 mod flow;
 mod handler;
+mod har_export;
 mod history;
 mod import;
 mod reissue;
 mod rules;
 mod rules_export;
 mod scripting;
-mod session;
 mod settings;
 mod settings_io;
 mod shared;
@@ -374,7 +374,7 @@ impl ProxyController {
     }
 
     /// Remove specific captured flows by id, so the user can prune noise before
-    /// saving a `.germi` session. Emits `Removed` with the ids (the UI drops
+    /// saving a HAR archive. Emits `Removed` with the ids (the UI drops
     /// those rows); a no-op that emits nothing when none of the ids were present.
     pub fn remove_flows(&self, ids: &[String]) {
         if let Ok(mut store) = self.shared.store.lock() {
@@ -518,13 +518,12 @@ impl ProxyController {
             .collect()
     }
 
-    // ---- capture files: open (.germi / .har / .saz) + session export ----
+    // ---- capture files: open (.har / .saz) + HAR export ----
 
-    /// Parse a capture file — a `.germi` session, a HAR, or a Fiddler SAZ
-    /// archive — into flows, dispatched on the lowercased `ext`.
+    /// Parse a capture file — a HAR or a Fiddler SAZ archive — into flows,
+    /// dispatched on the lowercased `ext`.
     fn parse_capture(bytes: &[u8], ext: &str) -> Result<Vec<crate::flow::Flow>> {
         match ext {
-            "germi" => session::import_session(bytes),
             "har" => import::parse_har(bytes),
             "saz" => import::parse_saz(bytes),
             other => bail!("Unsupported file type: .{other}"),
@@ -550,15 +549,15 @@ impl ProxyController {
         Ok(self.import_flows(Self::parse_capture(bytes, ext)?))
     }
 
-    /// Serialize the current traffic to a `.germi` session (JSON bytes).
-    pub fn export_session(&self) -> Vec<u8> {
+    /// Serialize the current traffic to a HAR 1.2 archive (JSON bytes).
+    pub fn export_har(&self) -> Vec<u8> {
         let flows = self
             .shared
             .store
             .lock()
             .map(|s| s.all_flows())
             .unwrap_or_default();
-        session::export_session(&flows)
+        har_export::export_har(&flows)
     }
 
     // ---- autoresponder rules export / import (.germi-rules) ----
@@ -1204,7 +1203,7 @@ impl ProxyController {
     }
 
     /// Remove every live-captured (non-imported) flow, keeping the flows that were
-    /// loaded from a file (HAR / SAZ / `.germi`). This is the "clear the replay
+    /// loaded from a file (HAR / SAZ). This is the "clear the replay
     /// noise, keep the imported reference" action: while replaying an imported
     /// session, captured traffic piles up, and this prunes exactly that (issue
     /// #49). Recorded on the undo timeline; a no-op when nothing is captured.
@@ -1968,8 +1967,8 @@ mod tests {
             c.shared.record_new(f);
         }
         // Opening a file replaces the traffic AND restarts numbering at 1.
-        let bytes = crate::session::export_session(&[flow("x"), flow("y")]);
-        let n = c.open_capture(&bytes, "germi").expect("open germi");
+        let bytes = crate::har_export::export_har(&[flow("x"), flow("y")]);
+        let n = c.open_capture(&bytes, "har").expect("open har");
         assert_eq!(n, 2);
         let seqs: Vec<u64> = c.list_flows().into_iter().map(|s| s.seq).collect();
         assert_eq!(seqs, vec![1, 2], "an opened session is numbered 1..N, not continued");
@@ -1991,11 +1990,11 @@ mod tests {
     }
 
     #[test]
-    fn open_capture_germi_round_trips_and_replaces() {
+    fn open_capture_of_a_germi_written_har_round_trips_and_replaces() {
         let c = controller();
         c.shared.record_new(flow("stale"));
-        let bytes = crate::session::export_session(&[flow("a"), flow("b")]);
-        let n = c.open_capture(&bytes, "germi").expect("open germi");
+        let bytes = crate::har_export::export_har(&[flow("a"), flow("b")]);
+        let n = c.open_capture(&bytes, "har").expect("open har");
         assert_eq!(n, 2);
         assert_eq!(c.shared.store.lock().expect("lock store").len(), 2);
     }
@@ -2043,8 +2042,8 @@ mod tests {
         let mut live = flow("live");
         live.seq = c.shared.next_seq();
         c.shared.record_new(live);
-        let bytes = crate::session::export_session(&[flow("x")]);
-        let appended = c.append_capture(&bytes, "germi").expect("append germi");
+        let bytes = crate::har_export::export_har(&[flow("x")]);
+        let appended = c.append_capture(&bytes, "har").expect("append har");
         assert_eq!(
             appended[0].seq, 2,
             "an appended reference session continues numbering, it never renumbers from 1"

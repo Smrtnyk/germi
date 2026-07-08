@@ -247,7 +247,7 @@ pub fn remove_flows(state: State<'_, AppState>, ids: Vec<String>) {
 }
 
 /// Remove every live-captured (non-imported) flow, keeping flows loaded from a
-/// file (HAR / SAZ / `.germi`) — clears the replay noise while keeping the
+/// file (HAR / SAZ) — clears the replay noise while keeping the
 /// imported reference (issue #49). Recorded on the undo timeline.
 #[tauri::command]
 pub fn remove_captured_flows(state: State<'_, AppState>) {
@@ -895,7 +895,8 @@ pub fn search_rules(
     state.controller.search_rules(&scenario_id, &pattern, scope)
 }
 
-/// Save the current traffic to a `.germi` session file. Returns false if cancelled.
+/// Save the current traffic as a HAR 1.2 archive — the interchange format any
+/// HTTP tool can open (issue #113). Returns false if cancelled.
 #[tauri::command]
 pub async fn save_session(
     app: tauri::AppHandle,
@@ -904,28 +905,28 @@ pub async fn save_session(
     let Some(picked) = app
         .dialog()
         .file()
-        .add_filter("Germi session", &["germi"])
-        .set_file_name("session.germi")
+        .add_filter("HAR archive", &["har"])
+        .set_file_name("session.har")
         .blocking_save_file()
     else {
         return Ok(false);
     };
     let path = picked.into_path().map_err(|e| e.to_string())?;
-    // Atomic write: overwriting an existing (possibly large) .germi that fails
-    // mid-write would otherwise destroy the old capture and leave a truncated,
-    // unopenable file. Stage to a temp sibling then rename.
-    let bytes = state.controller.export_session();
+    // Atomic write: overwriting an existing (possibly large) capture that fails
+    // mid-write would otherwise destroy the old file and leave a truncated,
+    // unopenable one. Stage to a temp sibling then rename.
+    let bytes = state.controller.export_har();
     crate::persist::write_atomic(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
-/// Show the capture-file picker (.germi / .har / .saz) and read the chosen
-/// file. Returns the bytes + lowercased extension, or `None` if cancelled.
+/// Show the capture-file picker (.har / .saz) and read the chosen file.
+/// Returns the bytes + lowercased extension, or `None` if cancelled.
 fn pick_capture_file(app: &tauri::AppHandle) -> Result<Option<(Vec<u8>, String)>, String> {
     let Some(picked) = app
         .dialog()
         .file()
-        .add_filter("Captures (.germi, .har, .saz)", &["germi", "har", "saz"])
+        .add_filter("Captures (.har, .saz)", &["har", "saz"])
         .blocking_pick_file()
     else {
         return Ok(None);
@@ -940,7 +941,7 @@ fn pick_capture_file(app: &tauri::AppHandle) -> Result<Option<(Vec<u8>, String)>
     Ok(Some((bytes, ext)))
 }
 
-/// Open a capture file — a `.germi` session, a HAR, or a Fiddler SAZ archive —
+/// Open a capture file — a HAR or a Fiddler SAZ archive —
 /// REPLACING the current traffic. Dispatches on the file extension. Returns the
 /// number of flows loaded, or `None` if the user cancels the picker.
 #[tauri::command]
@@ -977,10 +978,10 @@ pub async fn append_capture(
 }
 
 /// Decode a capture file dragged from the OS file manager onto the webview.
-/// An HTML5 file drop hands the frontend the File's *bytes* (base64 over IPC,
-/// the same encoding `.germi` sessions already use), not a filesystem path like
-/// the native picker — so there is nothing to `std::fs::read` here. `ext` (the
-/// dropped file's extension) disambiguates HAR from `.germi` (both JSON).
+/// An HTML5 file drop hands the frontend the File's *bytes* (base64 over IPC),
+/// not a filesystem path like the native picker — so there is nothing to
+/// `std::fs::read` here. `ext` (the dropped file's extension) tells HAR and
+/// SAZ apart.
 fn decode_dropped_capture(data_b64: &str, ext: &str) -> Result<(Vec<u8>, String), String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data_b64)

@@ -22,6 +22,103 @@ pub fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+/// Days-since-epoch → (year, month, day) in the proleptic Gregorian calendar
+/// (Howard Hinnant's `civil_from_days`). Hand-rolled so HAR timestamps don't
+/// pull a whole date-time crate into the engine.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// (year, month, day) → days-since-epoch (Hinnant's `days_from_civil`).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = y - i64::from(m <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = i64::from((153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1);
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Epoch-milliseconds → RFC 3339 UTC (`2026-07-08T12:34:56.789Z`), the format
+/// HAR 1.2 mandates for `startedDateTime`.
+pub fn epoch_ms_to_rfc3339(ms: u64) -> String {
+    let secs = i64::try_from(ms / 1000).unwrap_or(i64::MAX);
+    let millis = ms % 1000;
+    let (y, mo, d) = civil_from_days(secs.div_euclid(86400));
+    let sod = secs.rem_euclid(86400);
+    format!(
+        "{y:04}-{mo:02}-{d:02}T{:02}:{:02}:{:02}.{millis:03}Z",
+        sod / 3600,
+        (sod / 60) % 60,
+        sod % 60
+    )
+}
+
+/// Parse an RFC 3339 timestamp into epoch-milliseconds. Lenient about what
+/// real-world HAR exporters emit: fractional seconds of any precision are
+/// optional, and the offset may be `Z`, `±HH:MM`, `±HHMM`, or missing (assumed
+/// UTC). Returns `None` for anything unparseable or before the epoch.
+pub fn rfc3339_to_epoch_ms(stamp: &str) -> Option<u64> {
+    let bytes = stamp.as_bytes();
+    if bytes.len() < 19
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || (bytes[10] != b'T' && bytes[10] != b't')
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| stamp.get(r).and_then(|p| p.parse::<i64>().ok());
+    let (year, month, day) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hour, minute, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || sec > 60
+    {
+        return None;
+    }
+    let mut rest = &bytes[19..];
+    let mut frac_ms: i64 = 0;
+    if rest.first() == Some(&b'.') {
+        let digits = rest[1..].iter().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 {
+            return None;
+        }
+        for (i, c) in rest[1..=digits].iter().take(3).enumerate() {
+            frac_ms += i64::from(c - b'0') * [100, 10, 1][i];
+        }
+        rest = &rest[1 + digits..];
+    }
+    let offset_min: i64 = match rest.first() {
+        None => 0,
+        Some(b'Z' | b'z') if rest.len() == 1 => 0,
+        Some(sign @ (b'+' | b'-')) => {
+            let o = std::str::from_utf8(&rest[1..]).ok()?.replace(':', "");
+            if o.len() != 4 {
+                return None;
+            }
+            let hh: i64 = o[..2].parse().ok()?;
+            let mm: i64 = o[2..].parse().ok()?;
+            let total = hh * 60 + mm;
+            if *sign == b'-' { -total } else { total }
+        }
+        Some(_) => return None,
+    };
+    let secs = days_from_civil(year, month as u32, day as u32) * 86400
+        + hour * 3600
+        + minute * 60
+        + sec
+        - offset_min * 60;
+    u64::try_from(secs * 1000 + frac_ms).ok()
+}
+
 /// A captured request, as seen by the proxy after TLS interception.
 #[derive(Clone, Debug)]
 pub struct CapturedRequest {
@@ -66,9 +163,9 @@ pub struct Flow {
     /// User-entered note/tag for triage (shown in the Comment column).
     pub comment: Option<String>,
     /// On-demand public-availability verdict (credential-stripped re-fetch);
-    /// `None` until checked. In-memory only — not persisted to `.germi` sessions.
+    /// `None` until checked. In-memory only — not persisted to saved captures.
     pub availability: Option<Availability>,
-    /// True when this flow was loaded from a file (HAR / SAZ / `.germi`) rather
+    /// True when this flow was loaded from a file (HAR / SAZ) rather
     /// than captured live by the proxy. Drives the "imported" row marker and the
     /// `is:imported` filter, and is what "Delete captured" keeps (issue #49).
     pub imported: bool,
@@ -646,6 +743,44 @@ mod tests {
         assert_eq!(md.body_text, "hello brotli world");
         assert_eq!(md.encoding.as_deref(), Some("br"));
         assert!(md.decoded);
+    }
+
+    #[test]
+    fn epoch_ms_formats_as_rfc3339_utc() {
+        assert_eq!(epoch_ms_to_rfc3339(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(epoch_ms_to_rfc3339(86_400_000), "1970-01-02T00:00:00.000Z");
+        // 1e9 seconds is the well-known 2001-09-09T01:46:40Z anchor.
+        assert_eq!(epoch_ms_to_rfc3339(1_000_000_000_123), "2001-09-09T01:46:40.123Z");
+    }
+
+    #[test]
+    fn rfc3339_parses_what_the_exporter_writes() {
+        for ms in [0, 1, 999, 86_400_000, 1_000_000_000_123, 1_767_225_599_999] {
+            assert_eq!(rfc3339_to_epoch_ms(&epoch_ms_to_rfc3339(ms)), Some(ms));
+        }
+    }
+
+    #[test]
+    fn rfc3339_tolerates_real_world_exporter_variants() {
+        let anchor = Some(1_000_000_000_000);
+        // Chrome-style micros, lowercase markers, a positive and a negative
+        // offset (with and without the colon), and a missing offset (= UTC).
+        assert_eq!(rfc3339_to_epoch_ms("2001-09-09T01:46:40.000123Z"), anchor);
+        assert_eq!(rfc3339_to_epoch_ms("2001-09-09t01:46:40z"), anchor);
+        assert_eq!(rfc3339_to_epoch_ms("2001-09-09T03:46:40+02:00"), anchor);
+        assert_eq!(rfc3339_to_epoch_ms("2001-09-08T17:46:40-0800"), anchor);
+        assert_eq!(rfc3339_to_epoch_ms("2001-09-09T01:46:40"), anchor);
+        assert_eq!(rfc3339_to_epoch_ms("2001-09-09T01:46:40.5Z"), Some(1_000_000_000_500));
+    }
+
+    #[test]
+    fn rfc3339_rejects_garbage() {
+        for bad in ["", "not a date", "2001-09-09", "2001-13-09T01:46:40Z",
+            "2001-09-09T25:46:40Z", "2001-09-09T01:46:40.Z", "2001-09-09T01:46:40+2:00",
+            "1969-12-31T23:59:59Z"]
+        {
+            assert_eq!(rfc3339_to_epoch_ms(bad), None, "{bad:?} must not parse");
+        }
     }
 
     #[test]

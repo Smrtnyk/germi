@@ -121,14 +121,14 @@ function buildActions(s: AppStateValue): PaletteAction[] {
     {
       id: "save",
       group: "Session",
-      label: "Save session…",
+      label: "Save session as HAR…",
       shortcut: prettyShortcut(s.shortcuts.save),
       run: s.session.saveSession,
     },
     {
       id: "open",
       group: "Session",
-      label: "Open… (.germi, HAR, SAZ)",
+      label: "Open… (HAR, SAZ)",
       shortcut: prettyShortcut(s.shortcuts.open),
       run: s.requestOpenCapture,
     },
@@ -842,7 +842,7 @@ export function App() {
         <CaptureDropOverlay
           active={fileDrop.dragging}
           title="Drop to open this capture"
-          hint="Replaces current traffic · .germi, .har, or .saz"
+          hint="Replaces current traffic · .har or .saz"
         />
       </div>
 
