@@ -32,6 +32,7 @@ import type {
   ScenarioSummary,
 } from "../types";
 import { isShallowScope, ruleMatchesScopeClient } from "../ruleScope";
+import { mapRemoteWarnings } from "../mapRemote";
 import { ruleRowParts, type RuleRowParts } from "../ruleRow";
 import type { AutoLayout } from "../appState";
 import { useResizable } from "../useResizable";
@@ -133,6 +134,7 @@ export interface AutoresponderPanelProps {
 const ACTION_KINDS: { value: ActionKind; label: string }[] = [
   { value: "respond", label: "Auto-respond (mock)" },
   { value: "mapLocal", label: "Map local file" },
+  { value: "mapRemote", label: "Map remote (another URL)" },
   { value: "setResponseHeader", label: "Set response header" },
   { value: "cors", label: "Allow CORS" },
   { value: "rewriteResponseBody", label: "Rewrite response body" },
@@ -154,6 +156,8 @@ function defaultAction(kind: ActionKind): Action {
       };
     case "mapLocal":
       return { kind: "mapLocal", path: "", status: 200 };
+    case "mapRemote":
+      return { kind: "mapRemote", url: "" };
     case "block":
       return { kind: "block" };
     case "setRequestHeader":
@@ -232,6 +236,9 @@ function ruleWarnings(rule: Rule): string[] {
   }
   if (rule.action.kind === "respond") {
     w.push(...respondHeaderWarnings(rule.action.headers));
+  }
+  if (rule.action.kind === "mapRemote") {
+    w.push(...mapRemoteWarnings(rule.matcher, rule.action.url));
   }
   return w;
 }
@@ -2569,6 +2576,34 @@ function MapLocalFields({
   );
 }
 
+function MapRemoteFields({
+  url,
+  setAction,
+}: {
+  url: string;
+  setAction: (patch: Partial<Action>) => void;
+}) {
+  return (
+    <>
+      <div className="row">
+        <label>Target URL</label>
+        <input
+          className="grow"
+          placeholder="http://localhost:8080/ajax/agent_$1.js"
+          value={url}
+          onChange={(e) => setAction({ url: e.target.value })}
+        />
+      </div>
+      <div className="muted pad small">
+        The request is transparently forwarded to this URL instead of the original — no redirect,
+        the client never notices. With a <strong>regex</strong> matcher, <code>$1</code>…
+        <code>$n</code> (or <code>{"${name}"}</code>) insert the pattern's capture groups from the
+        matched URL.
+      </div>
+    </>
+  );
+}
+
 function RespondFields({
   action,
   setAction,
@@ -2670,6 +2705,8 @@ function ActionFields({
       return <RespondFields action={action} setAction={setAction} />;
     case "mapLocal":
       return <MapLocalFields path={action.path} status={action.status} setAction={setAction} />;
+    case "mapRemote":
+      return <MapRemoteFields url={action.url} setAction={setAction} />;
     case "setRequestHeader":
     case "setResponseHeader":
       return (

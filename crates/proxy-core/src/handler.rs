@@ -44,6 +44,9 @@ pub struct CaptureHandler {
 struct Inflight {
     id: String,
     start: Instant,
+    /// The Map Remote rule that redirected this request, if any — stamped as
+    /// the flow's matched rule when the (upstream) response completes.
+    rule: Option<String>,
 }
 
 impl CaptureHandler {
@@ -173,23 +176,23 @@ impl HttpHandler for CaptureHandler {
                 out.into()
             }
             RequestOutcome::Continue { set_headers } => {
-                self.inflight = Some(Inflight {
-                    id: id.clone(),
-                    start,
-                });
-                apply_set_headers(&mut parts.headers, &set_headers);
-                // A successful WebSocket upgrade hands the connection to the WS
-                // handler and `handle_response` never fires, which would strand a
-                // forever-"pending" row. Record a tentative 101 now; if a real
-                // response does arrive (e.g. the server rejects the upgrade), it
-                // overwrites this entry by the same id.
-                if is_websocket_upgrade(&parts.headers) {
-                    self.record_ws_upgrade(&id);
-                }
                 // Forward the streaming remainder (oversized/truncated) or a body
                 // rebuilt from the captured bytes.
                 let forward = stream_forward.unwrap_or_else(|| Body::from(body_bytes));
-                Request::from_parts(parts, forward).into()
+                self.forward_upstream(&id, start, None, parts, &set_headers, forward)
+            }
+            // Map Remote: same forwarding as Continue, but pointed at the
+            // rule's rewritten URL. The flow keeps the ORIGINAL request (what
+            // the client asked for); the rule label lands in "Mocked-by" when
+            // the mapped response completes.
+            RequestOutcome::MapRemote {
+                rule,
+                url,
+                set_headers,
+                ..
+            } => {
+                let forward = stream_forward.unwrap_or_else(|| Body::from(body_bytes));
+                self.forward_upstream(&id, start, Some((rule, url)), parts, &set_headers, forward)
             }
         }
     }
@@ -226,7 +229,7 @@ impl HttpHandler for CaptureHandler {
                 timestamp_ms: now_ms(),
             };
             self.shared
-                .record_complete(&inflight.id, captured, duration, ttfb, None);
+                .record_complete(&inflight.id, captured, duration, ttfb, inflight.rule.clone());
             self.throttle().await;
             return Response::from_parts(parts, body);
         }
@@ -249,7 +252,7 @@ impl HttpHandler for CaptureHandler {
                 timestamp_ms: now_ms(),
             };
             self.shared
-                .record_complete(&inflight.id, captured, duration, ttfb, None);
+                .record_complete(&inflight.id, captured, duration, ttfb, inflight.rule.clone());
             self.throttle().await;
             return Response::from_parts(parts, forward);
         }
@@ -300,6 +303,10 @@ impl HttpHandler for CaptureHandler {
         }
 
         let duration = inflight.start.elapsed().as_millis() as u64;
+        // A Map Remote rule is the flow's provenance even when a response-phase
+        // rule also touched the response — mirroring how a mock rule stays the
+        // matched rule for synthesized responses.
+        let matched = inflight.rule.or(matched);
         self.shared
             .record_complete(&inflight.id, captured, duration, ttfb, matched);
 
@@ -332,8 +339,10 @@ impl HttpHandler for CaptureHandler {
                 body: format!("Upstream request failed: {err}").into_bytes(),
                 timestamp_ms: now_ms(),
             };
+            // Keep the Map Remote provenance on the 502 so a dead mapped
+            // target is attributable to the rule that pointed there.
             self.shared
-                .record_complete(&inflight.id, captured, duration, None, None);
+                .record_complete(&inflight.id, captured, duration, None, inflight.rule);
         }
         Response::builder()
             .status(502)
@@ -437,6 +446,40 @@ impl CaptureHandler {
         synthetic.status = captured.status;
         synthetic.headers = captured.headers;
         synthetic.body = captured.body;
+    }
+
+    /// Forward a request upstream (the Continue and Map Remote paths): stash the
+    /// in-flight entry, apply rule header edits, repoint at a Map Remote target
+    /// when `mapped` carries one, and record a tentative 101 for a WebSocket
+    /// upgrade — a successful upgrade hands the connection to the WS handler
+    /// and `handle_response` never fires, which would strand a forever-"pending"
+    /// row (a real response, e.g. a rejected upgrade, overwrites it by id).
+    fn forward_upstream(
+        &mut self,
+        id: &str,
+        start: Instant,
+        mapped: Option<(String, String)>,
+        mut parts: hudsucker::hyper::http::request::Parts,
+        set_headers: &[(String, String)],
+        body: Body,
+    ) -> RequestOrResponse {
+        let (rule, target) = match mapped {
+            Some((rule, url)) => (Some(rule), Some(url)),
+            None => (None, None),
+        };
+        self.inflight = Some(Inflight {
+            id: id.to_string(),
+            start,
+            rule,
+        });
+        apply_set_headers(&mut parts.headers, set_headers);
+        if let Some(target) = target {
+            remap_request_target(&mut parts, &target);
+        }
+        if is_websocket_upgrade(&parts.headers) {
+            self.record_ws_upgrade(id);
+        }
+        Request::from_parts(parts, body).into()
     }
 
     /// Finalize a rule-synthesized response: run response-phase rules then scripts
@@ -726,6 +769,25 @@ fn remove_header_ci(headers: &mut Vec<(String, String)>, name: &str) {
     headers.retain(|(k, _)| !k.eq_ignore_ascii_case(name));
 }
 
+/// Point a request at a Map Remote target: swap in the rewritten absolute URI
+/// and update the Host header to the new authority. hudsucker strips Host
+/// before forwarding (hyper regenerates it from the URI), but the WebSocket
+/// upgrade path doesn't — rewriting it here keeps both consistent. The target
+/// was already validated by the rules engine; an unparseable one leaves the
+/// request untouched rather than breaking the flow.
+fn remap_request_target(parts: &mut hudsucker::hyper::http::request::Parts, target: &str) {
+    let Ok(uri) = target.parse::<Uri>() else {
+        return;
+    };
+    if let Some(host) = uri
+        .authority()
+        .and_then(|a| HeaderValue::from_str(a.as_str()).ok())
+    {
+        parts.headers.insert(HOST, host);
+    }
+    parts.uri = uri;
+}
+
 /// Apply rule-supplied `set_headers` (a request-phase rewrite) to the wire request.
 fn apply_set_headers(headers: &mut HeaderMap, set_headers: &[(String, String)]) {
     for (k, v) in set_headers {
@@ -794,6 +856,33 @@ mod tests {
         assert!(wire.get("x-old").is_none());
         assert!(captured.iter().any(|(k, v)| k == "x-new" && v == "2"));
         assert!(!captured.iter().any(|(k, _)| k == "x-old"));
+    }
+
+    #[test]
+    fn remap_request_target_rewrites_uri_and_host() {
+        let (mut parts, ()) = Request::builder()
+            .uri("https://cdn.example.com/agent_abc_123.js")
+            .header(HOST, "cdn.example.com")
+            .body(())
+            .expect("request")
+            .into_parts();
+        remap_request_target(&mut parts, "http://localhost:8080/ajax/agent_abc_1.js");
+        assert_eq!(parts.uri.to_string(), "http://localhost:8080/ajax/agent_abc_1.js");
+        assert_eq!(
+            parts.headers.get(HOST).and_then(|v| v.to_str().ok()),
+            Some("localhost:8080")
+        );
+    }
+
+    #[test]
+    fn remap_request_target_ignores_unparseable_target() {
+        let (mut parts, ()) = Request::builder()
+            .uri("https://cdn.example.com/x")
+            .body(())
+            .expect("request")
+            .into_parts();
+        remap_request_target(&mut parts, "http://exa mple/x");
+        assert_eq!(parts.uri.to_string(), "https://cdn.example.com/x");
     }
 
     #[tokio::test]

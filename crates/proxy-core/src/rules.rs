@@ -7,8 +7,9 @@
 //!
 //! Within a scenario, rules are evaluated in order; the first *short-circuiting*
 //! action (Respond / `MapLocal` / Block) wins and the request never hits the
-//! network. Non-short-circuiting actions (header/body/status edits) accumulate.
-//! Request-phase actions run in `handle_request`; response-phase in
+//! network. `MapRemote` also ends evaluation, but forwards the request — to a
+//! rewritten URL. Non-short-circuiting actions (header/body/status edits)
+//! accumulate. Request-phase actions run in `handle_request`; response-phase in
 //! `handle_response`.
 
 use std::collections::{HashMap, HashSet};
@@ -122,6 +123,11 @@ pub enum Action {
         #[serde(default = "default_ok")]
         status: u16,
     },
+    /// Forward the request to a different URL instead of the original (Fiddler
+    /// "respond with another URL") — transparent to the client, no redirect.
+    /// With a [`MatchKind::Regex`] matcher, `$1`…`$n` / `${name}` in the target
+    /// insert the pattern's capture groups from the matched URL.
+    MapRemote { url: String },
     /// Drop the request with a 403.
     Block,
 
@@ -281,6 +287,9 @@ pub enum ActionSummary {
     MapLocal {
         status: u16,
     },
+    MapRemote {
+        url: String,
+    },
     Block,
     SetRequestHeader {
         name: String,
@@ -309,6 +318,7 @@ impl From<&Action> for ActionSummary {
                 content_encoding: content_encoding.clone(),
             },
             Action::MapLocal { status, .. } => Self::MapLocal { status: *status },
+            Action::MapRemote { url } => Self::MapRemote { url: url.clone() },
             Action::Block => Self::Block,
             Action::SetRequestHeader { name, .. } => Self::SetRequestHeader { name: name.clone() },
             Action::SetResponseHeader { name, .. } => {
@@ -389,6 +399,16 @@ pub enum RequestOutcome {
     },
     /// Drop the request. Carries the rule's URL label + id.
     Block { rule: String, rule_id: String },
+    /// Forward the request to `url` instead of the original target (Map
+    /// Remote). Ends rule evaluation like a short-circuit, but the request
+    /// still goes on the wire, so header edits accumulated up to the mapping
+    /// rule ride along. Carries the rule's URL label + id.
+    MapRemote {
+        rule: String,
+        rule_id: String,
+        url: String,
+        set_headers: Vec<(String, String)>,
+    },
 }
 
 /// Whether an action runs in the request phase (`handle_request`).
@@ -397,6 +417,7 @@ fn is_request_phase(action: &Action) -> bool {
         action,
         Action::Respond { .. }
             | Action::MapLocal { .. }
+            | Action::MapRemote { .. }
             | Action::Block
             | Action::SetRequestHeader { .. }
             | Action::Cors
@@ -465,6 +486,77 @@ fn read_map_local(path: &str) -> Option<Vec<u8>> {
         return None;
     }
     std::fs::read(path).ok()
+}
+
+/// Rewrite unbraced numeric capture references (`$1`) to their braced form
+/// (`${1}`) before regex expansion. The regex crate parses `$name` greedily
+/// over `[0-9A-Za-z_]`, so a template like `agent_$1_1.js` would reference the
+/// nonexistent group `1_1` and expand to nothing — while every Fiddler/.NET
+/// user means "group 1, then the literal `_1.js`". Braced (`${…}`) and escaped
+/// (`$$`) references pass through untouched, as do named references (`$name` —
+/// group names can't start with a digit, so the digit-run rewrite never
+/// clips one).
+fn brace_numeric_refs(template: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.char_indices().peekable();
+    while let Some((_, c)) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some(&(_, '$')) => {
+                chars.next();
+                out.push_str("$$");
+            }
+            Some(&(start, d)) if d.is_ascii_digit() => {
+                let mut end = start;
+                while let Some(&(i, c)) = chars.peek() {
+                    if !c.is_ascii_digit() {
+                        break;
+                    }
+                    end = i + c.len_utf8();
+                    chars.next();
+                }
+                out.push_str("${");
+                out.push_str(&template[start..end]);
+                out.push('}');
+            }
+            _ => out.push('$'),
+        }
+    }
+    out
+}
+
+/// Whether a Map Remote target is something the proxy can actually forward to:
+/// an absolute `http(s)://` URL with a host.
+fn is_forwardable_url(target: &str) -> bool {
+    match target.parse::<hudsucker::hyper::Uri>() {
+        Ok(uri) => {
+            matches!(uri.scheme_str(), Some("http" | "https")) && uri.host().is_some()
+        }
+        Err(_) => false,
+    }
+}
+
+/// Resolve a `MapRemote` rule's forward target for `req`. With a regex matcher,
+/// `$1`…`$n` / `${name}` in the template expand to the pattern's capture groups
+/// (matched against the same `scheme://host/path` string the matcher saw);
+/// other match kinds use the template verbatim. Returns `None` — the rule is
+/// skipped, like a `MapLocal` with a missing file — when the pattern no longer
+/// compiles/matches or the expansion isn't a forwardable absolute URL.
+fn map_remote_target(matcher: &Matcher, req: &CapturedRequest, template: &str) -> Option<String> {
+    let target = match matcher.url_match {
+        MatchKind::Regex => {
+            let url = format!("{}://{}{}", req.scheme, req.host, req.path);
+            let caps = cached_regex(&matcher.url)?.captures(&url)?;
+            let mut out = String::new();
+            caps.expand(&brace_numeric_refs(template), &mut out);
+            out
+        }
+        MatchKind::Contains | MatchKind::Exact => template.to_string(),
+    };
+    is_forwardable_url(&target).then_some(target)
 }
 
 /// A genuine CORS preflight: `OPTIONS` carrying both `Origin` and
@@ -659,6 +751,19 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
                             headers: vec![("content-type".to_string(), ct)],
                             body: bytes,
                         },
+                    };
+                }
+            }
+            // A target that doesn't expand/parse skips the rule rather than
+            // break the flow, mirroring MapLocal's missing-file behavior.
+            Action::MapRemote { url } => {
+                if let Some(target) = map_remote_target(&rule.matcher, req, url) {
+                    cursors.record_fire(rule);
+                    return RequestOutcome::MapRemote {
+                        rule: rule.label(),
+                        rule_id: rule.id.clone(),
+                        url: target,
+                        set_headers,
                     };
                 }
             }
@@ -951,6 +1056,8 @@ impl AutoResponder {
     /// and shields the active scenario's mocks from general-layer requests),
     /// then the active scenario. Request-header edits from both layers
     /// accumulate; the first short-circuiting action from either layer wins.
+    /// A `MapRemote` from the active scenario keeps the General layer's header
+    /// edits — the request still goes on the wire, just to a different URL.
     pub fn evaluate_request_stateful(
         &self,
         req: &CapturedRequest,
@@ -964,6 +1071,20 @@ impl AutoResponder {
             RequestOutcome::Continue { set_headers } => {
                 merged.extend(set_headers);
                 RequestOutcome::Continue {
+                    set_headers: merged,
+                }
+            }
+            RequestOutcome::MapRemote {
+                rule,
+                rule_id,
+                url,
+                set_headers,
+            } => {
+                merged.extend(set_headers);
+                RequestOutcome::MapRemote {
+                    rule,
+                    rule_id,
+                    url,
                     set_headers: merged,
                 }
             }
@@ -1191,6 +1312,16 @@ fn action_response_text(action: &Action) -> Option<&str> {
     }
 }
 
+/// The URL text a rule's action contributes to a `Url`-scope search (a Map
+/// Remote's target — so searching "localhost:8080" finds the mappings, not
+/// just the matchers).
+fn action_url_text(action: &Action) -> Option<&str> {
+    match action {
+        Action::MapRemote { url } => Some(url),
+        _ => None,
+    }
+}
+
 /// The header name/value text a rule's action contributes to a `Headers`-scope
 /// search: a `Respond`'s header table plus its content-type, and the name/value
 /// of header-setting actions, rendered as one `name: value` per line.
@@ -1219,7 +1350,9 @@ fn action_header_text(action: &Action) -> String {
 fn scope_text_matches(rule: &Rule, scope: RuleSearchScope, needle: &str) -> bool {
     let contains = |text: &str| text.to_lowercase().contains(needle);
     match scope {
-        RuleSearchScope::Url => contains(&rule.matcher.url),
+        RuleSearchScope::Url => {
+            contains(&rule.matcher.url) || action_url_text(&rule.action).is_some_and(contains)
+        }
         RuleSearchScope::Method => rule.matcher.method.as_deref().is_some_and(contains),
         RuleSearchScope::Status => action_status_text(&rule.action).is_some_and(|s| contains(&s)),
         RuleSearchScope::Response => action_response_text(&rule.action).is_some_and(contains),
@@ -3058,5 +3191,162 @@ mod tests {
         ar.ensure_general();
         assert_eq!(ar.scenarios[0].id, GENERAL_SCENARIO_ID);
         assert_eq!(ar.scenarios.len(), 2, "no duplicate General is added");
+    }
+
+    fn map_remote_rule(id: &str, pattern: &str, kind: MatchKind, target: &str) -> Rule {
+        Rule {
+            id: id.to_string(),
+            enabled: true,
+            fire_limit: None,
+            repeat: false,
+            matcher: Matcher {
+                method: None,
+                url: pattern.to_string(),
+                url_match: kind,
+            },
+            action: Action::MapRemote {
+                url: target.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn map_remote_expands_regex_capture_groups() {
+        // The motivating example from issue #111: point an agent script at a
+        // local server, carrying the matched token over via $1 — including the
+        // Fiddler-style `$1_1` form where `_1` is literal text, not part of
+        // the group reference.
+        let rules = vec![map_remote_rule(
+            "m",
+            r".*ruxitagentjs_(\w+)_\d+\.js",
+            MatchKind::Regex,
+            "http://localhost:8080/ajax/ruxitagentjs_$1_1.js",
+        )];
+        let request = req(
+            "GET",
+            "https",
+            "cdn.example.com",
+            "/ruxitagentjs_A2qru_10240521134502.js",
+        );
+        match evaluate_request_rules(&rules, &request) {
+            RequestOutcome::MapRemote { url, rule_id, .. } => {
+                assert_eq!(url, "http://localhost:8080/ajax/ruxitagentjs_A2qru_1.js");
+                assert_eq!(rule_id, "m");
+            }
+            other => panic!("expected MapRemote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_remote_expands_named_groups() {
+        let rules = vec![map_remote_rule(
+            "m",
+            r"https://[^/]+/api/(?P<rest>.*)",
+            MatchKind::Regex,
+            "http://localhost:8080/${rest}",
+        )];
+        match evaluate_request_rules(&rules, &req("GET", "https", "api.test", "/api/users?page=2")) {
+            RequestOutcome::MapRemote { url, .. } => {
+                assert_eq!(url, "http://localhost:8080/users?page=2");
+            }
+            other => panic!("expected MapRemote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_remote_contains_matcher_uses_target_verbatim() {
+        let rules = vec![map_remote_rule(
+            "m",
+            "/api/",
+            MatchKind::Contains,
+            "http://localhost:9000/mock",
+        )];
+        match evaluate_request_rules(&rules, &req("GET", "https", "api.test", "/api/users")) {
+            RequestOutcome::MapRemote { url, .. } => {
+                assert_eq!(url, "http://localhost:9000/mock");
+            }
+            other => panic!("expected MapRemote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_remote_invalid_target_skips_to_next_rule() {
+        // A relative (or otherwise unforwardable) target skips the rule instead
+        // of breaking the flow — the later mock still fires.
+        let rules = vec![
+            map_remote_rule("m", "/x", MatchKind::Contains, "/not-absolute"),
+            respond_rule("fallback", "/x"),
+        ];
+        match evaluate_request_rules(&rules, &req("GET", "https", "h", "/x")) {
+            RequestOutcome::Respond { rule_id, .. } => assert_eq!(rule_id, "fallback"),
+            other => panic!("expected the fallback mock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_remote_carries_header_edits_from_both_layers() {
+        let ar = ar_with(
+            vec![req_header_rule("g", "/x", "x-general", "1")],
+            Some((
+                "A",
+                vec![
+                    req_header_rule("a", "/x", "x-active", "1"),
+                    map_remote_rule("m", "/x", MatchKind::Contains, "http://localhost:1234/x"),
+                ],
+            )),
+            true,
+        );
+        match ar.evaluate_request(&req("GET", "https", "h", "/x")) {
+            RequestOutcome::MapRemote { url, set_headers, .. } => {
+                assert_eq!(url, "http://localhost:1234/x");
+                assert_eq!(
+                    set_headers,
+                    vec![
+                        ("x-general".to_string(), "1".to_string()),
+                        ("x-active".to_string(), "1".to_string()),
+                    ],
+                    "General-layer edits ride along, first"
+                );
+            }
+            other => panic!("expected MapRemote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_remote_respects_fire_limit() {
+        let mut rule = map_remote_rule("m", "/x", MatchKind::Contains, "http://localhost:1234/x");
+        rule.fire_limit = Some(1);
+        let rules = vec![rule];
+        let mut cursors = RuleCursors::default();
+        let request = req("GET", "https", "h", "/x");
+        assert!(matches!(
+            evaluate_request_rules_stateful(&rules, &request, &mut cursors),
+            RequestOutcome::MapRemote { .. }
+        ));
+        assert!(
+            matches!(
+                evaluate_request_rules_stateful(&rules, &request, &mut cursors),
+                RequestOutcome::Continue { .. }
+            ),
+            "a spent map rule passes the request through"
+        );
+    }
+
+    #[test]
+    fn brace_numeric_refs_rewrites_only_unbraced_numbers() {
+        assert_eq!(brace_numeric_refs("a_$1_1.js"), "a_${1}_1.js");
+        assert_eq!(brace_numeric_refs("$10x"), "${10}x");
+        assert_eq!(brace_numeric_refs("$$1"), "$$1", "escaped $ is untouched");
+        assert_eq!(brace_numeric_refs("${1}b"), "${1}b", "already braced is untouched");
+        assert_eq!(brace_numeric_refs("$name"), "$name", "named refs are untouched");
+        assert_eq!(brace_numeric_refs("end$"), "end$");
+    }
+
+    #[test]
+    fn url_scope_search_matches_map_remote_target() {
+        let rule = map_remote_rule("m", "/api", MatchKind::Contains, "http://localhost:8080/mock");
+        assert!(rule_matches_scope(&rule, RuleSearchScope::Url, "localhost:8080"));
+        assert!(rule_matches_scope(&rule, RuleSearchScope::All, "localhost:8080"));
+        assert!(!rule_matches_scope(&rule, RuleSearchScope::Url, "elsewhere"));
     }
 }

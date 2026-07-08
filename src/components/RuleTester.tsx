@@ -16,6 +16,7 @@ const OUTCOME: Record<TestResult["outcome"], { label: string; cls: string }> = {
   respond: { label: "Auto-responded (short-circuit)", cls: "respond" },
   block: { label: "Blocked", cls: "block" },
   continue: { label: "Forwarded upstream", cls: "continue" },
+  mapRemote: { label: "Forwarded to mapped URL", cls: "map-remote" },
 };
 
 function SequenceStrip({ sequence, loops }: { sequence: SequenceStep[]; loops: boolean }) {
@@ -29,7 +30,7 @@ function SequenceStrip({ sequence, loops }: { sequence: SequenceStep[]; loops: b
             className={`seq-chip ${step.outcome}`}
             title={step.rule ?? "forwarded upstream"}
           >
-            {step.status === null ? "→ upstream" : step.status}
+            {step.outcome === "mapRemote" ? "→ mapped" : (step.status ?? "→ upstream")}
           </span>
         ))}
         {loops && (
@@ -156,6 +157,12 @@ function TestResultView({ result }: { result: TestResult }) {
           matched: {result.matchedRules.length ? result.matchedRules.join(", ") : "none"}
         </span>
       </div>
+
+      {result.mappedUrl && (
+        <div className="mapped-url" title="Where the request is actually sent">
+          → <code>{result.mappedUrl}</code>
+        </div>
+      )}
 
       {result.notes.map((n, i) => (
         <div key={i} className="muted small note">

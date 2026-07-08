@@ -1498,6 +1498,93 @@ mod tests {
         c.stop().await;
     }
 
+    /// End-to-end Map Remote (issue #111): a request through the LIVE proxy for
+    /// a host that doesn't exist is transparently forwarded to the mapped local
+    /// server, with `$1` expanded from the regex matcher, the Host header
+    /// rewritten to the new authority, and the rule stamped as Mocked-by.
+    #[tokio::test]
+    async fn map_remote_forwards_through_the_live_proxy() {
+        use std::io::{Read, Write};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // The mapped-to server: records the request head it receives.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mapped server");
+        let mapped_addr = listener.local_addr().expect("addr");
+        let (head_tx, head_rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let _ = head_tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nmapped");
+                let _ = s.flush();
+            }
+        });
+
+        let c = controller();
+        let mut ar = AutoResponder::default();
+        ar.ensure_general();
+        ar.scenarios.push(Scenario {
+            id: "s".to_string(),
+            name: "s".to_string(),
+            rules: vec![Rule {
+                id: "map".to_string(),
+                enabled: true,
+                fire_limit: None,
+                repeat: false,
+                matcher: Matcher {
+                    method: None,
+                    url: r".*agent_(\w+)_\d+\.js".to_string(),
+                    url_match: MatchKind::Regex,
+                },
+                action: Action::MapRemote {
+                    url: format!("http://{mapped_addr}/ajax/agent_$1_1.js"),
+                },
+            }],
+        });
+        ar.active_scenario_id = Some("s".to_string());
+        c.set_autoresponder(ar);
+
+        let proxy_addr = c.start(loopback(0)).await.expect("start proxy");
+
+        // Plain-HTTP forward-proxy request for an unresolvable host — only the
+        // Map Remote rewrite can produce a 200.
+        let mut client = tokio::net::TcpStream::connect(proxy_addr).await.expect("connect proxy");
+        client
+            .write_all(
+                b"GET http://origin.invalid/js/agent_A2qru_10240521.js HTTP/1.1\r\n\
+                  Host: origin.invalid\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .expect("send through proxy");
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.expect("read response");
+        let response = String::from_utf8_lossy(&response);
+        assert!(response.starts_with("HTTP/1.1 200"), "unexpected response: {response}");
+        assert!(response.ends_with("mapped"), "unexpected response: {response}");
+
+        // The mapped server saw the expanded path and its own authority as Host.
+        let head = head_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("mapped server was hit");
+        assert!(
+            head.starts_with("GET /ajax/agent_A2qru_1.js HTTP/1.1"),
+            "wire request: {head}"
+        );
+        assert!(
+            head.to_lowercase().contains(&format!("host: {mapped_addr}")),
+            "wire request: {head}"
+        );
+
+        // The flow records the ORIGINAL URL and the map rule as its provenance.
+        let flow = c.list_flows().pop().expect("one captured flow");
+        assert_eq!(flow.host, "origin.invalid");
+        assert_eq!(flow.matched_rule.as_deref(), Some(r".*agent_(\w+)_\d+\.js"));
+
+        c.stop().await;
+    }
+
     #[tokio::test]
     async fn check_availability_caches_verdict_and_emits_row() {
         use std::io::{Read, Write};

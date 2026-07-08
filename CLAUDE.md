@@ -198,6 +198,14 @@ left-bar + optional **Origin** column, filterable with `is:imported`/`is:capture
 with a **Delete captured** action (`remove_captured_flows`) that prunes live
 traffic while keeping the imported reference (issue #49).
 
+**Map remote** (issue #111): the `mapRemote` rule action transparently forwards
+a matched request to another URL (no client-visible redirect) — with a regex
+matcher, `$1`/`${name}` in the target expand to the pattern's capture groups
+(`brace_numeric_refs` in `rules.rs` normalizes Fiddler-style `$1_1` so `_1`
+stays literal text). An unexpandable/non-http(s) target skips the rule (like a
+missing Map Local file); the rule label lands in **Mocked-by** via
+`Inflight::rule`, including on a 502 from a dead target.
+
 **Compare & diff** (issue #86): select rows → Compare opens a real, singleton
 **compare OS window** (label `compare`, rule-window pattern: `?compare=1` route
 in `main.tsx` → `CompareWindow.tsx`; the shared open-or-focus helper lives in

@@ -41,6 +41,13 @@ describe("ruleMatchesScopeClient", () => {
     expect(ruleMatchesScopeClient(rule(), "url", "/static")).toBe(false);
   });
 
+  it("matches a Map Remote target under the url scope", () => {
+    const mapped = rule({}, { kind: "mapRemote", url: "http://localhost:8080/mock" });
+    expect(ruleMatchesScopeClient(mapped, "url", "localhost:8080")).toBe(true);
+    expect(ruleMatchesScopeClient(mapped, "url", "/api/login")).toBe(true);
+    expect(ruleMatchesScopeClient(mapped, "url", "elsewhere")).toBe(false);
+  });
+
   it("matches on method", () => {
     expect(ruleMatchesScopeClient(rule(), "method", "post")).toBe(true);
     expect(ruleMatchesScopeClient(rule(), "method", "get")).toBe(false);

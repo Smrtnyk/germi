@@ -137,6 +137,16 @@ export type Action =
       contentEncoding: string | null;
     }
   | { kind: "mapLocal"; path: string; status: number }
+  | {
+      /**
+       * Forward the request to a different URL instead of the original
+       * (Fiddler "respond with another URL") — transparent to the client, no
+       * redirect. With a regex matcher, `$1`…`$n` / `${name}` in the target
+       * insert the pattern's capture groups from the matched URL.
+       */
+      kind: "mapRemote";
+      url: string;
+    }
   | { kind: "block" }
   | { kind: "setRequestHeader"; name: string; value: string }
   | { kind: "setResponseHeader"; name: string; value: string }
@@ -158,6 +168,7 @@ export interface Rule {
 export type ActionSummary =
   | { kind: "respond"; status: number; contentType: string | null; contentEncoding: string | null }
   | { kind: "mapLocal"; status: number }
+  | { kind: "mapRemote"; url: string }
   | { kind: "block" }
   | { kind: "setRequestHeader"; name: string }
   | { kind: "setResponseHeader"; name: string }
@@ -305,7 +316,7 @@ export interface SequenceStep {
 
 export interface TestResult {
   matchedRules: string[];
-  outcome: "respond" | "block" | "continue";
+  outcome: "respond" | "block" | "continue" | "mapRemote";
   shortCircuit: boolean;
   firedRule: string | null;
   effectiveRequestHeaders: [string, string][];
@@ -313,4 +324,6 @@ export interface TestResult {
   notes: string[];
   sequence: SequenceStep[];
   sequenceLoops: boolean;
+  /** Where a Map Remote rule forwards the request (capture groups expanded). */
+  mappedUrl: string | null;
 }
