@@ -15,7 +15,7 @@ workspace = true
 # connection negotiates http/1.1). Flip on the "http2" feature in phase 2.
 hudsucker = "=0.24.1"
 
-tokio = { version = "=1.52.3", features = ["rt-multi-thread", "sync", "macros", "net", "signal", "time"] }
+tokio = { version = "=1.52.3", features = ["rt-multi-thread", "sync", "macros", "net", "signal", "time", "io-util"] }
 http-body-util = "=0.1.3"
 bytes = "=1.12.0"
 

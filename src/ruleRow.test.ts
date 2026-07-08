@@ -121,6 +121,10 @@ describe("actionLabel", () => {
 
   it("labels the non-respond actions", () => {
     expect(actionLabel({ kind: "mapLocal", status: 200 })).toBe("file → 200");
+    expect(actionLabel({ kind: "mapRemote", url: "http://localhost:8080/x_$1.js" })).toBe(
+      "→ http://localhost:8080/x_$1.js",
+    );
+    expect(actionLabel({ kind: "mapRemote", url: "" })).toBe("→ URL");
     expect(actionLabel({ kind: "block" })).toBe("block 403");
     expect(actionLabel({ kind: "setStatus", status: 404 })).toBe("status 404");
     expect(actionLabel({ kind: "setResponseHeader", name: "X-Cache" })).toBe("resp X-Cache");

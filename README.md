@@ -63,8 +63,10 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
 - **Capture & inspect** — virtualized traffic list; content-aware inspector with
   decoded gzip/br/deflate bodies, pretty/raw, hex view, and image preview.
 - **Auto-responder** — rules grouped into switchable **scenarios** (one active, or
-  Off). Each rule is `matcher → action`: auto-respond, map-local-file, block, set
-  request/response header, set status, or regex-rewrite the body. Built-in **offline
+  Off). Each rule is `matcher → action`: auto-respond, map-local-file, map-remote
+  (transparently forward to another URL, with `$1` regex capture groups — e.g. match
+  `.*agent_(\w+)_\d+\.js`, forward to `http://localhost:8080/agent_$1_1.js`), block,
+  set request/response header, set status, or regex-rewrite the body. Built-in **offline
   tester**, lazy-loaded rule details, and SQLite-backed persistence. Manage the rule
   list with the keyboard: **Shift/Ctrl-⌘-click** multi-selects, **Ctrl/⌘ A** selects
   all, and **Del** deletes the selection in one undoable step (editing is disabled

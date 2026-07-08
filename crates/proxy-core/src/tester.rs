@@ -65,7 +65,7 @@ pub struct SequenceStep {
 pub struct TestResult {
     /// Names of every enabled rule whose matcher matches the request.
     pub matched_rules: Vec<String>,
-    /// "respond" | "block" | "continue".
+    /// "respond" | "block" | "continue" | "mapRemote".
     pub outcome: String,
     pub short_circuit: bool,
     /// The single rule that actually produced the outcome, if any.
@@ -77,6 +77,8 @@ pub struct TestResult {
     pub notes: Vec<String>,
     pub sequence: Vec<SequenceStep>,
     pub sequence_loops: bool,
+    /// Where a Map Remote rule forwards the request (capture groups expanded).
+    pub mapped_url: Option<String>,
 }
 
 /// Split a URL/pattern into `(scheme, host, path)`, matching how the live
@@ -176,6 +178,14 @@ fn preview_sequence(rules: &[Rule], req: &CapturedRequest) -> (Vec<SequenceStep>
                 });
                 is_terminal_rule(rule_id)
             }
+            RequestOutcome::MapRemote { rule, rule_id, .. } => {
+                steps.push(SequenceStep {
+                    outcome: "mapRemote".into(),
+                    status: None,
+                    rule: Some(rule.clone()),
+                });
+                is_terminal_rule(rule_id)
+            }
             RequestOutcome::Continue { .. } => {
                 steps.push(SequenceStep {
                     outcome: "continue".into(),
@@ -253,6 +263,7 @@ pub(crate) fn test_rule_slice(rules: &[Rule], input: &TestInput) -> TestResult {
                 notes,
                 sequence,
                 sequence_loops,
+                mapped_url: None,
             }
         }
         RequestOutcome::Block { rule, .. } => {
@@ -273,7 +284,17 @@ pub(crate) fn test_rule_slice(rules: &[Rule], input: &TestInput) -> TestResult {
                 notes,
                 sequence,
                 sequence_loops,
+                mapped_url: None,
             }
+        }
+        RequestOutcome::MapRemote { rule, url, set_headers, .. } => {
+            notes.push(format!(
+                "Rule \u{201c}{rule}\u{201d} forwards this request to {url} — the response below is the sample upstream response."
+            ));
+            let base = continue_result(
+                rules, input, &req, &set_headers, matched_rules, notes, sequence, sequence_loops,
+            );
+            map_remote_result(base, rule, url)
         }
         RequestOutcome::Continue { set_headers } => continue_result(
             rules,
@@ -286,6 +307,16 @@ pub(crate) fn test_rule_slice(rules: &[Rule], input: &TestInput) -> TestResult {
             sequence_loops,
         ),
     }
+}
+
+/// Rebrand a `continue` preview as a Map Remote one — the tester has no
+/// network, so the mapped target's real response can't be fetched; the sample
+/// upstream response stands in, and the rule + expanded target are surfaced.
+fn map_remote_result(mut base: TestResult, rule: String, url: String) -> TestResult {
+    base.outcome = "mapRemote".to_string();
+    base.fired_rule = Some(rule);
+    base.mapped_url = Some(url);
+    base
 }
 
 /// Run the response-phase rules over a rule-synthesized response, mirroring the
@@ -376,6 +407,7 @@ fn continue_result(
         notes,
         sequence,
         sequence_loops,
+        mapped_url: None,
     }
 }
 
@@ -795,5 +827,37 @@ mod tests {
             .headers
             .iter()
             .any(|(k, v)| k == "access-control-allow-origin" && v == "*"));
+    }
+
+    #[test]
+    fn previews_map_remote_with_expanded_target() {
+        let rules = RuleSet {
+            rules: vec![Rule {
+                id: "map".into(),
+                enabled: true,
+                fire_limit: None,
+                repeat: false,
+                matcher: Matcher {
+                    method: None,
+                    url: r".*agent_(\w+)\.js".into(),
+                    url_match: MatchKind::Regex,
+                },
+                action: Action::MapRemote {
+                    url: "http://localhost:8080/ajax/agent_$1.js".into(),
+                },
+            }],
+        };
+        let result = test_rules(&rules, &get_input("https://cdn.test/agent_abc.js"));
+        assert_eq!(result.outcome, "mapRemote");
+        assert!(!result.short_circuit, "the request still goes on the wire");
+        assert_eq!(result.fired_rule.as_deref(), Some(r".*agent_(\w+)\.js"));
+        assert_eq!(
+            result.mapped_url.as_deref(),
+            Some("http://localhost:8080/ajax/agent_abc.js")
+        );
+        // The preview response is the sample upstream one — the tester has no
+        // network to fetch the mapped target.
+        assert_eq!(result.response.unwrap().status, 200);
+        assert!(result.notes.iter().any(|n| n.contains("localhost:8080")));
     }
 }

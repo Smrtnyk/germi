@@ -70,6 +70,8 @@ export function actionLabel(a: ActionSummary): string {
       }`;
     case "mapLocal":
       return `file → ${a.status}`;
+    case "mapRemote":
+      return `→ ${a.url || "URL"}`;
     case "block":
       return "block 403";
     case "setStatus":

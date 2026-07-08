@@ -2500,6 +2500,16 @@ code {
   background: #16304d;
   color: var(--s3);
 }
+.outcome-badge.map-remote {
+  background: #2c2344;
+  color: var(--imported);
+}
+.mapped-url {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  color: var(--imported);
+  word-break: break-all;
+}
 .result-response {
   display: flex;
   flex-direction: column;
@@ -2545,6 +2555,10 @@ code {
 .seq-chip.continue {
   border-color: var(--s3);
   color: var(--s3);
+}
+.seq-chip.mapRemote {
+  border-color: var(--imported);
+  color: var(--imported);
 }
 .seq-chip.loops {
   border-color: var(--warn);

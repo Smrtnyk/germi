@@ -643,6 +643,7 @@ fn action_columns(action: &Action) -> (&'static str, Option<u16>, Option<&str>, 
             ..
         } => ("respond", Some(*status), content_type.as_deref(), None),
         Action::MapLocal { status, .. } => ("mapLocal", Some(*status), None, None),
+        Action::MapRemote { .. } => ("mapRemote", None, None, None),
         Action::Block => ("block", None, None, None),
         Action::SetRequestHeader { name, .. } => {
             ("setRequestHeader", None, None, Some(name.as_str()))
@@ -759,6 +760,37 @@ mod tests {
         assert!(matches!(
             &rules[1].action,
             Action::Respond { body, .. } if body == "first"
+        ));
+
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn map_remote_rule_round_trips() {
+        let dir = test_dir("map-remote");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+
+        let mut mapped = rule("map", "unused");
+        mapped.matcher.url = r".*agent_(\w+)\.js".to_string();
+        mapped.matcher.url_match = MatchKind::Regex;
+        mapped.action = Action::MapRemote {
+            url: "http://localhost:8080/ajax/agent_$1.js".to_string(),
+        };
+        let ar = AutoResponder {
+            scenarios: vec![Scenario {
+                id: "scenario".to_string(),
+                name: "Scenario".to_string(),
+                rules: vec![mapped],
+            }],
+            active_scenario_id: Some("scenario".to_string()),
+            general_active: true,
+        };
+        store.replace(&ar).expect("persist map-remote rule");
+
+        let loaded = store.load().expect("reload store");
+        assert!(matches!(
+            &user(&loaded).rules[0].action,
+            Action::MapRemote { url } if url == "http://localhost:8080/ajax/agent_$1.js"
         ));
 
         std::fs::remove_dir_all(dir).expect("remove temp dir");

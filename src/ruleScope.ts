@@ -10,10 +10,16 @@ function actionStatus(action: ActionSummary): string {
   return "status" in action ? String(action.status) : "";
 }
 
+/** A Map Remote's target counts as URL text, mirroring the backend's
+ *  `action_url_text` — searching "localhost:8080" finds the mappings. */
+function actionUrl(action: ActionSummary): string {
+  return action.kind === "mapRemote" ? action.url : "";
+}
+
 function shallowFieldFor(rule: RuleSummary, scope: RuleSearchScope): string {
   switch (scope) {
     case "url":
-      return rule.matcher.url;
+      return `${rule.matcher.url}\n${actionUrl(rule.action)}`;
     case "method":
       return rule.matcher.method ?? "";
     case "status":
