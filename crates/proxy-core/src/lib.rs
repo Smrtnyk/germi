@@ -33,6 +33,7 @@ mod rules_export;
 mod scripting;
 mod session;
 mod settings;
+mod settings_io;
 mod shared;
 mod store;
 mod tester;
@@ -64,6 +65,7 @@ pub use rules::{
 pub use rules_export::RulesExport;
 pub use scripting::{Script, ScriptDiagnostic};
 pub use settings::ProxySettings;
+pub use settings_io::{export_sections, import_preview, merge_import, section_summaries, SectionSummary};
 pub use tester::{test_rules, SequenceStep, TestInput, TestResponse, TestResult};
 
 use handler::CaptureHandler;

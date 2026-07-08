@@ -192,7 +192,14 @@ traffic columns (timing/TTFB, per-flow comments, pinned-header columns), a
 multi-section Settings panel (Connections incl. allow-remote, Certificates
 export+regenerate, host exclusion, Capture filter + max-flows + capture-on-start,
 response-delay throttling), settings import/export, and `.germi` session
-save/open. Provenance is covered by the **Mocked-by** column and an **imported**
+save/open. Settings import/export is **partial by section** (issue #112): a
+checklist dialog (`SettingsSectionsDialog.tsx`) picks what to export, and import
+is two-phase (`peek_settings_import` previews the picked file's sections →
+`apply_settings_import` merges only the selected, present fields — the file text
+waits in an `AppState` mailbox). The section registry + filter/preview/merge
+logic lives in `proxy-core/src/settings_io.rs`; a test forces every
+`ProxySettings` field into exactly one section, so extend `SETTINGS_SECTIONS`
+when adding a field. Provenance is covered by the **Mocked-by** column and an **imported**
 row marker (flows loaded from a file carry `Flow::imported`; shown as a violet
 left-bar + optional **Origin** column, filterable with `is:imported`/`is:captured`),
 with a **Delete captured** action (`remove_captured_flows`) that prunes live

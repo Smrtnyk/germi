@@ -1006,11 +1006,19 @@ pub async fn import_rules(
     Ok(count)
 }
 
-/// Export the current proxy settings to a user-chosen JSON file.
+/// Section summaries of the CURRENT settings — drives the export checklist.
+#[tauri::command]
+pub fn get_settings_sections(state: State<'_, AppState>) -> Vec<proxy_core::SectionSummary> {
+    proxy_core::section_summaries(&state.controller.get_settings())
+}
+
+/// Export the selected settings sections to a user-chosen JSON file
+/// (issue #112: partial export via checklist).
 #[tauri::command]
 pub async fn export_settings(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    sections: Vec<String>,
 ) -> Result<bool, String> {
     let Some(picked) = app
         .dialog()
@@ -1022,19 +1030,20 @@ pub async fn export_settings(
         return Ok(false);
     };
     let path = picked.into_path().map_err(|e| e.to_string())?;
-    let settings = state.controller.get_settings();
-    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    let text = proxy_core::export_sections(&state.controller.get_settings(), &sections);
     crate::persist::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
-/// Import proxy settings from a JSON file, applying + persisting them. Returns
-/// the new settings (or the unchanged current settings if cancelled).
+/// Phase 1 of a settings import: pick a file, validate it, and return which
+/// sections it carries so the user can review them before anything is applied.
+/// The file's text is parked on `AppState` for `apply_settings_import`.
+/// Returns `None` if the picker was cancelled.
 #[tauri::command]
-pub async fn import_settings(
+pub async fn peek_settings_import(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> Result<ProxySettings, String> {
+) -> Result<Option<Vec<proxy_core::SectionSummary>>, String> {
     // Don't let a viewer persist imported settings over the capturing instance's
     // shared settings.json (see `set_settings`).
     if state.viewer {
@@ -1046,15 +1055,38 @@ pub async fn import_settings(
         .add_filter("Germi settings", &["json"])
         .blocking_pick_file()
     else {
-        return Ok(state.controller.get_settings());
+        return Ok(None);
     };
     let path = picked.into_path().map_err(|e| e.to_string())?;
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let settings: ProxySettings =
-        serde_json::from_str(&text).map_err(|e| format!("Invalid settings file: {e}"))?;
-    state.controller.set_settings(settings.clone());
-    crate::persist::save_settings(&state.ca_dir, &settings);
-    Ok(settings)
+    let preview = proxy_core::import_preview(&text)?;
+    if let Ok(mut slot) = state.pending_settings_import.lock() {
+        *slot = Some(text);
+    }
+    Ok(Some(preview))
+}
+
+/// Phase 2: merge the selected sections of the previously peeked file into the
+/// current settings, apply + persist them, and return the result. Sections the
+/// user unchecked — and fields the file doesn't carry — keep their values.
+#[tauri::command]
+pub async fn apply_settings_import(
+    state: State<'_, AppState>,
+    sections: Vec<String>,
+) -> Result<ProxySettings, String> {
+    if state.viewer {
+        return Err("Settings import is disabled in viewer mode".to_string());
+    }
+    let text = state
+        .pending_settings_import
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+        .ok_or_else(|| "No settings file pending — pick one first".to_string())?;
+    let merged = proxy_core::merge_import(&state.controller.get_settings(), &text, &sections)?;
+    state.controller.set_settings(merged.clone());
+    crate::persist::save_settings(&state.ca_dir, &merged);
+    Ok(merged)
 }
 
 // ---- undo / redo history ----

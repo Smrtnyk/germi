@@ -14,11 +14,12 @@ import {
 } from "../shortcuts";
 import { useHotkeyMode } from "../useHotkeyMode";
 import type { AutoLayout } from "../appState";
-import type { ProxySettings } from "../types";
+import type { ProxySettings, SettingsSectionSummary } from "../types";
 import { useToast } from "../toast";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { ColumnsSettings } from "./ColumnsSettings";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { SettingsSectionsDialog } from "./SettingsSectionsDialog";
 import { IconClose, IconWarn } from "./icons";
 import { Button } from "./ui/Button";
 import { IconButton } from "./ui/IconButton";
@@ -231,7 +232,7 @@ function CaptureSection({ settings, onChange }: SectionProps) {
   }
 
   return (
-    <div className="settings-pane">
+    <div className="settings-pane fill">
       <h4>Capture</h4>
       <div className="row">
         <label>Keep last</label>
@@ -636,7 +637,7 @@ function InterceptionSection({ settings, onChange }: SectionProps) {
   }
 
   return (
-    <div className="settings-pane">
+    <div className="settings-pane fill">
       <h4>Host exclusions</h4>
       <p className="muted small">
         Listed hosts bypass Germi entirely — their HTTPS is tunneled straight through without
@@ -721,7 +722,8 @@ export function SettingsDialog({
 }: SettingsDialogProps) {
   const notify = useToast();
   const [active, setActive] = useState(loadSection);
-  const [pendingImport, setPendingImport] = useState(false);
+  const [exportSections, setExportSections] = useState<SettingsSectionSummary[] | null>(null);
+  const [importPreview, setImportPreview] = useState<SettingsSectionSummary[] | null>(null);
   const section = SECTIONS.find((s) => s.id === active) ?? SECTIONS[0];
 
   useEffect(() => {
@@ -732,18 +734,33 @@ export function SettingsDialog({
     }
   }, [active]);
 
-  async function exportSettings() {
+  async function startExport() {
     try {
-      const ok = await api.exportSettings();
+      setExportSections(await api.getSettingsSections());
+    } catch (e) {
+      notify("error", String(e));
+    }
+  }
+  async function exportSettings(sections: string[]) {
+    setExportSections(null);
+    try {
+      const ok = await api.exportSettings(sections);
       if (ok) notify("success", "Settings exported");
     } catch (e) {
       notify("error", String(e));
     }
   }
-  async function importSettings() {
-    setPendingImport(false);
+  async function startImport() {
     try {
-      onImportApplied(await api.importSettings());
+      setImportPreview(await api.peekSettingsImport());
+    } catch (e) {
+      notify("error", String(e));
+    }
+  }
+  async function importSettings(sections: string[]) {
+    setImportPreview(null);
+    try {
+      onImportApplied(await api.applySettingsImport(sections));
       notify("success", "Settings imported");
     } catch (e) {
       notify("error", String(e));
@@ -793,12 +810,12 @@ export function SettingsDialog({
           <div className="settings-foot">
             <div className="settings-foot-left">
               <Button
-                onClick={() => setPendingImport(true)}
-                title="Import settings from a JSON file (overwrites current settings)"
+                onClick={startImport}
+                title="Import settings from a JSON file (you'll review what it changes first)"
               >
                 Import…
               </Button>
-              <Button onClick={exportSettings} title="Export settings to a JSON file">
+              <Button onClick={startExport} title="Export selected settings to a JSON file">
                 Export…
               </Button>
             </div>
@@ -807,13 +824,24 @@ export function SettingsDialog({
             </Button>
           </div>
 
-          {pendingImport && (
-            <ConfirmDialog
-              title="Import settings?"
-              message="This overwrites all current proxy settings (port, exclusions, capture filter, throttling, columns, highlight colors) with the contents of the file you pick. This can't be undone."
-              confirmLabel="Choose file & import"
+          {exportSections && (
+            <SettingsSectionsDialog
+              title="Export settings"
+              message="Pick what goes into the file — e.g. only host exclusions to share them with colleagues."
+              sections={exportSections}
+              confirmLabel="Export…"
+              onConfirm={exportSettings}
+              onCancel={() => setExportSections(null)}
+            />
+          )}
+          {importPreview && (
+            <SettingsSectionsDialog
+              title="Import settings"
+              message="The file contains the settings below. Checked ones replace your current values; everything else is kept as it is."
+              sections={importPreview}
+              confirmLabel="Import"
               onConfirm={importSettings}
-              onCancel={() => setPendingImport(false)}
+              onCancel={() => setImportPreview(null)}
             />
           )}
         </>

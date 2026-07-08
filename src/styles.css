@@ -2186,6 +2186,43 @@ textarea {
   margin: 0 0 8px;
 }
 
+/* ---- settings section checklist (partial import/export, issue #112) ---- */
+.sections-modal {
+  width: min(480px, 92vw);
+}
+.sections-modal h3 {
+  margin: 0 0 8px;
+}
+.sections-all {
+  display: flex;
+  gap: var(--space-3);
+  margin: var(--space-5) 0 var(--space-3);
+}
+.sections-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: min(340px, 50vh);
+  overflow-y: auto;
+}
+.sections-list .check-row {
+  margin: 0;
+  padding: var(--space-3) var(--space-2);
+  border-radius: var(--radius-sm);
+}
+.sections-list .check-row:hover {
+  background: var(--bg-2);
+}
+.sections-list .section-label {
+  flex: none;
+}
+.sections-list .section-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---- settings panel ---- */
 .settings-modal {
   width: min(900px, 90vw);
@@ -2357,6 +2394,11 @@ textarea {
 .excluded-empty {
   padding: 6px 0;
 }
+.settings-pane.fill {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
 .excluded-list {
   list-style: none;
   margin: 0;
@@ -2364,7 +2406,8 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  max-height: 240px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
 .excluded-list li {

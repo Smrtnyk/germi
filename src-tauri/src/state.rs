@@ -23,6 +23,10 @@ pub struct AppState {
     /// than URL params (no length limit for a select-all seed) and it survives
     /// a webview reload of the compare window.
     pub compare_seed: Mutex<Option<crate::commands::CompareSeed>>,
+    /// Settings file picked by `peek_settings_import`, held until the user
+    /// confirms the previewed sections and `apply_settings_import` merges it
+    /// (issue #112).
+    pub pending_settings_import: Mutex<Option<String>>,
     /// Live XDG `GlobalShortcuts` portal binding (Wayland global hotkey).
     pub portal_hotkey: crate::portal_hotkey::PortalHotkey,
     /// Launched with `--viewer`: the proxy engine is disabled (this instance
