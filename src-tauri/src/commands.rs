@@ -901,6 +901,7 @@ pub fn search_rules(
 pub async fn save_session(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    include_rules: bool,
 ) -> Result<bool, String> {
     let Some(picked) = app
         .dialog()
@@ -915,9 +916,40 @@ pub async fn save_session(
     // Atomic write: overwriting an existing (possibly large) capture that fails
     // mid-write would otherwise destroy the old file and leave a truncated,
     // unopenable one. Stage to a temp sibling then rename.
-    let bytes = state.controller.export_har();
+    let bytes = state.controller.export_har(include_rules);
     crate::persist::write_atomic(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(true)
+}
+
+/// What an open delivered: the flow count plus, for a Germi-written HAR that
+/// embeds mock rules, a per-scenario preview the UI turns into an import offer
+/// (issue #113). The bundle itself waits in `AppState::pending_har_rules` for
+/// `apply_har_rules`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenedCapture {
+    pub count: usize,
+    pub embedded_rules: Option<Vec<proxy_core::ScenarioPreview>>,
+}
+
+/// Peek an opened capture for an embedded `_germiRules` bundle and park it for
+/// `apply_har_rules`. A file without a usable bundle CLEARS the mailbox, so a
+/// stale offer can never apply rules from an earlier file.
+fn stash_embedded_rules(
+    state: &State<'_, AppState>,
+    bytes: &[u8],
+    ext: &str,
+) -> Option<Vec<proxy_core::ScenarioPreview>> {
+    let bundle = if ext == "har" {
+        proxy_core::har_embedded_rules(bytes)
+    } else {
+        None
+    };
+    let preview = bundle.as_deref().and_then(proxy_core::preview_rules);
+    if let Ok(mut slot) = state.pending_har_rules.lock() {
+        *slot = if preview.is_some() { bundle } else { None };
+    }
+    preview
 }
 
 /// Show the capture-file picker (.har / .saz) and read the chosen file.
@@ -948,15 +980,18 @@ fn pick_capture_file(app: &tauri::AppHandle) -> Result<Option<(Vec<u8>, String)>
 pub async fn open_capture(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> Result<Option<usize>, String> {
+) -> Result<Option<OpenedCapture>, String> {
     let Some((bytes, ext)) = pick_capture_file(&app)? else {
         return Ok(None);
     };
-    state
+    let count = state
         .controller
         .open_capture(&bytes, &ext)
-        .map(Some)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(Some(OpenedCapture {
+        count,
+        embedded_rules: stash_embedded_rules(&state, &bytes, &ext),
+    }))
 }
 
 /// Append a capture file to the current traffic WITHOUT replacing it — loads a
@@ -997,12 +1032,16 @@ pub async fn open_dropped_capture(
     state: State<'_, AppState>,
     data_b64: String,
     ext: String,
-) -> Result<usize, String> {
+) -> Result<OpenedCapture, String> {
     let (bytes, ext) = decode_dropped_capture(&data_b64, &ext)?;
-    state
+    let count = state
         .controller
         .open_capture(&bytes, &ext)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(OpenedCapture {
+        count,
+        embedded_rules: stash_embedded_rules(&state, &bytes, &ext),
+    })
 }
 
 /// Append a capture file dropped onto the compare window WITHOUT replacing the
@@ -1123,6 +1162,29 @@ pub async fn import_rules(
         .rule_store
         .replace(&controller.get_autoresponder())
         .map_err(|e| format!("rules were imported but could not be persisted: {e}"))?;
+    Ok(count)
+}
+
+/// Import the mock-rules bundle embedded in the last opened HAR (parked by
+/// `stash_embedded_rules` after the user accepted the offer). Always appends —
+/// imported scenarios arrive re-keyed under deduped names, never replacing or
+/// activating anything. Returns the number of scenarios imported.
+#[tauri::command]
+pub async fn apply_har_rules(
+    state: State<'_, AppState>,
+    history_tag: HistoryTag,
+) -> Result<usize, String> {
+    let controller = state.controller.clone();
+    let bytes = state
+        .pending_har_rules
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+        .ok_or_else(|| "No pending mock rules to import".to_string())?;
+    let count = controller.with_history(history_tag, |c| {
+        c.import_rules(&bytes, false).map_err(|e| e.to_string())
+    })?;
+    state.rule_store.replace(&controller.get_autoresponder())?;
     Ok(count)
 }
 

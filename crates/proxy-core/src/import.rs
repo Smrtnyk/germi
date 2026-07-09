@@ -159,6 +159,30 @@ fn decode_har_body(content: &Content) -> Vec<u8> {
     }
 }
 
+/// Just the `_germiRules` extension field (see `har_export`), so an open can
+/// peek for embedded scenarios without touching the entries.
+#[derive(Deserialize, Default)]
+struct HarRulesPeek {
+    #[serde(default)]
+    log: HarRulesLog,
+}
+
+#[derive(Deserialize, Default)]
+struct HarRulesLog {
+    #[serde(default, rename = "_germiRules")]
+    germi_rules: Option<serde_json::Value>,
+}
+
+/// Extract the mock-rules bundle a Germi-written HAR may embed as `_germiRules`,
+/// re-serialized to standalone `.germi-rules` bytes so the existing rules-import
+/// path applies it unchanged. `None` when the field is absent (every non-Germi
+/// HAR) or the file isn't JSON.
+pub fn har_embedded_rules(bytes: &[u8]) -> Option<Vec<u8>> {
+    let peek: HarRulesPeek = serde_json::from_slice(bytes).ok()?;
+    let bundle = peek.log.germi_rules?;
+    serde_json::to_vec(&bundle).ok()
+}
+
 /// Parse a HAR 1.2 file into flows. Flow ids are left empty (assigned on insert).
 pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
     let har: Har = serde_json::from_slice(bytes)?;

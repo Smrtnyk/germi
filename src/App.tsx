@@ -25,6 +25,8 @@ import { CaDialog } from "./components/CaDialog";
 import { SettingsDialog, type SettingsDialogProps } from "./components/SettingsDialog";
 import { StatusBar } from "./components/StatusBar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { SaveSessionDialog } from "./components/SaveSessionDialog";
+import { harRulesOfferMessage } from "./autoresponderState";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
 import { IconPanelCollapse, IconPanelExpand, IconSearch } from "./components/icons";
 import { Shortcuts } from "./components/Shortcuts";
@@ -123,7 +125,7 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       group: "Session",
       label: "Save session as HAR…",
       shortcut: prettyShortcut(s.shortcuts.save),
-      run: s.session.saveSession,
+      run: s.requestSaveSession,
     },
     {
       id: "open",
@@ -204,7 +206,7 @@ function commandActions(
     palette: () => setPaletteOpen((o) => !o),
     "focus-filter": () => focusSearch(s),
     "toggle-filter-hide": () => s.savedFilters.toggleViewMode(),
-    save: () => void s.session.saveSession(),
+    save: () => s.requestSaveSession(),
     open: () => s.requestOpenCapture(),
     "copy-url": () => s.copySelectedUrl(),
     "show-inspector": () => s.setRightTab("inspector"),
@@ -583,6 +585,53 @@ function AppDialogs({
   );
 }
 
+/** The session confirm/option dialogs: destructive clear/open confirms, the
+ *  save-as-HAR options (issue #113) and the embedded mock-rules import offer. */
+function SessionDialogs({ s }: { s: AppStateValue }) {
+  return (
+    <>
+      {s.confirmClear && (
+        <ConfirmDialog
+          title="Clear all captured traffic?"
+          message={`Permanently discard all ${s.flowStore.orderRef.current.length} captured flow(s)? Traffic is never auto-saved, so this can't be undone — use Save first if you want to keep it.`}
+          confirmLabel="Clear traffic"
+          danger
+          onConfirm={s.confirmClearTraffic}
+          onCancel={() => s.setConfirmClear(false)}
+        />
+      )}
+
+      {s.confirmOpen && (
+        <ConfirmDialog
+          title="Open a file and replace current traffic?"
+          message={`Opening a capture replaces all ${s.flowStore.orderRef.current.length} captured flow(s). Traffic is never auto-saved, so this can't be undone — use Save first if you want to keep it.`}
+          confirmLabel="Open…"
+          onConfirm={s.confirmOpenCapture}
+          onCancel={s.cancelOpenCapture}
+        />
+      )}
+
+      {s.saveOptions !== null && (
+        <SaveSessionDialog
+          ruleCount={s.saveOptions}
+          onSave={s.confirmSaveSession}
+          onCancel={s.cancelSaveSession}
+        />
+      )}
+
+      {s.session.harRulesOffer && (
+        <ConfirmDialog
+          title="Import mock rules from this file?"
+          message={harRulesOfferMessage(s.session.harRulesOffer)}
+          confirmLabel="Import rules"
+          onConfirm={() => void s.session.applyHarRules()}
+          onCancel={s.session.dismissHarRules}
+        />
+      )}
+    </>
+  );
+}
+
 export function App() {
   const s = useAppState();
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -622,7 +671,7 @@ export function App() {
           onToggleDecode={() => s.setDecode((d) => !d)}
           onOpenSettings={() => s.settings.setSettingsOpen(true)}
           onOpen={s.requestOpenCapture}
-          onSaveSession={s.session.saveSession}
+          onSaveSession={s.requestSaveSession}
           onClear={s.requestClearTraffic}
           filter={s.filtering.filter}
           onFilterChange={s.filtering.setFilter}
@@ -815,26 +864,7 @@ export function App() {
           }}
         />
 
-        {s.confirmClear && (
-          <ConfirmDialog
-            title="Clear all captured traffic?"
-            message={`Permanently discard all ${s.flowStore.orderRef.current.length} captured flow(s)? Traffic is never auto-saved, so this can't be undone — use Save first if you want to keep it.`}
-            confirmLabel="Clear traffic"
-            danger
-            onConfirm={s.confirmClearTraffic}
-            onCancel={() => s.setConfirmClear(false)}
-          />
-        )}
-
-        {s.confirmOpen && (
-          <ConfirmDialog
-            title="Open a file and replace current traffic?"
-            message={`Opening a capture replaces all ${s.flowStore.orderRef.current.length} captured flow(s). Traffic is never auto-saved, so this can't be undone — use Save first if you want to keep it.`}
-            confirmLabel="Open…"
-            onConfirm={s.confirmOpenCapture}
-            onCancel={s.cancelOpenCapture}
-          />
-        )}
+        <SessionDialogs s={s} />
 
         {paletteOpen && <CommandPalette actions={actions} onClose={() => setPaletteOpen(false)} />}
         {cheatOpen && <Shortcuts bindings={s.shortcuts} onClose={() => setCheatOpen(false)} />}

@@ -85,6 +85,7 @@ fn init_app_state(app: &mut tauri::App, viewer: bool) -> Result<(), Box<dyn std:
         prior_system_proxy: std::sync::Mutex::new(None),
         compare_seed: std::sync::Mutex::new(None),
         pending_settings_import: std::sync::Mutex::new(None),
+        pending_har_rules: std::sync::Mutex::new(None),
         portal_hotkey: portal_hotkey::PortalHotkey::default(),
         viewer,
     });
@@ -174,6 +175,7 @@ pub fn run() {
             commands::get_compare_seed,
             commands::export_rules,
             commands::import_rules,
+            commands::apply_har_rules,
             commands::history_undo,
             commands::history_redo,
             indicator::set_proxy_indicator,

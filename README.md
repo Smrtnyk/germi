@@ -119,7 +119,11 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   standard **HAR 1.2** archive any HTTP tool can open (bodies decoded, binary as
   base64, timings/comments/mock provenance included — a Germi-written HAR reopens
   in Germi losslessly); one **Open** loads a HAR or Fiddler SAZ, replacing the
-  current traffic (it confirms first when traffic is present).
+  current traffic (it confirms first when traffic is present). When mock rules
+  are live, Save offers to **embed them** (off by default) in a `_germiRules`
+  extension field other tools ignore — opening such a HAR in Germi offers to
+  import them as new scenarios, so one file shares both the traffic and the
+  mocks that produced it.
 - **Viewer mode** — **New viewer** (or launching with `--viewer`) opens a second,
   proxy-less window for inspecting saved HAR/SAZ captures *alongside* a
   capturing instance, without the two fighting over the proxy port or system proxy.

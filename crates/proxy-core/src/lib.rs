@@ -62,7 +62,8 @@ pub use rules::{
     RuleSearchScope, RuleSet, RuleSummary, Scenario, ScenarioSummary, GENERAL_SCENARIO_ID,
     GENERAL_SCENARIO_NAME,
 };
-pub use rules_export::RulesExport;
+pub use import::har_embedded_rules;
+pub use rules_export::{preview_rules, RulesExport, ScenarioPreview};
 pub use scripting::{Script, ScriptDiagnostic};
 pub use settings::ProxySettings;
 pub use settings_io::{export_sections, import_preview, merge_import, section_summaries, SectionSummary};
@@ -549,15 +550,41 @@ impl ProxyController {
         Ok(self.import_flows(Self::parse_capture(bytes, ext)?))
     }
 
-    /// Serialize the current traffic to a HAR 1.2 archive (JSON bytes).
-    pub fn export_har(&self) -> Vec<u8> {
+    /// Serialize the current traffic to a HAR 1.2 archive (JSON bytes). With
+    /// `include_rules`, the scenarios currently shaping traffic ride along in
+    /// the `_germiRules` extension field.
+    pub fn export_har(&self, include_rules: bool) -> Vec<u8> {
         let flows = self
             .shared
             .store
             .lock()
             .map(|s| s.all_flows())
             .unwrap_or_default();
-        har_export::export_har(&flows)
+        let rules = if include_rules {
+            self.mocking_scenarios()
+        } else {
+            Vec::new()
+        };
+        har_export::export_har(&flows, &rules)
+    }
+
+    /// The scenarios evaluated against live traffic right now — the active
+    /// scenario plus the General layer when it's on — skipping any without
+    /// rules, so an export never embeds an empty bundle.
+    fn mocking_scenarios(&self) -> Vec<Scenario> {
+        let ar = self.get_autoresponder();
+        ar.scenarios
+            .iter()
+            .filter(|s| !s.rules.is_empty())
+            .filter(|s| {
+                if s.id == GENERAL_SCENARIO_ID {
+                    ar.general_active
+                } else {
+                    ar.active_scenario_id.as_deref() == Some(s.id.as_str())
+                }
+            })
+            .cloned()
+            .collect()
     }
 
     // ---- autoresponder rules export / import (.germi-rules) ----
@@ -1967,7 +1994,7 @@ mod tests {
             c.shared.record_new(f);
         }
         // Opening a file replaces the traffic AND restarts numbering at 1.
-        let bytes = crate::har_export::export_har(&[flow("x"), flow("y")]);
+        let bytes = crate::har_export::export_har(&[flow("x"), flow("y")], &[]);
         let n = c.open_capture(&bytes, "har").expect("open har");
         assert_eq!(n, 2);
         let seqs: Vec<u64> = c.list_flows().into_iter().map(|s| s.seq).collect();
@@ -1993,10 +2020,87 @@ mod tests {
     fn open_capture_of_a_germi_written_har_round_trips_and_replaces() {
         let c = controller();
         c.shared.record_new(flow("stale"));
-        let bytes = crate::har_export::export_har(&[flow("a"), flow("b")]);
+        let bytes = crate::har_export::export_har(&[flow("a"), flow("b")], &[]);
         let n = c.open_capture(&bytes, "har").expect("open har");
         assert_eq!(n, 2);
         assert_eq!(c.shared.store.lock().expect("lock store").len(), 2);
+    }
+
+    #[test]
+    fn export_har_embeds_only_the_scenarios_shaping_traffic() {
+        let c = controller();
+        let mut ar = c.get_autoresponder();
+        ar.ensure_general();
+        if let Some(general) = ar.scenarios.iter_mut().find(|s| s.id == GENERAL_SCENARIO_ID) {
+            general.rules.push(respond_rule("g-1"));
+        }
+        ar.scenarios.push(scenario("active", vec![respond_rule("a-1")]));
+        ar.scenarios.push(scenario("idle", vec![respond_rule("i-1")]));
+        ar.active_scenario_id = Some("active".to_string());
+        ar.general_active = true;
+        c.set_autoresponder(ar);
+
+        let har: serde_json::Value =
+            serde_json::from_slice(&c.export_har(true)).expect("valid JSON");
+        let names: Vec<&str> = har["log"]["_germiRules"]["scenarios"]
+            .as_array()
+            .expect("bundle embedded")
+            .iter()
+            .map(|s| s["name"].as_str().expect("name"))
+            .collect();
+        assert_eq!(
+            names,
+            vec![GENERAL_SCENARIO_NAME, "active"],
+            "the General layer and the active scenario ride along; idle ones don't"
+        );
+
+        let plain: serde_json::Value =
+            serde_json::from_slice(&c.export_har(false)).expect("valid JSON");
+        assert!(plain["log"].get("_germiRules").is_none(), "opt-in only");
+    }
+
+    #[test]
+    fn export_har_with_nothing_mocking_embeds_no_bundle() {
+        let c = controller();
+        let mut ar = c.get_autoresponder();
+        ar.ensure_general();
+        ar.scenarios.push(scenario("idle", vec![respond_rule("i-1")]));
+        ar.general_active = true;
+        c.set_autoresponder(ar);
+
+        let har: serde_json::Value =
+            serde_json::from_slice(&c.export_har(true)).expect("valid JSON");
+        assert!(
+            har["log"].get("_germiRules").is_none(),
+            "no active scenario and an empty General layer leave nothing to embed"
+        );
+    }
+
+    #[test]
+    fn har_embedded_rules_import_back_as_re_keyed_deduped_scenarios() {
+        let c = controller();
+        let mut ar = c.get_autoresponder();
+        ar.scenarios.retain(|s| s.id == GENERAL_SCENARIO_ID);
+        ar.scenarios.push(scenario("orig", vec![respond_rule("r-1")]));
+        ar.active_scenario_id = Some("orig".to_string());
+        c.set_autoresponder(ar);
+
+        let bundle =
+            har_embedded_rules(&c.export_har(true)).expect("Germi HAR carries the bundle");
+        let imported = c.import_rules(&bundle, false).expect("bundle imports");
+        assert_eq!(imported, 1);
+
+        let ar = c.get_autoresponder();
+        assert_eq!(
+            user_names(&ar),
+            vec!["orig", "orig (2)"],
+            "imported copy lands as a NEW scenario with a deduped name"
+        );
+        assert_eq!(
+            ar.active_scenario_id.as_deref(),
+            Some("orig"),
+            "importing never switches the active scenario"
+        );
     }
 
     #[test]
@@ -2042,7 +2146,7 @@ mod tests {
         let mut live = flow("live");
         live.seq = c.shared.next_seq();
         c.shared.record_new(live);
-        let bytes = crate::har_export::export_har(&[flow("x")]);
+        let bytes = crate::har_export::export_har(&[flow("x")], &[]);
         let appended = c.append_capture(&bytes, "har").expect("append har");
         assert_eq!(
             appended[0].seq, 2,

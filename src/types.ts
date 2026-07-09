@@ -201,6 +201,20 @@ export interface AutoResponderSummary {
   generalActive: boolean;
 }
 
+/** One scenario of a mock-rules bundle embedded in an opened HAR (mirrors
+ *  proxy-core `ScenarioPreview`) — drives the import offer before applying. */
+export interface ScenarioPreview {
+  name: string;
+  ruleCount: number;
+}
+
+/** Result of opening a capture (mirrors `commands::OpenedCapture`):
+ *  `embeddedRules` is non-null only for a Germi-written HAR carrying rules. */
+export interface OpenedCapture {
+  count: number;
+  embeddedRules: ScenarioPreview[] | null;
+}
+
 /** A user script (Rhai) with optional `on_request`/`on_response` hooks. */
 export interface Script {
   id: string;

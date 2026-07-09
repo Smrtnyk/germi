@@ -1,7 +1,39 @@
-import { GENERAL_SCENARIO_ID, type AutoResponderSummary, type RuleSummary } from "./types";
+import { sumBy } from "es-toolkit";
+
+import {
+  GENERAL_SCENARIO_ID,
+  type AutoResponderSummary,
+  type RuleSummary,
+  type ScenarioPreview,
+} from "./types";
 
 export function ruleLabel(url: string): string {
   return url || "*";
+}
+
+/**
+ * Rules currently shaping traffic — the active scenario's plus the General
+ * layer's when it's on. Non-zero means a HAR export has something to embed,
+ * which is what gates the save-options dialog (issue #113).
+ */
+export function mockingRuleCount(ar: AutoResponderSummary): number {
+  return sumBy(
+    ar.scenarios.filter((s) =>
+      s.id === GENERAL_SCENARIO_ID ? ar.generalActive : s.id === ar.activeScenarioId,
+    ),
+    (s) => s.rules.length,
+  );
+}
+
+/** Body for the "this HAR carries mock rules" import offer. */
+export function harRulesOfferMessage(previews: ScenarioPreview[]): string {
+  const list = previews
+    .map((p) => `${p.name} (${p.ruleCount} rule${p.ruleCount === 1 ? "" : "s"})`)
+    .join(", ");
+  return (
+    `This file was saved from Germi with its mock rules embedded: ${list}. ` +
+    "Import them as new scenarios? Existing rules are untouched and nothing is activated."
+  );
 }
 
 /**
