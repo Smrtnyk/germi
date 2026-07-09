@@ -33,17 +33,55 @@ pub struct RulesExport {
     pub scenarios: Vec<Scenario>,
 }
 
+impl RulesExport {
+    /// A bundle of `scenarios` stamped with the current format version — the
+    /// shape written both to `.germi-rules` files and into a HAR's
+    /// `_germiRules` extension field (see `har_export`).
+    pub fn new(scenarios: Vec<Scenario>) -> Self {
+        RulesExport {
+            version: FORMAT_VERSION,
+            scenarios,
+        }
+    }
+}
+
 /// Serialize scenarios into a `.germi-rules` bundle (pretty JSON, so the file is
 /// human-diffable and reviewable when shared/committed).
 pub fn export_rules(scenarios: &[Scenario]) -> Vec<u8> {
-    let export = RulesExport {
-        version: FORMAT_VERSION,
-        scenarios: scenarios.to_vec(),
-    };
+    let export = RulesExport::new(scenarios.to_vec());
     serde_json::to_vec_pretty(&export).unwrap_or_else(|e| {
         tracing::error!("failed to serialize .germi-rules export: {e}");
         Vec::new()
     })
+}
+
+/// One scenario of an embedded rules bundle, summarized for the import prompt
+/// ("this HAR carries N scenarios") before anything is applied.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioPreview {
+    pub name: String,
+    pub rule_count: usize,
+}
+
+/// Summarize a rules bundle without importing (or re-keying) anything. Returns
+/// `None` when the bytes aren't a usable bundle — malformed, a newer format
+/// version, or carrying no scenarios — so callers simply don't offer an import.
+pub fn preview_rules(bytes: &[u8]) -> Option<Vec<ScenarioPreview>> {
+    let export: RulesExport = serde_json::from_slice(bytes).ok()?;
+    if export.version > FORMAT_VERSION || export.scenarios.is_empty() {
+        return None;
+    }
+    Some(
+        export
+            .scenarios
+            .iter()
+            .map(|s| ScenarioPreview {
+                name: s.name.clone(),
+                rule_count: s.rules.len(),
+            })
+            .collect(),
+    )
 }
 
 /// Just the version field, read first so a newer-format file gets a clear
@@ -508,5 +546,26 @@ mod tests {
             combined.len(),
             "re-parsing the same bytes (same-millisecond double import) must still yield globally unique ids"
         );
+    }
+
+    #[test]
+    fn preview_summarizes_without_importing() {
+        let scenarios = vec![
+            scenario("sc-1", "A", vec![respond_rule("r-1"), respond_rule("r-2")]),
+            scenario("sc-2", "B", vec![]),
+        ];
+        let previews = preview_rules(&export_rules(&scenarios)).expect("preview");
+        assert_eq!(previews.len(), 2);
+        assert_eq!(previews[0].name, "A");
+        assert_eq!(previews[0].rule_count, 2);
+        assert_eq!(previews[1].rule_count, 0);
+    }
+
+    #[test]
+    fn preview_rejects_unusable_bundles() {
+        let newer = br#"{"version":99,"scenarios":[{"id":"a","name":"N","rules":[]}]}"#;
+        assert!(preview_rules(newer).is_none(), "newer format is not offered");
+        assert!(preview_rules(br#"{"version":1,"scenarios":[]}"#).is_none(), "nothing to import");
+        assert!(preview_rules(b"junk").is_none());
     }
 }

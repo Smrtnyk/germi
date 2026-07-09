@@ -198,7 +198,15 @@ multi-section Settings panel (Connections incl. allow-remote, Certificates
 export+regenerate, host exclusion, Capture filter + max-flows +
 auto-start-on-launch, response-delay throttling, Shortcuts incl. the
 system-proxy hotkey), settings import/export, and HAR session save/open
-(export is HAR 1.2; open takes HAR or SAZ). Settings import/export is
+(export is HAR 1.2; open takes HAR or SAZ). Mock rules can ride along in the
+HAR (issue #113): with rules live, Save shows `SaveSessionDialog.tsx` (opt-in
+checkbox, remembered) and embeds the scenarios shaping traffic (active +
+General-when-on; `mocking_scenarios` in `lib.rs`) as a log-level `_germiRules`
+field — the `.germi-rules` bundle shape verbatim. On open, `stash_embedded_rules`
+parks the bundle in an `AppState` mailbox and returns a preview
+(`OpenedCapture`); the UI offers "Import mock rules?" and `apply_har_rules`
+appends them re-keyed under deduped names (never replacing or activating —
+viewer windows never offer). Settings import/export is
 **partial by section** (issue #112): a
 checklist dialog (`SettingsSectionsDialog.tsx`) picks what to export, and import
 is two-phase (`peek_settings_import` previews the picked file's sections →

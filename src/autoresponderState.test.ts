@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   appendBulkRuleSummaries,
   appendRuleSummary,
+  harRulesOfferMessage,
   insertRuleSummaryAfter,
+  mockingRuleCount,
   popOutOpener,
   removeRuleSummary,
   reorderRuleSummary,
@@ -163,5 +165,40 @@ describe("seededRuleId (one-shot Mock-this selection seed)", () => {
   it("yields null without a seed", () => {
     expect(seededRuleId(null, "s1")).toBeNull();
     expect(seededRuleId(undefined, "s1")).toBeNull();
+  });
+});
+
+describe("mockingRuleCount (save-options gate)", () => {
+  const ar = (over: Partial<AutoResponderSummary> = {}): AutoResponderSummary => ({
+    scenarios: [
+      { id: GENERAL_SCENARIO_ID, name: "General rules", rules: [rule("g")] },
+      { id: "A", name: "A", rules: [rule("a1"), rule("a2")] },
+      { id: "B", name: "B", rules: [rule("b1")] },
+    ],
+    activeScenarioId: "A",
+    generalActive: true,
+    ...over,
+  });
+
+  it("counts the active scenario plus the General layer, never idle scenarios", () => {
+    expect(mockingRuleCount(ar())).toBe(3);
+  });
+
+  it("drops General when its layer is off and everything when nothing mocks", () => {
+    expect(mockingRuleCount(ar({ generalActive: false }))).toBe(2);
+    expect(mockingRuleCount(ar({ activeScenarioId: null }))).toBe(1);
+    expect(mockingRuleCount(ar({ activeScenarioId: null, generalActive: false }))).toBe(0);
+  });
+});
+
+describe("harRulesOfferMessage", () => {
+  it("lists every embedded scenario with its rule count", () => {
+    const message = harRulesOfferMessage([
+      { name: "General rules", ruleCount: 1 },
+      { name: "Checkout", ruleCount: 5 },
+    ]);
+    expect(message).toContain("General rules (1 rule)");
+    expect(message).toContain("Checkout (5 rules)");
+    expect(message).toContain("new scenarios");
   });
 });

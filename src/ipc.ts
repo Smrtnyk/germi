@@ -13,6 +13,7 @@ import type {
   FlowSummary,
   HistoryTag,
   MockResult,
+  OpenedCapture,
   ProxySettings,
   Rule,
   RuleSearchScope,
@@ -102,11 +103,11 @@ export const api = {
 
   pickFile: () => invoke<string | null>("pick_file"),
   fileExists: (path: string) => invoke<boolean>("file_exists", { path }),
-  saveSession: () => invoke<boolean>("save_session"),
-  openCapture: () => invoke<number | null>("open_capture"),
+  saveSession: (includeRules: boolean) => invoke<boolean>("save_session", { includeRules }),
+  openCapture: () => invoke<OpenedCapture | null>("open_capture"),
   appendCapture: () => invoke<FlowSummary[] | null>("append_capture"),
   openDroppedCapture: (dataB64: string, ext: string) =>
-    invoke<number>("open_dropped_capture", { dataB64, ext }),
+    invoke<OpenedCapture>("open_dropped_capture", { dataB64, ext }),
   appendDroppedCapture: (dataB64: string, ext: string) =>
     invoke<FlowSummary[]>("append_dropped_capture", { dataB64, ext }),
   compareFlowBodies: (idA: string, idB: string) =>
@@ -116,6 +117,7 @@ export const api = {
   exportRules: (scenarioId: string | null) => invoke<boolean>("export_rules", { scenarioId }),
   importRules: (replace: boolean, historyTag: HistoryTag) =>
     invoke<number>("import_rules", { replace, historyTag }),
+  applyHarRules: (historyTag: HistoryTag) => invoke<number>("apply_har_rules", { historyTag }),
 
   historyUndo: () => invoke<void>("history_undo"),
   historyRedo: () => invoke<void>("history_redo"),

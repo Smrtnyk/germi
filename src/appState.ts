@@ -52,6 +52,7 @@ import {
   appendBulkRuleSummaries,
   appendRuleSummary,
   insertRuleSummaryAfter,
+  mockingRuleCount,
   removeRuleSummary,
   reorderRuleSummary,
   replaceRuleSummary,
@@ -67,9 +68,11 @@ import type {
   FlowEvent,
   FlowSummary,
   HistoryTag,
+  OpenedCapture,
   ProxySettings,
   Rule,
   RuleSummary,
+  ScenarioPreview,
   ScenarioSummary,
 } from "./types";
 
@@ -1121,10 +1124,24 @@ function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
-function useSession(setError: SetError, onOpened: () => void, notify: Notify) {
-  async function saveSession() {
+function useSession(
+  setError: SetError,
+  onOpened: () => void,
+  notify: Notify,
+  refreshRules: () => Promise<void>,
+  viewer: boolean,
+) {
+  const [harRulesOffer, setHarRulesOffer] = useState<ScenarioPreview[] | null>(null);
+
+  function opened(result: OpenedCapture) {
+    onOpened();
+    notify("success", `Opened ${plural(result.count, "flow")}`);
+    // A viewer can't edit or persist rules, so it never offers the import.
+    if (!viewer && result.embeddedRules?.length) setHarRulesOffer(result.embeddedRules);
+  }
+  async function saveSession(includeRules: boolean) {
     try {
-      const ok = await api.saveSession();
+      const ok = await api.saveSession(includeRules);
       if (ok) notify("success", "Session saved");
     } catch (e) {
       setError(String(e));
@@ -1132,10 +1149,9 @@ function useSession(setError: SetError, onOpened: () => void, notify: Notify) {
   }
   async function openCapture() {
     try {
-      const n = await api.openCapture();
-      if (n === null) return;
-      onOpened();
-      notify("success", `Opened ${plural(n, "flow")}`);
+      const result = await api.openCapture();
+      if (result === null) return;
+      opened(result);
     } catch (e) {
       setError(String(e));
     }
@@ -1145,14 +1161,26 @@ function useSession(setError: SetError, onOpened: () => void, notify: Notify) {
    *  native picker. */
   async function openDropped(file: File, ext: CaptureExt) {
     try {
-      const n = await api.openDroppedCapture(await readFileAsBase64(file), ext);
-      onOpened();
-      notify("success", `Opened ${plural(n, "flow")}`);
+      opened(await api.openDroppedCapture(await readFileAsBase64(file), ext));
     } catch (e) {
       setError(String(e));
     }
   }
-  return { saveSession, openCapture, openDropped };
+  /** Accept the offer: import the bundle parked by the open (issue #113). */
+  async function applyHarRules() {
+    setHarRulesOffer(null);
+    try {
+      const n = await api.applyHarRules({ label: "Import rules (HAR)" });
+      await refreshRules();
+      notify("success", `Imported ${plural(n, "scenario")}`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+  function dismissHarRules() {
+    setHarRulesOffer(null);
+  }
+  return { saveSession, openCapture, openDropped, harRulesOffer, applyHarRules, dismissHarRules };
 }
 
 async function copyFlowAsCurlAction(id: string, notify: Notify, setError: SetError) {
@@ -1638,6 +1666,8 @@ export function useAppState() {
       inspector.setDetail(null);
     },
     notify,
+    ar.refresh,
+    viewer,
   );
   const trafficSplit = useSplitRatio({
     initial: 0.55,
@@ -1772,6 +1802,25 @@ export function useAppState() {
   // native picker instead (issue #100).
   const pendingDropRef = useRef<{ file: File; ext: CaptureExt } | null>(null);
 
+  // Rule count the save-options dialog offers to embed; null = dialog closed.
+  // With nothing currently mocking there is nothing to offer, so Save goes
+  // straight to the file picker (issue #113).
+  const [saveOptions, setSaveOptions] = useState<number | null>(null);
+
+  function requestSaveSession() {
+    const count = mockingRuleCount(ar.autoresponder);
+    if (count === 0) {
+      void session.saveSession(false);
+      return;
+    }
+    setSaveOptions(count);
+  }
+
+  function confirmSaveSession(includeRules: boolean) {
+    setSaveOptions(null);
+    void session.saveSession(includeRules);
+  }
+
   function requestOpenCapture() {
     if (flowStore.orderRef.current.length === 0) {
       void session.openCapture();
@@ -1867,6 +1916,10 @@ export function useAppState() {
     requestOpenDropped,
     confirmOpenCapture,
     cancelOpenCapture,
+    saveOptions,
+    requestSaveSession,
+    confirmSaveSession,
+    cancelSaveSession: () => setSaveOptions(null),
     settings,
     flowStore,
     flows: savedFilters.visibleFlows,

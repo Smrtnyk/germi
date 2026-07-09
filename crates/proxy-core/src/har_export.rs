@@ -10,12 +10,17 @@
 //! key on `postData` (which [`crate::import::parse_har`] understands), so a
 //! Germi-written HAR round-trips binary uploads losslessly. Germi-specific
 //! provenance rides in the spec's extension escape hatch: the flow comment in
-//! the standard `comment` field and the mocking rule in `_matchedRule`.
+//! the standard `comment` field, the mocking rule in `_matchedRule`, and —
+//! opted into at save time — the mock scenarios that shaped the traffic as a
+//! log-level `_germiRules` bundle (the `.germi-rules` shape verbatim), which
+//! other tools ignore and a Germi re-open offers to import.
 
 use base64::Engine;
 use serde::Serialize;
 
 use crate::flow::{epoch_ms_to_rfc3339, header, Flow};
+use crate::rules::Scenario;
+use crate::rules_export::RulesExport;
 
 #[derive(Serialize)]
 struct Har<'a> {
@@ -27,6 +32,8 @@ struct Log<'a> {
     version: &'static str,
     creator: Creator,
     entries: Vec<Entry<'a>>,
+    #[serde(rename = "_germiRules", skip_serializing_if = "Option::is_none")]
+    germi_rules: Option<RulesExport>,
 }
 
 #[derive(Serialize)]
@@ -251,8 +258,9 @@ fn entry(flow: &Flow) -> Entry<'_> {
 }
 
 /// Serialize flows into a HAR 1.2 archive (pretty JSON — HARs are routinely
-/// opened in editors and diffed when shared).
-pub fn export_har(flows: &[Flow]) -> Vec<u8> {
+/// opened in editors and diffed when shared). A non-empty `rules` embeds those
+/// scenarios as the `_germiRules` extension field; empty omits it entirely.
+pub fn export_har(flows: &[Flow], rules: &[Scenario]) -> Vec<u8> {
     let har = Har {
         log: Log {
             version: "1.2",
@@ -261,6 +269,11 @@ pub fn export_har(flows: &[Flow]) -> Vec<u8> {
                 version: env!("CARGO_PKG_VERSION"),
             },
             entries: flows.iter().map(entry).collect(),
+            germi_rules: if rules.is_empty() {
+                None
+            } else {
+                Some(RulesExport::new(rules.to_vec()))
+            },
         },
     };
     serde_json::to_vec_pretty(&har).unwrap_or_else(|e| {
@@ -314,7 +327,7 @@ mod tests {
 
     #[test]
     fn exports_spec_shaped_har_12() {
-        let har = parse(&export_har(&[flow(b"{\"u\":1}", b"created")]));
+        let har = parse(&export_har(&[flow(b"{\"u\":1}", b"created")], &[]));
         let log = &har["log"];
         assert_eq!(log["version"], "1.2");
         assert_eq!(log["creator"]["name"], "germi");
@@ -348,7 +361,7 @@ mod tests {
     #[test]
     fn round_trips_through_parse_har() {
         let original = flow(b"{\"u\":1}", &[0u8, 159, 146, 150]);
-        let back = crate::import::parse_har(&export_har(std::slice::from_ref(&original)))
+        let back = crate::import::parse_har(&export_har(std::slice::from_ref(&original), &[]))
             .expect("germi-written HAR parses");
         assert_eq!(back.len(), 1);
         let f = &back[0];
@@ -372,9 +385,9 @@ mod tests {
     #[test]
     fn binary_request_body_round_trips_as_base64_post_data() {
         let original = flow(&[1u8, 2, 0, 255], b"ok");
-        let har = parse(&export_har(std::slice::from_ref(&original)));
+        let har = parse(&export_har(std::slice::from_ref(&original), &[]));
         assert_eq!(har["log"]["entries"][0]["request"]["postData"]["encoding"], "base64");
-        let back = crate::import::parse_har(&export_har(std::slice::from_ref(&original))).unwrap();
+        let back = crate::import::parse_har(&export_har(std::slice::from_ref(&original), &[])).unwrap();
         assert_eq!(back[0].request.body, original.request.body);
     }
 
@@ -384,16 +397,72 @@ mod tests {
         f.response = None;
         f.duration_ms = None;
         f.ttfb_ms = None;
-        let har = parse(&export_har(&[f.clone()]));
+        let har = parse(&export_har(&[f.clone()], &[]));
         let e = &har["log"]["entries"][0];
         assert_eq!(e["response"]["status"], 0, "HAR still carries a stub response object");
         assert_eq!(e["time"], -1.0);
         assert!(e["request"].get("postData").is_none(), "empty body → no postData");
 
-        let back = crate::import::parse_har(&export_har(&[f])).unwrap();
+        let back = crate::import::parse_har(&export_har(&[f], &[])).unwrap();
         assert!(back[0].response.is_none());
         assert_eq!(back[0].duration_ms, None);
         assert_eq!(back[0].ttfb_ms, None);
+    }
+
+    fn mock_scenario() -> Scenario {
+        use crate::rules::{Action, MatchKind, Matcher, Rule};
+        Scenario {
+            id: "sc-1".into(),
+            name: "Checkout mocks".into(),
+            rules: vec![Rule {
+                id: "r-1".into(),
+                enabled: true,
+                fire_limit: None,
+                repeat: false,
+                matcher: Matcher {
+                    method: None,
+                    url: "/api".into(),
+                    url_match: MatchKind::Contains,
+                },
+                action: Action::Block,
+            }],
+        }
+    }
+
+    #[test]
+    fn rules_ride_in_the_germi_rules_extension_only_when_given() {
+        let f = flow(b"", b"ok");
+        let plain = parse(&export_har(std::slice::from_ref(&f), &[]));
+        assert!(plain["log"].get("_germiRules").is_none(), "no bundle unless opted in");
+
+        let har = parse(&export_har(&[f], &[mock_scenario()]));
+        let bundle = &har["log"]["_germiRules"];
+        assert_eq!(bundle["version"], 1);
+        assert_eq!(bundle["scenarios"][0]["name"], "Checkout mocks");
+        assert_eq!(bundle["scenarios"][0]["rules"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn embedded_rules_round_trip_through_extraction() {
+        let bytes = export_har(&[flow(b"", b"ok")], &[mock_scenario()]);
+        let bundle = crate::import::har_embedded_rules(&bytes).expect("bundle extracted");
+
+        let previews = crate::rules_export::preview_rules(&bundle).expect("previewable");
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].name, "Checkout mocks");
+        assert_eq!(previews[0].rule_count, 1);
+
+        let scenarios = crate::rules_export::parse_rules(&bundle).expect("bundle parses");
+        assert_eq!(scenarios.len(), 1);
+        assert_eq!(scenarios[0].rules.len(), 1);
+        assert_ne!(scenarios[0].id, "sc-1", "imported scenarios are re-keyed");
+    }
+
+    #[test]
+    fn har_without_the_extension_yields_no_embedded_rules() {
+        let bytes = export_har(&[flow(b"", b"ok")], &[]);
+        assert!(crate::import::har_embedded_rules(&bytes).is_none());
+        assert!(crate::import::har_embedded_rules(b"not json").is_none());
     }
 
     #[test]
@@ -408,7 +477,7 @@ mod tests {
             ("Content-Type".into(), "text/plain".into()),
             ("Content-Encoding".into(), "gzip".into()),
         ];
-        let har = parse(&export_har(&[f]));
+        let har = parse(&export_har(&[f], &[]));
         let content = &har["log"]["entries"][0]["response"]["content"];
         assert_eq!(content["text"], "hello world", "the shared HAR carries the readable body");
         assert_eq!(content["size"], 11);

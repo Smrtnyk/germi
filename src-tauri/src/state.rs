@@ -27,6 +27,10 @@ pub struct AppState {
     /// confirms the previewed sections and `apply_settings_import` merges it
     /// (issue #112).
     pub pending_settings_import: Mutex<Option<String>>,
+    /// Mock-rules bundle found inside the last opened HAR (its `_germiRules`
+    /// field), held until the user confirms the offer and `apply_har_rules`
+    /// imports it (issue #113).
+    pub pending_har_rules: Mutex<Option<Vec<u8>>>,
     /// Live XDG `GlobalShortcuts` portal binding (Wayland global hotkey).
     pub portal_hotkey: crate::portal_hotkey::PortalHotkey,
     /// Launched with `--viewer`: the proxy engine is disabled (this instance
