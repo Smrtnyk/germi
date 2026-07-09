@@ -1106,9 +1106,9 @@ pub fn get_compare_seed(state: State<'_, AppState>) -> Option<CompareSeed> {
         .clone()
 }
 
-/// Export autoresponder scenarios to a `.germi-rules` file. With `scenario_id`
-/// only that scenario is written; otherwise the whole config. Returns false if
-/// the user cancels.
+/// Export autoresponder scenarios to a rules-only HAR (zero entries, rules in
+/// `_germiRules`). With `scenario_id` only that scenario is written; otherwise
+/// the whole config. Returns false if the user cancels.
 #[tauri::command]
 pub async fn export_rules(
     app: tauri::AppHandle,
@@ -1119,8 +1119,8 @@ pub async fn export_rules(
     let Some(picked) = app
         .dialog()
         .file()
-        .add_filter("Germi rules", &["germi-rules"])
-        .set_file_name("autoresponder.germi-rules")
+        .add_filter("HAR archive", &["har"])
+        .set_file_name("mock-rules.har")
         .blocking_save_file()
     else {
         return Ok(false);
@@ -1131,10 +1131,11 @@ pub async fn export_rules(
     Ok(true)
 }
 
-/// Import autoresponder scenarios from a `.germi-rules` file. `replace == false`
-/// merges (appends); `replace == true` wipes the existing scenarios first.
-/// Persists the merged config and returns the number of scenarios imported (0 if
-/// the user cancels).
+/// Import autoresponder scenarios from a rules file — a HAR carrying
+/// `_germiRules`, or a legacy `.germi-rules` bundle from before the formats
+/// were unified. `replace == false` merges (appends); `replace == true` wipes
+/// the existing scenarios first. Persists the merged config and returns the
+/// number of scenarios imported (0 if the user cancels).
 #[tauri::command]
 pub async fn import_rules(
     app: tauri::AppHandle,
@@ -1146,7 +1147,7 @@ pub async fn import_rules(
     let Some(picked) = app
         .dialog()
         .file()
-        .add_filter("Germi rules", &["germi-rules"])
+        .add_filter("Mock rules (.har, .germi-rules)", &["har", "germi-rules"])
         .blocking_pick_file()
     else {
         return Ok(0);

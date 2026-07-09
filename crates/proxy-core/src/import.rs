@@ -174,9 +174,9 @@ struct HarRulesLog {
 }
 
 /// Extract the mock-rules bundle a Germi-written HAR may embed as `_germiRules`,
-/// re-serialized to standalone `.germi-rules` bytes so the existing rules-import
-/// path applies it unchanged. `None` when the field is absent (every non-Germi
-/// HAR) or the file isn't JSON.
+/// re-serialized to standalone bundle bytes so the rules-import path applies it
+/// unchanged. `None` when the field is absent (every non-Germi HAR) or the file
+/// isn't JSON.
 pub fn har_embedded_rules(bytes: &[u8]) -> Option<Vec<u8>> {
     let peek: HarRulesPeek = serde_json::from_slice(bytes).ok()?;
     let bundle = peek.log.germi_rules?;

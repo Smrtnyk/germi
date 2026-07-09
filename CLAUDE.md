@@ -202,11 +202,16 @@ system-proxy hotkey), settings import/export, and HAR session save/open
 HAR (issue #113): with rules live, Save shows `SaveSessionDialog.tsx` (opt-in
 checkbox, remembered) and embeds the scenarios shaping traffic (active +
 General-when-on; `mocking_scenarios` in `lib.rs`) as a log-level `_germiRules`
-field — the `.germi-rules` bundle shape verbatim. On open, `stash_embedded_rules`
+field carrying the `RulesExport` bundle. On open, `stash_embedded_rules`
 parks the bundle in an `AppState` mailbox and returns a preview
 (`OpenedCapture`); the UI offers "Import mock rules?" and `apply_har_rules`
 appends them re-keyed under deduped names (never replacing or activating —
-viewer windows never offer). Settings import/export is
+viewer windows never offer). The standalone rules export is the SAME envelope
+with zero entries — HAR is the only file format; `parse_rules` extracts
+`_germiRules` first, rejects a rule-less HAR loudly (a HAR fed to the bare
+parser would "succeed" as an empty defaulted bundle — order matters), and
+falls back to the legacy bare `.germi-rules` bundle so pre-unification files
+still import. Settings import/export is
 **partial by section** (issue #112): a
 checklist dialog (`SettingsSectionsDialog.tsx`) picks what to export, and import
 is two-phase (`peek_settings_import` previews the picked file's sections →

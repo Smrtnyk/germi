@@ -1518,10 +1518,7 @@ function GeneralScenarioHeader({
         <Button title="Clear per-rule hit counters." onClick={onReset}>
           Reset state
         </Button>
-        <Button
-          title="Export the General rules to a shareable .germi-rules file"
-          onClick={onExport}
-        >
+        <Button title="Export the General rules to a shareable rules .har" onClick={onExport}>
           Export rules
         </Button>
       </div>
@@ -1599,10 +1596,7 @@ function ScenarioHeader({
         >
           Reset state
         </Button>
-        <Button
-          title="Export this scenario to a shareable .germi-rules file"
-          onClick={actions.export}
-        >
+        <Button title="Export this scenario to a shareable rules .har" onClick={actions.export}>
           Export scenario
         </Button>
         <Button danger onClick={actions.requestDelete}>
@@ -1918,21 +1912,21 @@ function ScenarioTabs({
       </button>
       <Button
         size="small"
-        title="Import scenarios from a .germi-rules file (added to your existing scenarios)"
+        title="Import scenarios from a rules .har or legacy .germi-rules file (added to your existing scenarios)"
         onClick={onImport}
       >
         Import
       </Button>
       <Button
         size="small"
-        title="Replace all scenarios with the contents of a .germi-rules file"
+        title="Replace all scenarios with the contents of a rules .har or legacy .germi-rules file"
         onClick={onReplace}
       >
         Replace…
       </Button>
       <Button
         size="small"
-        title="Export all scenarios to a shareable .germi-rules file"
+        title="Export all scenarios to a shareable rules .har"
         disabled={ar.scenarios.length === 0}
         onClick={onExportAll}
       >

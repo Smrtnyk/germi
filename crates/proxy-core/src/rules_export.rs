@@ -1,12 +1,15 @@
-//! Portable export/import of autoresponder scenarios as a `.germi-rules` JSON
-//! file. This is a *config-sharing* format — distinct from the internal `SQLite`
-//! persistence and from `.germi` traffic sessions.
+//! Portable import/export of autoresponder scenarios. The on-disk carrier is a
+//! HAR (see `har_export`): a rules export is a HAR with zero entries whose
+//! `_germiRules` field holds the [`RulesExport`] bundle, so traffic and rules
+//! share one standard format. [`parse_rules`] also still accepts the legacy
+//! bare `.germi-rules` bundle, so files written before the unification keep
+//! importing. This is *config sharing* — distinct from the internal `SQLite`
+//! persistence.
 //!
 //! Imported scenarios are always re-keyed: every scenario and every rule gets a
 //! fresh id. Cursor accounting ([`crate::rules::RuleCursors`]) is rule-id keyed,
 //! so re-keying guarantees an imported copy can never alias an existing rule's
-//! hit counter (or collide with another scenario inside the same file). Mock
-//! bodies are plain `String`, so unlike `session.rs` there is no base64 here.
+//! hit counter (or collide with another scenario inside the same file).
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,24 +38,14 @@ pub struct RulesExport {
 
 impl RulesExport {
     /// A bundle of `scenarios` stamped with the current format version — the
-    /// shape written both to `.germi-rules` files and into a HAR's
-    /// `_germiRules` extension field (see `har_export`).
+    /// shape carried in a HAR's `_germiRules` extension field (see
+    /// `har_export`), and formerly written bare as a `.germi-rules` file.
     pub fn new(scenarios: Vec<Scenario>) -> Self {
         RulesExport {
             version: FORMAT_VERSION,
             scenarios,
         }
     }
-}
-
-/// Serialize scenarios into a `.germi-rules` bundle (pretty JSON, so the file is
-/// human-diffable and reviewable when shared/committed).
-pub fn export_rules(scenarios: &[Scenario]) -> Vec<u8> {
-    let export = RulesExport::new(scenarios.to_vec());
-    serde_json::to_vec_pretty(&export).unwrap_or_else(|e| {
-        tracing::error!("failed to serialize .germi-rules export: {e}");
-        Vec::new()
-    })
 }
 
 /// One scenario of an embedded rules bundle, summarized for the import prompt
@@ -93,13 +86,38 @@ struct VersionPeek {
     version: u32,
 }
 
-/// Parse a `.germi-rules` bundle, returning its scenarios already re-keyed with
-/// fresh scenario + rule ids. Rejects a file from a newer, incompatible format.
+/// Parse a rules file, returning its scenarios already re-keyed with fresh
+/// scenario + rule ids. Accepts a HAR carrying `_germiRules` (the current
+/// export shape) or a legacy bare `.germi-rules` bundle; a HAR *without* the
+/// field is rejected with a clear message rather than silently importing
+/// nothing. The HAR check must come first — fed to the bare parser, a HAR
+/// would "succeed" as an empty bundle (every field is defaulted).
 pub fn parse_rules(bytes: &[u8]) -> Result<Vec<Scenario>> {
+    if let Some(bundle) = crate::import::har_embedded_rules(bytes) {
+        return parse_bundle(&bundle);
+    }
+    if is_har(bytes) {
+        anyhow::bail!("this HAR carries no embedded mock rules (embedding is opted into on save)");
+    }
+    parse_bundle(bytes)
+}
+
+/// Whether the bytes are a HAR-shaped JSON document (a top-level `log` object).
+fn is_har(bytes: &[u8]) -> bool {
+    #[derive(Deserialize)]
+    struct Peek {
+        log: Option<serde::de::IgnoredAny>,
+    }
+    serde_json::from_slice::<Peek>(bytes).is_ok_and(|p| p.log.is_some())
+}
+
+/// Parse a bare [`RulesExport`] bundle, re-keying every scenario and rule.
+/// Rejects a bundle from a newer, incompatible format.
+fn parse_bundle(bytes: &[u8]) -> Result<Vec<Scenario>> {
     if let Ok(peek) = serde_json::from_slice::<VersionPeek>(bytes) {
         if peek.version > FORMAT_VERSION {
             anyhow::bail!(
-                "unsupported .germi-rules version {} (this build supports up to {})",
+                "unsupported rules-bundle version {} (this build supports up to {})",
                 peek.version,
                 FORMAT_VERSION
             );
@@ -108,7 +126,7 @@ pub fn parse_rules(bytes: &[u8]) -> Result<Vec<Scenario>> {
     let export: RulesExport = serde_json::from_slice(bytes)?;
     if export.version > FORMAT_VERSION {
         anyhow::bail!(
-            "unsupported .germi-rules version {} (this build supports up to {})",
+            "unsupported rules-bundle version {} (this build supports up to {})",
             export.version,
             FORMAT_VERSION
         );
@@ -159,6 +177,14 @@ pub fn dedupe_name(taken: &mut HashSet<String>, name: &str) -> String {
 mod tests {
     use super::*;
     use crate::rules::{Action, MatchKind, Matcher, Rule};
+
+    /// The legacy bare `.germi-rules` file shape. Production code no longer
+    /// writes it (exports are rules-only HARs), but pre-unification files
+    /// exist, so the tests keep producing it to cover the import fallback.
+    fn export_rules(scenarios: &[Scenario]) -> Vec<u8> {
+        serde_json::to_vec_pretty(&RulesExport::new(scenarios.to_vec()))
+            .expect("serialize legacy bundle")
+    }
 
     fn respond_rule(id: &str) -> Rule {
         Rule {
@@ -567,5 +593,31 @@ mod tests {
         assert!(preview_rules(newer).is_none(), "newer format is not offered");
         assert!(preview_rules(br#"{"version":1,"scenarios":[]}"#).is_none(), "nothing to import");
         assert!(preview_rules(b"junk").is_none());
+    }
+
+    #[test]
+    fn parses_rules_from_a_rules_only_har() {
+        let scenarios = vec![scenario("sc-1", "Shared", vec![respond_rule("r-1")])];
+        let har = crate::har_export::export_har(&[], Some(&scenarios));
+        let back = parse_rules(&har).expect("rules HAR parses");
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].name, "Shared");
+        assert_eq!(back[0].rules.len(), 1);
+        assert_ne!(back[0].id, "sc-1", "HAR-carried scenarios are re-keyed too");
+    }
+
+    #[test]
+    fn empty_selection_round_trips_through_a_rules_only_har() {
+        let har = crate::har_export::export_har(&[], Some(&[]));
+        assert_eq!(parse_rules(&har).expect("empty bundle parses").len(), 0);
+    }
+
+    #[test]
+    fn har_without_embedded_rules_is_rejected_not_empty() {
+        let err = parse_rules(br#"{"log":{"entries":[]}}"#).unwrap_err();
+        assert!(
+            err.to_string().contains("no embedded mock rules"),
+            "a plain traffic HAR must fail loudly, not import zero scenarios: {err}"
+        );
     }
 }
