@@ -560,12 +560,10 @@ impl ProxyController {
             .lock()
             .map(|s| s.all_flows())
             .unwrap_or_default();
-        let rules = if include_rules {
-            self.mocking_scenarios()
-        } else {
-            Vec::new()
-        };
-        har_export::export_har(&flows, &rules)
+        let rules = include_rules
+            .then(|| self.mocking_scenarios())
+            .filter(|r| !r.is_empty());
+        har_export::export_har(&flows, rules.as_deref())
     }
 
     /// The scenarios evaluated against live traffic right now — the active
@@ -587,21 +585,25 @@ impl ProxyController {
             .collect()
     }
 
-    // ---- autoresponder rules export / import (.germi-rules) ----
+    // ---- autoresponder rules export / import (rules-only HAR) ----
 
-    /// Serialize scenarios to a portable `.germi-rules` bundle. With `Some(id)`
-    /// only that scenario is exported (empty bundle if it's not found); `None`
-    /// exports the whole config. The active-scenario pointer is never carried.
+    /// Serialize scenarios to a portable rules file: a HAR with zero entries
+    /// whose `_germiRules` field carries the bundle — one format for traffic
+    /// and rules alike, and any HTTP tool opens it as an (empty) capture. With
+    /// `Some(id)` only that scenario is exported (an empty bundle if it's not
+    /// found); `None` exports the whole config. The active-scenario pointer is
+    /// never carried.
     pub fn export_rules(&self, scenario_id: Option<&str>) -> Vec<u8> {
         let ar = self.get_autoresponder();
         let selected: Vec<Scenario> = match scenario_id {
             Some(id) => ar.scenarios.into_iter().filter(|s| s.id == id).collect(),
             None => ar.scenarios,
         };
-        rules_export::export_rules(&selected)
+        har_export::export_har(&[], Some(&selected))
     }
 
-    /// Import scenarios from a `.germi-rules` bundle. Imported scenarios are
+    /// Import scenarios from a rules file — a HAR carrying `_germiRules` or a
+    /// legacy bare `.germi-rules` bundle. Imported scenarios are
     /// always re-keyed (fresh scenario + rule ids) so they can never alias an
     /// existing rule's hit counter. `replace == false` appends them (active
     /// pointer preserved); `replace == true` clears existing scenarios and resets
@@ -1994,7 +1996,7 @@ mod tests {
             c.shared.record_new(f);
         }
         // Opening a file replaces the traffic AND restarts numbering at 1.
-        let bytes = crate::har_export::export_har(&[flow("x"), flow("y")], &[]);
+        let bytes = crate::har_export::export_har(&[flow("x"), flow("y")], None);
         let n = c.open_capture(&bytes, "har").expect("open har");
         assert_eq!(n, 2);
         let seqs: Vec<u64> = c.list_flows().into_iter().map(|s| s.seq).collect();
@@ -2020,7 +2022,7 @@ mod tests {
     fn open_capture_of_a_germi_written_har_round_trips_and_replaces() {
         let c = controller();
         c.shared.record_new(flow("stale"));
-        let bytes = crate::har_export::export_har(&[flow("a"), flow("b")], &[]);
+        let bytes = crate::har_export::export_har(&[flow("a"), flow("b")], None);
         let n = c.open_capture(&bytes, "har").expect("open har");
         assert_eq!(n, 2);
         assert_eq!(c.shared.store.lock().expect("lock store").len(), 2);
@@ -2146,7 +2148,7 @@ mod tests {
         let mut live = flow("live");
         live.seq = c.shared.next_seq();
         c.shared.record_new(live);
-        let bytes = crate::har_export::export_har(&[flow("x")], &[]);
+        let bytes = crate::har_export::export_har(&[flow("x")], None);
         let appended = c.append_capture(&bytes, "har").expect("append har");
         assert_eq!(
             appended[0].seq, 2,
