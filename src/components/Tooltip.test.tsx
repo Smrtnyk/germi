@@ -16,10 +16,14 @@ describe("Tooltip", () => {
 
   it("shows no tooltip before the trigger is hovered", async () => {
     const screen = await render(
-      <Tooltip label="Save the file">
-        <button>Save</button>
-      </Tooltip>,
+      <>
+        <p>neutral ground</p>
+        <Tooltip label="Save the file">
+          <button>Save</button>
+        </Tooltip>
+      </>,
     );
+    await userEvent.hover(screen.getByText("neutral ground"));
     await expect.element(screen.getByRole("tooltip")).not.toBeInTheDocument();
   });
 
