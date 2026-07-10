@@ -48,6 +48,16 @@ describe("Modal", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it("invokes the latest onClose when the prop changes after mount", async () => {
+    const stale = vi.fn();
+    const fresh = vi.fn();
+    const screen = await render(<Confirm onClose={stale} />);
+    await screen.rerender(<Confirm onClose={fresh} />);
+    await userEvent.keyboard("{Escape}");
+    expect(fresh).toHaveBeenCalledOnce();
+    expect(stale).not.toHaveBeenCalled();
+  });
+
   it("accepts static (non-render-prop) children", async () => {
     const screen = await render(
       <Modal onClose={vi.fn()} ariaLabel="Info">

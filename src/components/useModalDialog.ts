@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 
 export function useModalDialog(onClose: () => void) {
   const ref = useRef<HTMLDialogElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     const dlg = ref.current;
@@ -9,7 +11,7 @@ export function useModalDialog(onClose: () => void) {
     dlg.setAttribute("closedby", "any");
     if (!dlg.open) dlg.showModal();
 
-    const handleClose = () => onClose();
+    const handleClose = () => onCloseRef.current();
     const handleClick = (event: MouseEvent) => {
       if (event.target !== dlg) return;
       const r = dlg.getBoundingClientRect();

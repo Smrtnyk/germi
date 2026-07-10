@@ -35,9 +35,15 @@ import { useProxyIndicator } from "./useProxyIndicator";
 import { useSystemHotkeys } from "./useSystemHotkeys";
 import { friendlyError, useToasts, type Notify } from "./toast";
 import { toCurl } from "./curl";
+import { copyText } from "./useCopy";
 import { flowUrl } from "./flowUrl";
 import { focusMockResponseBody } from "./focusMockBody";
-import { nextIdAfterDelete, rangeSelection, toggleSelection } from "./selection";
+import {
+  capturedDeletePlan,
+  nextIdAfterDelete,
+  rangeSelection,
+  toggleSelection,
+} from "./selection";
 import { resolveBindings, type Bindings } from "./shortcuts";
 import { emitSettingsChanged } from "./themeSync";
 import { readFileAsBase64 } from "./captureDrop";
@@ -1237,30 +1243,25 @@ function countFlows(flows: FlowSummary[]): { imported: number; captured: number 
  *  rows; it's undoable via Ctrl/⌘ Z). */
 function deleteCapturedAction(
   flows: FlowSummary[],
+  visibleFlows: FlowSummary[],
   selectedId: string | null,
   pendingSelectRef: MutableRefObject<PendingSelect>,
   notify: Notify,
   setError: SetError,
 ): void {
-  const capturedIds = flows.filter((f) => !f.imported).map((f) => f.id);
-  if (capturedIds.length === 0) {
+  const plan = capturedDeletePlan(
+    flows,
+    visibleFlows.map((f) => f.id),
+    selectedId,
+  );
+  if (!plan) {
     notify("info", "No captured requests to delete");
     return;
   }
-  const deleted = new Set(capturedIds);
-  pendingSelectRef.current = {
-    // Pick the next selection from the VISIBLE (sorted) order, matching
-    // `deleteSelected`, so a distant arrival-order flow isn't selected instead.
-    nextId: nextIdAfterDelete(
-      flows.map((f) => f.id),
-      deleted,
-      selectedId,
-    ),
-    deleted,
-  };
+  pendingSelectRef.current = { nextId: plan.nextId, deleted: plan.deleted };
   void api
     .removeCapturedFlows()
-    .then(() => notify("success", `Deleted ${plural(capturedIds.length, "captured request")}`))
+    .then(() => notify("success", `Deleted ${plural(plan.capturedCount, "captured request")}`))
     .catch((e) => {
       pendingSelectRef.current = null;
       setError(String(e));
@@ -1271,6 +1272,7 @@ function deleteCapturedAction(
  *  #49) so the composition root just wires it, like the other feature hooks. */
 function useCapturedDelete(
   flows: FlowSummary[],
+  visibleFlows: FlowSummary[],
   selectedId: string | null,
   pendingSelectRef: MutableRefObject<PendingSelect>,
   notify: Notify,
@@ -1278,7 +1280,7 @@ function useCapturedDelete(
 ) {
   const counts = useMemo(() => countFlows(flows), [flows]);
   const deleteCaptured = () =>
-    deleteCapturedAction(flows, selectedId, pendingSelectRef, notify, setError);
+    deleteCapturedAction(flows, visibleFlows, selectedId, pendingSelectRef, notify, setError);
   return { deleteCaptured, capturedCount: counts.captured, importedCount: counts.imported };
 }
 
@@ -1448,9 +1450,7 @@ function useRuleWindows(
   }, [refresh]);
 
   const openRuleWindow = useCallback(
-    (ruleId: string) => {
-      const scenarioId = arRef.current.activeScenarioId;
-      if (!scenarioId) return;
+    (scenarioId: string, ruleId: string) => {
       const rule = arRef.current.scenarios
         .find((s) => s.id === scenarioId)
         ?.rules.find((r) => r.id === ruleId);
@@ -1597,6 +1597,7 @@ export function useAppState() {
 
   const captured = useCapturedDelete(
     sortedFlows,
+    savedFilters.visibleFlows,
     selection.selectedId,
     pendingSelectRef,
     notify,
@@ -1729,8 +1730,7 @@ export function useAppState() {
       notify("info", "No request selected");
       return;
     }
-    void navigator.clipboard.writeText(flowUrl(fs));
-    notify("success", "URL copied");
+    void copyText(notify, "URL", flowUrl(fs));
   }
 
   // F2: reveal the Autoresponder (un-collapse / switch to its tab), then focus

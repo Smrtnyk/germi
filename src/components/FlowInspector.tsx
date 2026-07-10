@@ -16,7 +16,7 @@ import type { Availability, FlowDetail, FlowSummary, MessageDetail } from "../ty
 import { availabilityLabel } from "../availability";
 import { statusCls } from "../filter";
 import { useToast } from "../toast";
-import { useCopy } from "../useCopy";
+import { copyText, useCopy } from "../useCopy";
 import { useResizable } from "../useResizable";
 import { headersToText, parseCookies, parseQuery, toCurl, type KV } from "../curl";
 import { rawMessage, requestLine, statusLine } from "../rawHttp";
@@ -1194,10 +1194,8 @@ function MultiSelectView({
   const stats = useMemo(() => summarize(flows), [flows]);
 
   const copyUrls = () => {
-    void navigator.clipboard.writeText(
-      flows.map((f) => `${f.scheme}://${f.host}${f.path}`).join("\n"),
-    );
-    notify("success", `Copied ${flows.length} URLs`);
+    const urls = flows.map((f) => `${f.scheme}://${f.host}${f.path}`).join("\n");
+    void copyText(notify, `${flows.length} URLs`, urls);
   };
 
   return (

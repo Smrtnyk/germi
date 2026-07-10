@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   appendBulkRuleSummaries,
   appendRuleSummary,
   insertRuleSummaryAfter,
+  popOutOpener,
   removeRuleSummary,
   reorderRuleSummary,
   replaceRuleSummary,
@@ -107,5 +108,44 @@ describe("selectedTabEnabled (Off/On button state)", () => {
   it("nothing selected reflects whether any scenario is active", () => {
     expect(selectedTabEnabled(null, ar({ activeScenarioId: "A" }))).toBe(true);
     expect(selectedTabEnabled(null, ar({ activeScenarioId: null }))).toBe(false);
+  });
+});
+
+describe("popOutOpener (detached rule window)", () => {
+  const idleEditor = { rule: null, flush: () => Promise.resolve() };
+
+  it("opens under the viewed scenario, not the active one (General tab pop-out)", () => {
+    const open = vi.fn();
+    popOutOpener(GENERAL_SCENARIO_ID, idleEditor, open)("r1");
+    expect(open).toHaveBeenCalledWith(GENERAL_SCENARIO_ID, "r1");
+  });
+
+  it("opens an inactive scenario's rule under that scenario", () => {
+    const open = vi.fn();
+    popOutOpener("viewed", idleEditor, open)("r1");
+    expect(open).toHaveBeenCalledWith("viewed", "r1");
+  });
+
+  it("flushes the inline editor first when popping out the rule being edited", async () => {
+    const order: string[] = [];
+    const editor = {
+      rule: { id: "r1" },
+      flush: () => {
+        order.push("flush");
+        return Promise.resolve();
+      },
+    };
+    const open = vi.fn(() => order.push("open"));
+    popOutOpener("viewed", editor, open)("r1");
+    expect(open).not.toHaveBeenCalled();
+    await Promise.resolve();
+    expect(order).toEqual(["flush", "open"]);
+    expect(open).toHaveBeenCalledWith("viewed", "r1");
+  });
+
+  it("skips the flush when a different rule is being edited", () => {
+    const open = vi.fn();
+    popOutOpener("viewed", { rule: { id: "other" }, flush: () => Promise.resolve() }, open)("r1");
+    expect(open).toHaveBeenCalledWith("viewed", "r1");
   });
 });
