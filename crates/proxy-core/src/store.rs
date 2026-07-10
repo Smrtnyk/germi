@@ -164,7 +164,10 @@ impl FlowStore {
             .collect()
     }
 
-    /// Flow ids in capture order (for body search over all flows).
+    /// Flow ids in capture order — a test observation seam (content search
+    /// scans a cloned snapshot instead, so the lock is never held while it
+    /// decodes).
+    #[cfg(test)]
     pub fn ids(&self) -> Vec<String> {
         self.order.iter().cloned().collect()
     }
@@ -262,7 +265,7 @@ mod tests {
                 path: format!("/{id}"),
                 version: "HTTP/1.1".into(),
                 headers: vec![],
-                body: vec![],
+                body: bytes::Bytes::new(),
                 timestamp_ms: 0,
             },
             response: None,
@@ -280,7 +283,7 @@ mod tests {
             status: 200,
             version: "HTTP/1.1".into(),
             headers: vec![],
-            body: vec![],
+            body: bytes::Bytes::new(),
             timestamp_ms: 0,
         }
     }

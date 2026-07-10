@@ -209,7 +209,7 @@ mod tests {
             path: format!("/{id}"),
             version: "HTTP/1.1".into(),
             headers: vec![],
-            body: vec![],
+            body: bytes::Bytes::new(),
             timestamp_ms: 0,
         }
     }
@@ -234,7 +234,7 @@ mod tests {
             status: 200,
             version: "HTTP/1.1".into(),
             headers: vec![],
-            body: b"hi".to_vec(),
+            body: b"hi".to_vec().into(),
             timestamp_ms: 0,
         }
     }

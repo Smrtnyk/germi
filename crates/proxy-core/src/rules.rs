@@ -373,7 +373,7 @@ impl From<&AutoResponder> for AutoResponderSummary {
 pub struct SyntheticResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
+    pub body: bytes::Bytes,
 }
 
 /// The synthetic 403 served for a `Block` rule (shared by the live handler and
@@ -382,7 +382,7 @@ pub(crate) fn blocked_response() -> SyntheticResponse {
     SyntheticResponse {
         status: 403,
         headers: vec![("content-type".to_string(), "text/plain".to_string())],
-        body: b"Blocked by Germi".to_vec(),
+        body: bytes::Bytes::from_static(b"Blocked by Germi"),
     }
 }
 
@@ -598,7 +598,7 @@ fn preflight_response(req: &CapturedRequest) -> Option<SyntheticResponse> {
     Some(SyntheticResponse {
         status: 204,
         headers,
-        body: Vec::new(),
+        body: bytes::Bytes::new(),
     })
 }
 
@@ -729,7 +729,7 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
                     response: SyntheticResponse {
                         status: *status,
                         headers: hs,
-                        body: body_bytes,
+                        body: body_bytes.into(),
                     },
                 };
             }
@@ -749,7 +749,7 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
                         response: SyntheticResponse {
                             status: *status,
                             headers: vec![("content-type".to_string(), ct)],
-                            body: bytes,
+                            body: bytes.into(),
                         },
                     };
                 }
@@ -909,7 +909,7 @@ fn rewrite_response_body(resp: &mut CapturedResponse, find: &str, replace: &str,
     let had_encoding = !crate::body::content_encodings_of(&resp.headers).is_empty();
     let (decoded, truncated) = match crate::body::decode_body(&resp.headers, &resp.body) {
         Some((d, t)) => (d, t),
-        None => (resp.body.clone(), false),
+        None => (resp.body.to_vec(), false),
     };
     if truncated {
         return false;
@@ -931,7 +931,7 @@ fn rewrite_response_body(resp: &mut CapturedResponse, find: &str, replace: &str,
     if new == text {
         return false;
     }
-    resp.body = new.into_bytes();
+    resp.body = new.into();
     // The body is now identity bytes, so drop the stale Content-Encoding
     // (Content-Length is recomputed downstream in build_parts).
     if had_encoding {
@@ -1199,8 +1199,8 @@ pub fn respond_rule_from_flow(flow: &Flow, id: String) -> Rule {
             //    would corrupt the response.
             let (decoded, encoding) = match crate::body::decode_body(&r.headers, &r.body) {
                 Some((decoded, false)) => (decoded, original_encoding),
-                _ if crate::body::looks_textual(&r.body) => (r.body.clone(), original_encoding),
-                _ => (r.body.clone(), None),
+                _ if crate::body::looks_textual(&r.body) => (r.body.to_vec(), original_encoding),
+                _ => (r.body.to_vec(), None),
             };
             // Seed the real response headers — minus content-type (its own field)
             // and length/encoding/hop-by-hop headers the engine recomputes.
@@ -1391,7 +1391,7 @@ mod tests {
             path: path.to_string(),
             version: "HTTP/1.1".to_string(),
             headers: vec![],
-            body: vec![],
+            body: bytes::Bytes::new(),
             timestamp_ms: 0,
         }
     }
@@ -1433,7 +1433,7 @@ mod tests {
 
     fn responded_body(outcome: &RequestOutcome) -> Option<&[u8]> {
         match outcome {
-            RequestOutcome::Respond { response, .. } => Some(response.body.as_slice()),
+            RequestOutcome::Respond { response, .. } => Some(&response.body),
             _ => None,
         }
     }
@@ -1454,7 +1454,7 @@ mod tests {
             RequestOutcome::Respond { response, rule, .. } => {
                 assert_eq!(rule, "/health");
                 assert_eq!(response.status, 200);
-                assert_eq!(response.body, b"mock");
+                assert_eq!(response.body, b"mock".as_slice());
             }
             other => panic!("expected Respond, got {other:?}"),
         }
@@ -1506,12 +1506,12 @@ mod tests {
             status: 200,
             version: "HTTP/1.1".into(),
             headers: vec![],
-            body: b"card 1234 5678".to_vec(),
+            body: b"card 1234 5678".to_vec().into(),
             timestamp_ms: 0,
         };
         let matched = rs.apply_response(&req("GET", "https", "x", "/"), &mut resp);
         assert_eq!(matched.as_deref(), Some("*"));
-        assert_eq!(resp.body, b"card XXXX XXXX");
+        assert_eq!(resp.body, b"card XXXX XXXX".as_slice());
     }
 
     #[test]
@@ -1542,12 +1542,12 @@ mod tests {
             status: 200,
             version: "HTTP/1.1".into(),
             headers: vec![("Content-Encoding".into(), "gzip".into())],
-            body: gz,
+            body: gz.into(),
             timestamp_ms: 0,
         };
         let matched = rs.apply_response(&req("GET", "https", "x", "/"), &mut resp);
         assert_eq!(matched.as_deref(), Some("*"));
-        assert_eq!(resp.body, b"the public token");
+        assert_eq!(resp.body, b"the public token".as_slice());
         assert!(
             !resp
                 .headers
@@ -1584,7 +1584,7 @@ mod tests {
             status: 200,
             version: "HTTP/1.1".into(),
             headers: vec![("Content-Encoding".into(), "gzip".into())],
-            body: gz.clone(),
+            body: gz.clone().into(),
             timestamp_ms: 0,
         };
         let mut cursors = RuleCursors::default();
@@ -1662,14 +1662,14 @@ mod tests {
                 path: "/api".into(),
                 version: "HTTP/1.1".into(),
                 headers: vec![],
-                body: vec![],
+                body: bytes::Bytes::new(),
                 timestamp_ms: 0,
             },
             response: Some(CapturedResponse {
                 status: 201,
                 version: "HTTP/1.1".into(),
                 headers: vec![("Content-Type".into(), "application/json".into())],
-                body: b"{\"a\":1}".to_vec(),
+                body: b"{\"a\":1}".to_vec().into(),
                 timestamp_ms: 0,
             }),
             matched_rule: None,
@@ -1711,7 +1711,7 @@ mod tests {
                 path: "/api/v2/rum?dd=1&k=abc".into(),
                 version: "HTTP/1.1".into(),
                 headers: vec![],
-                body: vec![],
+                body: bytes::Bytes::new(),
                 timestamp_ms: 0,
             },
             response: None,
@@ -1797,7 +1797,7 @@ mod tests {
                 path: "/api".into(),
                 version: "HTTP/1.1".into(),
                 headers: vec![],
-                body: vec![],
+                body: bytes::Bytes::new(),
                 timestamp_ms: 0,
             },
             response: Some(CapturedResponse {
@@ -1807,7 +1807,7 @@ mod tests {
                     ("Content-Type".into(), "application/json".into()),
                     ("Content-Encoding".into(), "gzip".into()),
                 ],
-                body: gz,
+                body: gz.into(),
                 timestamp_ms: 0,
             }),
             matched_rule: None,
@@ -1869,7 +1869,7 @@ mod tests {
                 path: "/api".into(),
                 version: "HTTP/1.1".into(),
                 headers: vec![],
-                body: vec![],
+                body: bytes::Bytes::new(),
                 timestamp_ms: 0,
             },
             response: Some(CapturedResponse {
@@ -1879,7 +1879,7 @@ mod tests {
                     ("Content-Type".into(), "application/json".into()),
                     ("Content-Encoding".into(), "gzip".into()),
                 ],
-                body: b"{\"ok\":true}".to_vec(),
+                body: b"{\"ok\":true}".to_vec().into(),
                 timestamp_ms: 0,
             }),
             matched_rule: None,
@@ -1922,7 +1922,7 @@ mod tests {
                 path: "/api".into(),
                 version: "HTTP/1.1".into(),
                 headers: vec![],
-                body: vec![],
+                body: bytes::Bytes::new(),
                 timestamp_ms: 0,
             },
             response: Some(CapturedResponse {
@@ -1932,7 +1932,7 @@ mod tests {
                     ("Content-Type".into(), "application/octet-stream".into()),
                     ("Content-Encoding".into(), "gzip".into()),
                 ],
-                body: binary.clone(),
+                body: binary.clone().into(),
                 timestamp_ms: 0,
             }),
             matched_rule: None,
@@ -2006,7 +2006,7 @@ mod tests {
                     "gzip toggle must stamp content-encoding: gzip",
                 );
                 assert_ne!(
-                    response.body, b"{\"mocked\":true}",
+                    response.body, b"{\"mocked\":true}".as_slice(),
                     "wire body must be compressed, not the raw text",
                 );
                 let decoded = crate::body::try_decompress("gzip", &response.body)
@@ -2024,7 +2024,7 @@ mod tests {
                     !response.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-encoding")),
                     "identity toggle must not stamp content-encoding",
                 );
-                assert_eq!(response.body, b"{\"mocked\":true}");
+                assert_eq!(response.body, b"{\"mocked\":true}".as_slice());
             }
             other => panic!("expected Respond, got {other:?}"),
         }
@@ -2062,7 +2062,7 @@ mod tests {
                         .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding")),
                     "unsupported encoding must not stamp a content-encoding header",
                 );
-                assert_eq!(response.body, b"hello", "body is sent as identity bytes");
+                assert_eq!(response.body, b"hello".as_slice(), "body is sent as identity bytes");
             }
             other => panic!("expected Respond, got {other:?}"),
         }
@@ -2078,7 +2078,7 @@ mod tests {
             path: path.into(),
             version: "HTTP/1.1".into(),
             headers: vec![],
-            body: vec![],
+            body: bytes::Bytes::new(),
             timestamp_ms: 0,
         };
         let flow = Flow {
@@ -2721,7 +2721,7 @@ mod tests {
             status: 200,
             version: "HTTP/1.1".into(),
             headers: vec![],
-            body: vec![],
+            body: bytes::Bytes::new(),
             timestamp_ms: 0,
         }
     }
