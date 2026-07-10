@@ -103,23 +103,27 @@ impl RuleStore {
     }
 
     /// Rebuild the autoresponder tables from an older build's schema, preserving the
-    /// rules via their stored `rule_json` when the old schema is still readable (an
-    /// unreadable one is discarded — schema changes may discard old dev data).
+    /// rules via their stored `rule_json` when the old rows are still readable
+    /// (unreadable rows are skipped — schema changes may discard old dev data).
+    /// Drop + create + re-insert run in ONE transaction (`SQLite` DDL is
+    /// transactional), so a crash or a re-insert the new constraints reject
+    /// rolls back to the untouched old database instead of destroying it.
     fn rebuild_schema(connection: &mut Connection) -> Result<(), String> {
         tracing::warn!("autoresponder database is from an older build; rebuilding its schema");
         let preserved = Self::load_with_connection(connection).ok();
-        connection
+        let transaction = connection.transaction().map_err(|e| e.to_string())?;
+        transaction
             .execute_batch(
                 "DROP TABLE IF EXISTS rules;
                  DROP TABLE IF EXISTS scenarios;
                  DROP TABLE IF EXISTS metadata;",
             )
             .map_err(|e| e.to_string())?;
-        Self::create_schema(connection)?;
+        Self::create_schema(&transaction)?;
         if let Some(existing) = preserved {
-            Self::replace_with_connection(connection, &existing)?;
+            Self::replace_in_transaction(&transaction, &existing)?;
         }
-        Ok(())
+        transaction.commit().map_err(|e| e.to_string())
     }
 
     fn connect(&self) -> Result<Connection, String> {
@@ -220,7 +224,19 @@ impl RuleStore {
             let mut rules = Vec::new();
             for row in rows {
                 let json = row.map_err(|e| e.to_string())?;
-                rules.push(serde_json::from_str(&json).map_err(|e| e.to_string())?);
+                // A row that no longer deserializes (corruption, or a newer
+                // build's unknown Action variant) must not block the whole load
+                // — a bad rule would otherwise abort app launch. Skipping means
+                // a later full-rewrite `replace` drops that row for good;
+                // losing one unreadable rule beats refusing to start.
+                match serde_json::from_str(&json) {
+                    Ok(rule) => rules.push(rule),
+                    Err(error) => tracing::warn!(
+                        scenario = %id,
+                        %error,
+                        "skipping a rule whose stored rule_json no longer deserializes"
+                    ),
+                }
             }
             scenarios.push(Scenario { id, name, rules });
         }
@@ -249,6 +265,14 @@ impl RuleStore {
         autoresponder: &AutoResponder,
     ) -> Result<(), String> {
         let transaction = connection.transaction().map_err(|e| e.to_string())?;
+        Self::replace_in_transaction(&transaction, autoresponder)?;
+        transaction.commit().map_err(|e| e.to_string())
+    }
+
+    fn replace_in_transaction(
+        transaction: &Transaction<'_>,
+        autoresponder: &AutoResponder,
+    ) -> Result<(), String> {
         transaction
             .execute_batch("DELETE FROM rules; DELETE FROM scenarios; DELETE FROM metadata;")
             .map_err(|e| e.to_string())?;
@@ -261,16 +285,16 @@ impl RuleStore {
                 .map_err(|e| e.to_string())?;
             for (rule_index, rule) in scenario.rules.iter().enumerate() {
                 insert_rule_row(
-                    &transaction,
+                    transaction,
                     &scenario.id,
                     sort_key(rule_index),
                     rule,
                 )?;
             }
         }
-        set_active_metadata(&transaction, autoresponder.active_scenario_id.as_deref())?;
-        set_general_metadata(&transaction, autoresponder.general_active)?;
-        transaction.commit().map_err(|e| e.to_string())
+        set_active_metadata(transaction, autoresponder.active_scenario_id.as_deref())?;
+        set_general_metadata(transaction, autoresponder.general_active)?;
+        Ok(())
     }
 
     pub fn set_general_active(&self, active: bool) -> Result<(), String> {
@@ -417,22 +441,39 @@ impl RuleStore {
         if self.read_only {
             return Ok(());
         }
-        let connection = self.connect()?;
-        let previous = rule_sort_key(&connection, scenario_id, previous_id)?;
-        let next = rule_sort_key(&connection, scenario_id, next_id)?;
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction().map_err(|e| e.to_string())?;
+        let previous = rule_sort_key(&transaction, scenario_id, previous_id)?;
+        let next = rule_sort_key(&transaction, scenario_id, next_id)?;
         let key = match (previous, next) {
-            (Some(previous), Some(next)) => (previous + next) / 2.0,
+            (Some(previous), Some(next)) => {
+                let midpoint = (previous + next) / 2.0;
+                // Repeated moves between the same neighbors exhaust f64
+                // precision: once the midpoint collapses onto an endpoint, two
+                // rows would share a sort_key and rule order (= match priority)
+                // becomes nondeterministic. Resequence the scenario and retry.
+                if midpoint > previous && midpoint < next {
+                    midpoint
+                } else {
+                    resequence_sort_keys(&transaction, scenario_id)?;
+                    let previous = rule_sort_key(&transaction, scenario_id, previous_id)?
+                        .ok_or_else(|| "rule not found".to_string())?;
+                    let next = rule_sort_key(&transaction, scenario_id, next_id)?
+                        .ok_or_else(|| "rule not found".to_string())?;
+                    (previous + next) / 2.0
+                }
+            }
             (Some(previous), None) => previous + SORT_STEP,
             (None, Some(next)) => next - SORT_STEP,
             (None, None) => 0.0,
         };
-        connection
+        transaction
             .execute(
                 "UPDATE rules SET sort_key = ?3 WHERE scenario_id = ?1 AND id = ?2",
                 params![scenario_id, rule_id, key],
             )
             .map_err(|e| e.to_string())?;
-        Ok(())
+        transaction.commit().map_err(|e| e.to_string())
     }
 
     pub fn apply_mock_batch(
@@ -607,6 +648,26 @@ fn insertion_key(
         )
         .map_err(|e| e.to_string())?;
     Ok(next.map_or(after + SORT_STEP, |next| (after + next) / 2.0))
+}
+
+fn resequence_sort_keys(connection: &Connection, scenario_id: &str) -> Result<(), String> {
+    let mut statement = connection
+        .prepare("SELECT id FROM rules WHERE scenario_id = ?1 ORDER BY sort_key")
+        .map_err(|e| e.to_string())?;
+    let ids: Vec<String> = statement
+        .query_map([scenario_id], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    for (index, id) in ids.iter().enumerate() {
+        connection
+            .execute(
+                "UPDATE rules SET sort_key = ?3 WHERE scenario_id = ?1 AND id = ?2",
+                params![scenario_id, id, sort_key(index)],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn rule_sort_key(
@@ -1008,6 +1069,219 @@ mod tests {
         );
 
         drop(store);
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn failed_heal_keeps_the_original_database() {
+        // A pre-#74 DB keyed rules by (scenario_id, id), so one rule id may
+        // appear in two scenarios — data the current `id TEXT PRIMARY KEY`
+        // rejects on re-insert. The heal must fail WITHOUT destroying the
+        // original tables.
+        let dir = test_dir("heal-rollback");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join(DB_FILE);
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE scenarios (id TEXT PRIMARY KEY, name TEXT NOT NULL, sort_key REAL NOT NULL);
+                 CREATE TABLE rules (
+                    id TEXT NOT NULL,
+                    scenario_id TEXT NOT NULL REFERENCES scenarios(id) ON DELETE CASCADE,
+                    sort_key REAL NOT NULL,
+                    name TEXT NOT NULL,
+                    enabled INTEGER NOT NULL,
+                    fire_limit INTEGER,
+                    repeat INTEGER NOT NULL,
+                    method TEXT,
+                    url TEXT NOT NULL,
+                    url_match TEXT NOT NULL,
+                    action_kind TEXT NOT NULL,
+                    action_status INTEGER,
+                    action_content_type TEXT,
+                    action_name TEXT,
+                    rule_json TEXT NOT NULL,
+                    PRIMARY KEY (scenario_id, id)
+                 );",
+            )
+            .unwrap();
+            for scenario in ["a", "b"] {
+                conn.execute(
+                    "INSERT INTO scenarios (id, name, sort_key) VALUES (?1, ?1, 1024.0)",
+                    [scenario],
+                )
+                .unwrap();
+                let seeded = rule("dup", "body");
+                let json = serde_json::to_string(&seeded).unwrap();
+                conn.execute(
+                    "INSERT INTO rules
+                        (id, scenario_id, sort_key, name, enabled, repeat, url, url_match, action_kind, rule_json)
+                     VALUES ('dup', ?1, 1024.0, 'legacy', 1, 0, ?2, 'exact', 'respond', ?3)",
+                    params![scenario, seeded.matcher.url, json],
+                )
+                .unwrap();
+            }
+        }
+
+        let result = RuleStore::open(&dir, false);
+        assert!(
+            result.is_err(),
+            "healing a DB whose preserved data violates the new schema must fail"
+        );
+
+        let conn = Connection::open(&db).unwrap();
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(rules)").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.map(|c| c.unwrap()).collect()
+        };
+        assert!(
+            cols.iter().any(|c| c == "name"),
+            "a failed heal must leave the original legacy table intact: {cols:?}"
+        );
+        let scenarios: i64 = conn
+            .query_row("SELECT COUNT(*) FROM scenarios", [], |r| r.get(0))
+            .unwrap();
+        let rules_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM rules", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            (scenarios, rules_count),
+            (2, 2),
+            "a failed heal must not lose any scenario or rule"
+        );
+
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn heal_preserves_readable_rules_around_a_corrupt_row() {
+        let dir = test_dir("heal-corrupt-row");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join(DB_FILE);
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE scenarios (id TEXT PRIMARY KEY, name TEXT NOT NULL, sort_key REAL NOT NULL);
+                 CREATE TABLE rules (
+                    id TEXT PRIMARY KEY,
+                    scenario_id TEXT NOT NULL REFERENCES scenarios(id) ON DELETE CASCADE,
+                    sort_key REAL NOT NULL,
+                    name TEXT NOT NULL,
+                    enabled INTEGER NOT NULL,
+                    fire_limit INTEGER,
+                    repeat INTEGER NOT NULL,
+                    method TEXT,
+                    url TEXT NOT NULL,
+                    url_match TEXT NOT NULL,
+                    action_kind TEXT NOT NULL,
+                    action_status INTEGER,
+                    action_content_type TEXT,
+                    action_name TEXT,
+                    rule_json TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO scenarios (id, name, sort_key) VALUES ('scenario', 'Scenario', 1024.0)",
+                [],
+            )
+            .unwrap();
+            for (index, (id, json)) in [
+                ("one", serde_json::to_string(&rule("one", "first")).unwrap()),
+                ("two", "not json".to_string()),
+                ("three", serde_json::to_string(&rule("three", "third")).unwrap()),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                conn.execute(
+                    "INSERT INTO rules
+                        (id, scenario_id, sort_key, name, enabled, repeat, url, url_match, action_kind, rule_json)
+                     VALUES (?1, 'scenario', ?2, 'legacy', 1, 0, 'https://example.com', 'exact', 'respond', ?3)",
+                    params![id, sort_key(index + 1), json],
+                )
+                .unwrap();
+            }
+        }
+
+        let (_, loaded) = RuleStore::open(&dir, false).expect("heal salvages readable rows");
+        let ids: Vec<_> = user(&loaded).rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["one", "three"],
+            "a heal must discard only the corrupt row, not everything"
+        );
+
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn open_skips_an_undeserializable_rule_on_a_current_schema() {
+        // Downgrade scenario: a newer build wrote a rule with an unknown Action
+        // variant. Opening must not abort app launch — it skips that rule.
+        let dir = test_dir("bad-rule-json");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+        store.replace(&autoresponder()).expect("seed store");
+        drop(store);
+        {
+            let conn = Connection::open(dir.join(DB_FILE)).unwrap();
+            conn.execute(
+                r#"UPDATE rules SET rule_json =
+                   '{"id":"two","matcher":{"url":"https://example.com/two","urlMatch":"exact"},"action":{"kind":"fromTheFuture"}}'
+                   WHERE id = 'two'"#,
+                [],
+            )
+            .unwrap();
+        }
+
+        let (store, loaded) = RuleStore::open(&dir, false).expect("open tolerates one bad rule row");
+        let ids: Vec<_> = user(&loaded).rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["one", "three"], "the good rules still load");
+
+        let reloaded = store.load().expect("load tolerates one bad rule row");
+        let ids: Vec<_> = user(&reloaded).rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["one", "three"]);
+
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn repeated_reorders_between_the_same_neighbors_keep_keys_distinct() {
+        let dir = test_dir("reorder-precision");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+        store.replace(&autoresponder()).expect("seed store");
+        let conn = Connection::open(dir.join(DB_FILE)).unwrap();
+
+        for round in 0..80 {
+            if round % 2 == 0 {
+                store
+                    .reorder_rule("scenario", "one", Some("two"), Some("three"))
+                    .expect("reorder one");
+            } else {
+                store
+                    .reorder_rule("scenario", "three", Some("two"), Some("one"))
+                    .expect("reorder three");
+            }
+            let keys: Vec<f64> = {
+                let mut stmt = conn
+                    .prepare("SELECT sort_key FROM rules WHERE scenario_id = 'scenario' ORDER BY sort_key")
+                    .unwrap();
+                let rows = stmt.query_map([], |row| row.get(0)).unwrap();
+                rows.map(|k| k.unwrap()).collect()
+            };
+            assert!(
+                keys[0] < keys[1] && keys[1] < keys[2],
+                "sort keys must stay strictly distinct at round {round}: {keys:?}"
+            );
+        }
+
+        let loaded = store.load().expect("reload");
+        let ids: Vec<_> = user(&loaded).rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["two", "three", "one"], "order stays correct after 80 reorders");
+
         std::fs::remove_dir_all(dir).expect("remove temp dir");
     }
 
