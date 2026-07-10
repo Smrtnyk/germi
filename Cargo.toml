@@ -11,7 +11,7 @@ members = ["crates/proxy-core", "src-tauri"]
 [workspace.package]
 edition = "2021"
 license = "0BSD"
-rust-version = "1.82"
+rust-version = "1.89"
 
 # Lints are enforced repo-wide: every member opts in with `[lints] workspace = true`.
 # Levels are "deny" so they hard-fail locally too (CI also passes `-- -D warnings`).

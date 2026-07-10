@@ -447,7 +447,7 @@ impl RuleStore {
         let next = rule_sort_key(&transaction, scenario_id, next_id)?;
         let key = match (previous, next) {
             (Some(previous), Some(next)) => {
-                let midpoint = (previous + next) / 2.0;
+                let midpoint = f64::midpoint(previous, next);
                 // Repeated moves between the same neighbors exhaust f64
                 // precision: once the midpoint collapses onto an endpoint, two
                 // rows would share a sort_key and rule order (= match priority)
@@ -460,7 +460,7 @@ impl RuleStore {
                         .ok_or_else(|| "rule not found".to_string())?;
                     let next = rule_sort_key(&transaction, scenario_id, next_id)?
                         .ok_or_else(|| "rule not found".to_string())?;
-                    (previous + next) / 2.0
+                    f64::midpoint(previous, next)
                 }
             }
             (Some(previous), None) => previous + SORT_STEP,
@@ -647,7 +647,7 @@ fn insertion_key(
             |row| row.get::<_, Option<f64>>(0),
         )
         .map_err(|e| e.to_string())?;
-    Ok(next.map_or(after + SORT_STEP, |next| (after + next) / 2.0))
+    Ok(next.map_or(after + SORT_STEP, |next| f64::midpoint(after, next)))
 }
 
 fn resequence_sort_keys(connection: &Connection, scenario_id: &str) -> Result<(), String> {

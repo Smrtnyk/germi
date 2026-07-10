@@ -2,6 +2,7 @@
 
 mod commands;
 mod indicator;
+mod instance;
 mod persist;
 mod portal_hotkey;
 mod rule_store;
@@ -11,6 +12,7 @@ use std::sync::Arc;
 
 use proxy_core::ProxyController;
 use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
 
 use state::AppState;
 
@@ -39,6 +41,28 @@ fn init_app_state(app: &mut tauri::App, viewer: bool) -> Result<(), Box<dyn std:
         .path()
         .app_data_dir()
         .map_err(|e| format!("could not resolve app data dir: {e}"))?;
+    // The single-instance check must precede every touch of the shared
+    // app-data stores (CA files, autoresponder.sqlite3, settings.json,
+    // scripts.json) so a losing instance can never corrupt the primary's
+    // state.
+    match instance::guard(viewer, &ca_dir) {
+        // Deliberately leaked: the lock must live for the whole process
+        // lifetime, and the OS releases it when the process exits or dies.
+        instance::GuardOutcome::Held(lock) => std::mem::forget(lock),
+        instance::GuardOutcome::Skipped => {}
+        instance::GuardOutcome::AlreadyRunning => {
+            eprintln!("Germi is already running.");
+            app.dialog()
+                .message("Germi is already running.")
+                .title("Germi")
+                .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                .blocking_show();
+            std::process::exit(1);
+        }
+        instance::GuardOutcome::Unavailable(e) => {
+            tracing::warn!("single-instance lock unavailable, continuing unguarded: {e}");
+        }
+    }
     let ca = ProxyController::load_or_generate_ca(&ca_dir)
         .map_err(|e| format!("failed to initialize CA: {e}"))?;
     let controller = Arc::new(ProxyController::new(ca));
