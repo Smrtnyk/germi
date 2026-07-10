@@ -11,9 +11,9 @@ use std::time::Duration;
 use base64::Engine;
 use proxy_core::{
     AutoResponderSummary, BodyComparison, FlowDetail, FlowEvent, FlowSummary, HistoryStep,
-    HistoryTag, MockResult, ProxySettings, Rule, RuleSearchScope, RuleSummary, Scenario,
-    ScenarioSummary, Script, ScriptDiagnostic, SearchSide, TestInput, TestResult,
-    GENERAL_SCENARIO_ID,
+    HistoryTag, MockBatch, MockResult, ProxyController, ProxySettings, Rule, RuleSearchScope,
+    RuleSummary, Scenario, ScenarioSummary, Script, ScriptDiagnostic, SearchSide, TestInput,
+    TestResult, GENERAL_SCENARIO_ID,
 };
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -175,37 +175,41 @@ pub async fn subscribe_flows(
     // aborts the prior forwarder and installs its own atomically. Spawning under
     // the lock is fine — it's synchronous, no `.await` is held. Without this, a
     // spawn-then-lock race could abort the newest forwarder (the live channel) and
-    // leave a dead one feeding a nulled-onmessage channel.
-    if let Ok(mut slot) = state.flow_forwarder.lock() {
-        let handle = tauri::async_runtime::spawn(async move {
-            let mut buf: Vec<FlowEvent> = Vec::new();
-            let mut ticker = tokio::time::interval(Duration::from_millis(60));
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tokio::select! {
-                    received = rx.recv() => match received {
-                        Ok(event) => {
-                            buf.push(event);
-                            if buf.len() >= 200 && channel.send(std::mem::take(&mut buf)).is_err() {
-                                break;
-                            }
-                        }
-                        // Subscriber fell behind and events were dropped; tell the UI
-                        // to re-list and resynchronize (flushed with the next batch).
-                        Err(RecvError::Lagged(_)) => buf.push(FlowEvent::Resync),
-                        Err(RecvError::Closed) => break,
-                    },
-                    _ = ticker.tick() => {
-                        if !buf.is_empty() && channel.send(std::mem::take(&mut buf)).is_err() {
+    // leave a dead one feeding a nulled-onmessage channel. The slot is plain data
+    // (a task handle), so recover from a poisoned lock instead of silently
+    // skipping the install (which would leave the traffic list dead forever).
+    let mut slot = state
+        .flow_forwarder
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let handle = tauri::async_runtime::spawn(async move {
+        let mut buf: Vec<FlowEvent> = Vec::new();
+        let mut ticker = tokio::time::interval(Duration::from_millis(60));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                received = rx.recv() => match received {
+                    Ok(event) => {
+                        buf.push(event);
+                        if buf.len() >= 200 && channel.send(std::mem::take(&mut buf)).is_err() {
                             break;
                         }
                     }
+                    // Subscriber fell behind and events were dropped; tell the UI
+                    // to re-list and resynchronize (flushed with the next batch).
+                    Err(RecvError::Lagged(_)) => buf.push(FlowEvent::Resync),
+                    Err(RecvError::Closed) => break,
+                },
+                _ = ticker.tick() => {
+                    if !buf.is_empty() && channel.send(std::mem::take(&mut buf)).is_err() {
+                        break;
+                    }
                 }
             }
-        });
-        if let Some(prev) = slot.replace(handle) {
-            prev.abort();
         }
+    });
+    if let Some(prev) = slot.replace(handle) {
+        prev.abort();
     }
     Ok(())
 }
@@ -273,7 +277,7 @@ pub async fn get_rule(
 }
 
 #[tauri::command]
-pub fn set_active_scenario(
+pub async fn set_active_scenario(
     state: State<'_, AppState>,
     scenario_id: Option<String>,
     history_tag: HistoryTag,
@@ -283,53 +287,80 @@ pub fn set_active_scenario(
     if scenario_id.as_deref() == Some(GENERAL_SCENARIO_ID) {
         return Err("the built-in General scenario cannot be the active scenario".to_string());
     }
-    state
-        .rule_store
-        .set_active_scenario(scenario_id.as_deref())?;
-    state.controller.with_history(history_tag, |c| {
-        c.set_active_scenario(scenario_id.as_deref())
-            .map_err(|e| e.to_string())
+    let controller = state.controller.clone();
+    let rule_store = state.rule_store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        activate_scenario(&controller, &rule_store, scenario_id.as_deref(), history_tag)
     })
+    .await
+    .map_err(|e| format!("scenario activation task failed: {e}"))?
+}
+
+/// Engine first so an unknown scenario id is rejected before it hits the DB; a
+/// persist failure after leaves memory-only state that self-heals on restart
+/// (never disk-only).
+fn activate_scenario(
+    controller: &ProxyController,
+    rule_store: &crate::rule_store::RuleStore,
+    scenario_id: Option<&str>,
+    history_tag: HistoryTag,
+) -> Result<(), String> {
+    controller.with_history(history_tag, |c| {
+        c.set_active_scenario(scenario_id).map_err(|e| e.to_string())
+    })?;
+    rule_store.set_active_scenario(scenario_id)
 }
 
 /// Toggle the built-in General layer on/off. Persisted, then applied to the live
 /// engine (undo-tracked) so it takes effect for new traffic immediately.
 #[tauri::command]
-pub fn set_general_active(
+pub async fn set_general_active(
     state: State<'_, AppState>,
     active: bool,
     history_tag: HistoryTag,
 ) -> Result<(), String> {
-    state.rule_store.set_general_active(active)?;
-    state.controller.with_history(history_tag, |c| {
-        c.set_general_active(active).map_err(|e| e.to_string())
+    let controller = state.controller.clone();
+    let rule_store = state.rule_store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        rule_store.set_general_active(active)?;
+        controller.with_history(history_tag, |c| {
+            c.set_general_active(active).map_err(|e| e.to_string())
+        })
     })
+    .await
+    .map_err(|e| format!("general toggle task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn create_scenario(
+pub async fn create_scenario(
     state: State<'_, AppState>,
     name: Option<String>,
     history_tag: HistoryTag,
 ) -> Result<ScenarioSummary, String> {
-    state.controller.with_history(history_tag, |c| {
-        let summary = c.create_scenario(name.as_deref()).map_err(|e| e.to_string())?;
-        let scenario = Scenario {
-            id: summary.id.clone(),
-            name: summary.name.clone(),
-            rules: Vec::new(),
-        };
-        if let Err(error) = state.rule_store.insert_scenario(&scenario) {
-            let _ = c.delete_scenario(&summary.id);
-            return Err(error);
-        }
-        state.rule_store.set_active_scenario(Some(&summary.id))?;
-        Ok(summary)
+    let controller = state.controller.clone();
+    let rule_store = state.rule_store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        controller.with_history(history_tag, |c| {
+            let summary = c.create_scenario(name.as_deref()).map_err(|e| e.to_string())?;
+            let scenario = Scenario {
+                id: summary.id.clone(),
+                name: summary.name.clone(),
+                rules: Vec::new(),
+            };
+            if let Err(error) = rule_store.insert_scenario(&scenario) {
+                let _ = c.delete_scenario(&summary.id);
+                return Err(error);
+            }
+            rule_store.set_active_scenario(Some(&summary.id))?;
+            Ok(summary)
+        })
     })
+    .await
+    .map_err(|e| format!("scenario creation task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn rename_scenario(
+pub async fn rename_scenario(
     state: State<'_, AppState>,
     scenario_id: String,
     name: String,
@@ -338,14 +369,20 @@ pub fn rename_scenario(
     if scenario_id == GENERAL_SCENARIO_ID {
         return Err("the built-in General scenario cannot be renamed".to_string());
     }
-    state.rule_store.rename_scenario(&scenario_id, &name)?;
-    state.controller.with_history(history_tag, |c| {
-        c.rename_scenario(&scenario_id, name).map_err(|e| e.to_string())
+    let controller = state.controller.clone();
+    let rule_store = state.rule_store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        rule_store.rename_scenario(&scenario_id, &name)?;
+        controller.with_history(history_tag, |c| {
+            c.rename_scenario(&scenario_id, name).map_err(|e| e.to_string())
+        })
     })
+    .await
+    .map_err(|e| format!("scenario rename task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn delete_scenario(
+pub async fn delete_scenario(
     state: State<'_, AppState>,
     scenario_id: String,
     history_tag: HistoryTag,
@@ -353,26 +390,38 @@ pub fn delete_scenario(
     if scenario_id == GENERAL_SCENARIO_ID {
         return Err("the built-in General scenario cannot be deleted".to_string());
     }
-    state.rule_store.delete_scenario(&scenario_id)?;
-    state.controller.with_history(history_tag, |c| {
-        c.delete_scenario(&scenario_id).map_err(|e| e.to_string())
+    let controller = state.controller.clone();
+    let rule_store = state.rule_store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        rule_store.delete_scenario(&scenario_id)?;
+        controller.with_history(history_tag, |c| {
+            c.delete_scenario(&scenario_id).map_err(|e| e.to_string())
+        })
     })
+    .await
+    .map_err(|e| format!("scenario deletion task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn create_rule(
+pub async fn create_rule(
     state: State<'_, AppState>,
     scenario_id: String,
     history_tag: HistoryTag,
 ) -> Result<RuleSummary, String> {
-    state.controller.with_history(history_tag, |c| {
-        let (rule, summary) = c.create_rule(&scenario_id).map_err(|e| e.to_string())?;
-        if let Err(error) = state.rule_store.insert_rule(&scenario_id, &rule, None) {
-            let _ = c.delete_rule(&scenario_id, &rule.id);
-            return Err(error);
-        }
-        Ok(summary)
+    let controller = state.controller.clone();
+    let rule_store = state.rule_store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        controller.with_history(history_tag, |c| {
+            let (rule, summary) = c.create_rule(&scenario_id).map_err(|e| e.to_string())?;
+            if let Err(error) = rule_store.insert_rule(&scenario_id, &rule, None) {
+                let _ = c.delete_rule(&scenario_id, &rule.id);
+                return Err(error);
+            }
+            Ok(summary)
+        })
     })
+    .await
+    .map_err(|e| format!("rule creation task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -398,35 +447,47 @@ pub async fn update_rule(
 }
 
 #[tauri::command]
-pub fn delete_rule(
+pub async fn delete_rule(
     state: State<'_, AppState>,
     scenario_id: String,
     rule_id: String,
     history_tag: HistoryTag,
 ) -> Result<(), String> {
-    state.rule_store.delete_rule(&scenario_id, &rule_id)?;
-    state.controller.with_history(history_tag, |c| {
-        c.delete_rule(&scenario_id, &rule_id).map_err(|e| e.to_string())
+    let controller = state.controller.clone();
+    let rule_store = state.rule_store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        rule_store.delete_rule(&scenario_id, &rule_id)?;
+        controller.with_history(history_tag, |c| {
+            c.delete_rule(&scenario_id, &rule_id).map_err(|e| e.to_string())
+        })
     })
+    .await
+    .map_err(|e| format!("rule deletion task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn delete_rules(
+pub async fn delete_rules(
     state: State<'_, AppState>,
     scenario_id: String,
     rule_ids: Vec<String>,
     history_tag: HistoryTag,
 ) -> Result<(), String> {
-    // Persist first (idempotent DELETEs, so missing ids are harmless), then apply
-    // the whole batch inside one history step so it undoes as a single action.
-    for rule_id in &rule_ids {
-        state.rule_store.delete_rule(&scenario_id, rule_id)?;
-    }
-    state.controller.with_history(history_tag, |c| {
-        c.delete_rules(&scenario_id, &rule_ids)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+    let controller = state.controller.clone();
+    let rule_store = state.rule_store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Persist first (idempotent DELETEs, so missing ids are harmless), then apply
+        // the whole batch inside one history step so it undoes as a single action.
+        for rule_id in &rule_ids {
+            rule_store.delete_rule(&scenario_id, rule_id)?;
+        }
+        controller.with_history(history_tag, |c| {
+            c.delete_rules(&scenario_id, &rule_ids)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
     })
+    .await
+    .map_err(|e| format!("rule deletion task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -455,30 +516,36 @@ pub async fn duplicate_rule(
 }
 
 #[tauri::command]
-pub fn reorder_rule(
+pub async fn reorder_rule(
     state: State<'_, AppState>,
     scenario_id: String,
     rule_id: String,
     to_id: String,
     history_tag: HistoryTag,
 ) -> Result<(), String> {
-    state.controller.with_history(history_tag, |c| {
-        let (previous, next) = c
-            .reorder_rule(&scenario_id, &rule_id, &to_id)
-            .map_err(|e| e.to_string())?;
-        if let Err(error) = state.rule_store.reorder_rule(
-            &scenario_id,
-            &rule_id,
-            previous.as_deref(),
-            next.as_deref(),
-        ) {
-            if let Ok(autoresponder) = state.rule_store.load() {
-                c.set_autoresponder(autoresponder);
+    let controller = state.controller.clone();
+    let rule_store = state.rule_store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        controller.with_history(history_tag, |c| {
+            let (previous, next) = c
+                .reorder_rule(&scenario_id, &rule_id, &to_id)
+                .map_err(|e| e.to_string())?;
+            if let Err(error) = rule_store.reorder_rule(
+                &scenario_id,
+                &rule_id,
+                previous.as_deref(),
+                next.as_deref(),
+            ) {
+                if let Ok(autoresponder) = rule_store.load() {
+                    c.set_autoresponder(autoresponder);
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
-        Ok(())
+            Ok(())
+        })
     })
+    .await
+    .map_err(|e| format!("rule reorder task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -497,15 +564,24 @@ pub fn get_settings(state: State<'_, AppState>) -> ProxySettings {
 }
 
 #[tauri::command]
-pub fn set_settings(state: State<'_, AppState>, settings: ProxySettings) {
+pub async fn set_settings(
+    state: State<'_, AppState>,
+    settings: ProxySettings,
+) -> Result<(), String> {
     // A viewer shares settings.json with the capturing instance. Persisting its
     // (stale) snapshot would clobber the capturing instance's saved settings —
     // the same clobber the read-only RuleStore prevents for rules (issue #71).
     if state.viewer {
-        return;
+        return Err("Changing settings is disabled in viewer mode".to_string());
     }
-    state.controller.set_settings(settings.clone());
-    crate::persist::save_settings(&state.ca_dir, &settings);
+    let controller = state.controller.clone();
+    let ca_dir = state.ca_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        controller.set_settings(settings.clone());
+        crate::persist::save_settings(&ca_dir, &settings);
+    })
+    .await
+    .map_err(|e| format!("settings save task failed: {e}"))
 }
 
 #[tauri::command]
@@ -514,15 +590,24 @@ pub fn get_scripts(state: State<'_, AppState>) -> Vec<Script> {
 }
 
 #[tauri::command]
-pub fn set_scripts(state: State<'_, AppState>, scripts: Vec<Script>) -> Vec<ScriptDiagnostic> {
+pub async fn set_scripts(
+    state: State<'_, AppState>,
+    scripts: Vec<Script>,
+) -> Result<Vec<ScriptDiagnostic>, String> {
     // A viewer shares scripts.json with the capturing instance; don't let it
     // persist a stale snapshot (the same clobber guard as set_settings, issue #71).
     if state.viewer {
-        return Vec::new();
+        return Err("Changing scripts is disabled in viewer mode".to_string());
     }
-    let diagnostics = state.controller.set_scripts(scripts.clone());
-    crate::persist::save_scripts(&state.ca_dir, &scripts);
-    diagnostics
+    let controller = state.controller.clone();
+    let ca_dir = state.ca_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let diagnostics = controller.set_scripts(scripts.clone());
+        crate::persist::save_scripts(&ca_dir, &scripts);
+        diagnostics
+    })
+    .await
+    .map_err(|e| format!("scripts save task failed: {e}"))
 }
 
 #[tauri::command]
@@ -574,18 +659,9 @@ pub async fn mock_flows(
             total,
             phase: "saving",
         });
-        rule_store.apply_mock_batch(
-            &batch.scenario_id,
-            &batch.scenario_name,
-            batch.create_scenario,
-            &batch.rules,
-        )?;
         let scenario_id = batch.scenario_id.clone();
         let created: Vec<RuleSummary> = batch.rules.iter().map(RuleSummary::from).collect();
-        let result = controller
-            .with_history(history_tag, |c| {
-                c.commit_mock_batch(batch).map_err(|e| e.to_string())
-            })?;
+        let result = commit_and_persist_mock_batch(&controller, &rule_store, batch, history_tag)?;
         for rules in created.chunks(100) {
             let _ = progress.send(BulkMockEvent::Created {
                 scenario_id: scenario_id.clone(),
@@ -603,6 +679,29 @@ pub async fn mock_flows(
     })
     .await
     .map_err(|e| format!("bulk mock task failed: {e}"))?
+}
+
+/// Engine commit first, disk second: persisting a batch the engine then rejects
+/// would resurrect ghost rules on the next launch. A persist failure after a
+/// successful commit leaves the rules live but memory-only, which self-heals on
+/// restart.
+fn commit_and_persist_mock_batch(
+    controller: &ProxyController,
+    rule_store: &crate::rule_store::RuleStore,
+    batch: MockBatch,
+    history_tag: HistoryTag,
+) -> Result<MockResult, String> {
+    let scenario_id = batch.scenario_id.clone();
+    let scenario_name = batch.scenario_name.clone();
+    let create_scenario = batch.create_scenario;
+    let rules = batch.rules.clone();
+    let result = controller.with_history(history_tag, |c| {
+        c.commit_mock_batch(batch).map_err(|e| e.to_string())
+    })?;
+    rule_store
+        .apply_mock_batch(&scenario_id, &scenario_name, create_scenario, &rules)
+        .map_err(|e| format!("mock rules are live but could not be persisted: {e}"))?;
+    Ok(result)
 }
 
 /// Re-issue the given (doc) flows without credentials to test public
@@ -677,9 +776,10 @@ pub async fn regenerate_ca(state: State<'_, AppState>) -> Result<(), String> {
     if state.viewer {
         return Err("Regenerating the CA is disabled in viewer mode".to_string());
     }
-    state
-        .controller
-        .regenerate_ca(&state.ca_dir)
+    let controller = state.controller.clone();
+    let ca_dir = state.ca_dir.clone();
+    controller
+        .regenerate_ca(&ca_dir)
         .await
         .map_err(|e| e.to_string())
 }
@@ -687,11 +787,19 @@ pub async fn regenerate_ca(state: State<'_, AppState>) -> Result<(), String> {
 /// Route the OS system proxy through Germi (Windows `WinINET` / GNOME / KDE).
 #[tauri::command]
 pub fn set_system_proxy(port: u16, state: State<'_, AppState>) -> Result<(), String> {
-    if let Ok(mut prior) = state.prior_system_proxy.lock() {
-        if prior.is_none() {
-            *prior = Some(sysproxy::Sysproxy::get_system_proxy().unwrap_or_default());
-        }
+    // A viewer never binds the proxy port, so routing the OS proxy at it would
+    // black-hole the system's traffic (same defense as `start_proxy`).
+    if state.viewer {
+        return Err("Changing the system proxy is disabled in viewer mode".to_string());
     }
+    let mut prior = state
+        .prior_system_proxy
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if prior.is_none() {
+        *prior = Some(sysproxy::Sysproxy::get_system_proxy().unwrap_or_default());
+    }
+    drop(prior);
     let sp = sysproxy::Sysproxy {
         enable: true,
         host: "127.0.0.1".to_string(),
@@ -712,10 +820,11 @@ pub fn clear_system_proxy(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 pub fn restore_prior_system_proxy(state: &AppState) -> Result<bool, String> {
-    let prior = match state.prior_system_proxy.lock() {
-        Ok(mut guard) => guard.take(),
-        Err(_) => None,
-    };
+    let prior = state
+        .prior_system_proxy
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
     let Some(prior) = prior else {
         return Ok(false);
     };
@@ -940,16 +1049,21 @@ pub struct CompareSeed {
 /// opens (or re-focuses + re-seeds) the `compare` window.
 #[tauri::command]
 pub fn set_compare_seed(state: State<'_, AppState>, seed: CompareSeed) {
-    if let Ok(mut slot) = state.compare_seed.lock() {
-        *slot = Some(seed);
-    }
+    *state
+        .compare_seed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(seed);
 }
 
 /// Read the compare-window seed (kept, not taken, so an F5 of the compare
 /// window restores its starting point).
 #[tauri::command]
 pub fn get_compare_seed(state: State<'_, AppState>) -> Option<CompareSeed> {
-    state.compare_seed.lock().ok().and_then(|slot| slot.clone())
+    state
+        .compare_seed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// Export autoresponder scenarios to a `.germi-rules` file. With `scenario_id`
@@ -1002,7 +1116,12 @@ pub async fn import_rules(
     let count = controller.with_history(history_tag, |c| {
         c.import_rules(&bytes, replace).map_err(|e| e.to_string())
     })?;
-    state.rule_store.replace(&controller.get_autoresponder())?;
+    // Engine-first by design; a persist failure here leaves the import live but
+    // memory-only (self-heals on restart) — report it, don't roll back.
+    state
+        .rule_store
+        .replace(&controller.get_autoresponder())
+        .map_err(|e| format!("rules were imported but could not be persisted: {e}"))?;
     Ok(count)
 }
 
@@ -1060,9 +1179,10 @@ pub async fn peek_settings_import(
     let path = picked.into_path().map_err(|e| e.to_string())?;
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let preview = proxy_core::import_preview(&text)?;
-    if let Ok(mut slot) = state.pending_settings_import.lock() {
-        *slot = Some(text);
-    }
+    *state
+        .pending_settings_import
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text);
     Ok(Some(preview))
 }
 
@@ -1080,8 +1200,8 @@ pub async fn apply_settings_import(
     let text = state
         .pending_settings_import
         .lock()
-        .ok()
-        .and_then(|mut slot| slot.take())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
         .ok_or_else(|| "No settings file pending — pick one first".to_string())?;
     let merged = proxy_core::merge_import(&state.controller.get_settings(), &text, &sections)?;
     state.controller.set_settings(merged.clone());
@@ -1129,4 +1249,122 @@ pub async fn history_redo(state: State<'_, AppState>) -> Result<(), String> {
     })
     .await
     .map_err(|e| format!("redo task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rule_store::RuleStore;
+    use proxy_core::{Action, CertAuthority, MatchKind, Matcher};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("germi-commands-{name}-{nonce}"))
+    }
+
+    fn controller() -> ProxyController {
+        ProxyController::new(CertAuthority::generate().expect("generate in-memory CA"))
+    }
+
+    fn tag() -> HistoryTag {
+        HistoryTag::new("test", None)
+    }
+
+    fn mock_rule(id: &str) -> Rule {
+        Rule {
+            id: id.to_string(),
+            enabled: true,
+            fire_limit: None,
+            repeat: false,
+            matcher: Matcher {
+                method: Some("GET".to_string()),
+                url: format!("https://example.com/{id}"),
+                url_match: MatchKind::Exact,
+            },
+            action: Action::Respond {
+                status: 200,
+                headers: Vec::new(),
+                body: id.to_string(),
+                content_type: Some("text/plain".to_string()),
+                content_encoding: None,
+            },
+        }
+    }
+
+    #[test]
+    fn rejected_activation_never_reaches_the_db() {
+        let dir = test_dir("activate-order");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+        let controller = controller();
+
+        let error = activate_scenario(&controller, &store, Some("missing"), tag())
+            .expect_err("the engine rejects an unknown scenario id");
+        assert!(error.contains("scenario not found"), "unexpected error: {error}");
+        assert_eq!(
+            store.load().expect("load").active_scenario_id,
+            None,
+            "a rejected activation must not be persisted"
+        );
+
+        drop(store);
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn failed_mock_commit_persists_no_ghost_rules() {
+        let dir = test_dir("mock-order");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+        let controller = controller();
+
+        let batch = MockBatch {
+            scenario_id: "missing".to_string(),
+            scenario_name: "Ghosts".to_string(),
+            create_scenario: false,
+            rules: vec![mock_rule("ghost")],
+        };
+        commit_and_persist_mock_batch(&controller, &store, batch, tag())
+            .expect_err("the engine rejects a commit into a missing scenario");
+        let persisted = store.load().expect("load");
+        assert!(
+            persisted.scenarios.iter().all(|s| s.rules.is_empty()),
+            "a rejected batch must not leave ghost rules in the DB"
+        );
+
+        drop(store);
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn committed_mock_batch_is_persisted() {
+        let dir = test_dir("mock-commit");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+        let controller = controller();
+
+        let batch = MockBatch {
+            scenario_id: "mocks".to_string(),
+            scenario_name: "My mocks".to_string(),
+            create_scenario: true,
+            rules: vec![mock_rule("kept")],
+        };
+        let result = commit_and_persist_mock_batch(&controller, &store, batch, tag())
+            .expect("commit + persist");
+        assert_eq!(result.new_rule_ids, vec!["kept".to_string()]);
+        let persisted = store.load().expect("load");
+        let scenario = persisted
+            .scenarios
+            .iter()
+            .find(|s| s.id == "mocks")
+            .expect("the created scenario is persisted");
+        assert_eq!(scenario.rules.len(), 1);
+        assert_eq!(scenario.rules[0].id, "kept");
+        assert_eq!(persisted.active_scenario_id.as_deref(), Some("mocks"));
+
+        drop(store);
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
 }
