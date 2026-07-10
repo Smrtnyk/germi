@@ -15,6 +15,27 @@ export function selectedTabEnabled(viewedId: string | null, ar: AutoResponderSum
   return viewedId === ar.activeScenarioId;
 }
 
+/**
+ * Pop-out handler for a rule row: flushes the inline editor's pending debounced
+ * edit first when that rule is the one being edited, and always opens the window
+ * under the VIEWED scenario — which may be the General layer or an inactive tab,
+ * never resolved from the active scenario (the detached editor would save into
+ * the wrong scenario).
+ */
+export function popOutOpener(
+  viewedScenarioId: string,
+  editor: { rule: { id: string } | null; flush: () => Promise<void> },
+  open: (scenarioId: string, ruleId: string) => void,
+): (ruleId: string) => void {
+  return (ruleId) => {
+    if (editor.rule?.id === ruleId) {
+      void editor.flush().then(() => open(viewedScenarioId, ruleId));
+    } else {
+      open(viewedScenarioId, ruleId);
+    }
+  };
+}
+
 function updateScenarioRules(
   state: AutoResponderSummary,
   scenarioId: string,

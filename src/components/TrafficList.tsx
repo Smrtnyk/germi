@@ -20,6 +20,7 @@ import type { RowTint } from "../savedFilters";
 import { flowUrl } from "../flowUrl";
 import { dragFlowIds, encodeFlowIds, FLOW_DRAG_MIME } from "../dnd";
 import { useToast } from "../toast";
+import { copyText } from "../useCopy";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import {
   availabilityToneIcon,
@@ -557,8 +558,7 @@ function menuItemsFor(
     {
       label: "Copy URL",
       onClick: () => {
-        void navigator.clipboard.writeText(flowUrl(f));
-        notify("success", "URL copied");
+        void copyText(notify, "URL", flowUrl(f));
       },
     },
     { label: "Copy as cURL", onClick: () => a.onCopyCurl(f.id) },

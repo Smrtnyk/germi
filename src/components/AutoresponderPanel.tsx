@@ -17,7 +17,7 @@ import { debounce, isEqual } from "es-toolkit";
 
 import { api } from "../ipc";
 import { GENERAL_SCENARIO_ID } from "../types";
-import { ruleLabel, selectedTabEnabled } from "../autoresponderState";
+import { popOutOpener, ruleLabel, selectedTabEnabled } from "../autoresponderState";
 import { clickSelection, pruneSelection } from "../selection";
 import { decodeFlowIds, FLOW_DRAG_MIME, hasFlowDrag, RULE_DRAG_MIME } from "../dnd";
 import type {
@@ -127,8 +127,8 @@ export interface AutoresponderPanelProps {
   layout: AutoLayout;
   /** Rule ids currently open in a detached editor window. */
   openWindowRuleIds: Set<string>;
-  /** Open (or focus) a rule's detached editor window. */
-  onOpenRuleWindow: (ruleId: string) => void;
+  /** Open (or focus) a rule's detached editor window under the viewed scenario. */
+  onOpenRuleWindow: (scenarioId: string, ruleId: string) => void;
 }
 
 const ACTION_KINDS: { value: ActionKind; label: string }[] = [
@@ -1621,17 +1621,12 @@ function ScenarioRuleWorkspace({
   collapsed: boolean;
   onToggleCollapse: () => void;
   openWindowRuleIds: Set<string>;
-  onOpenRuleWindow: (ruleId: string) => void;
+  onOpenRuleWindow: (scenarioId: string, ruleId: string) => void;
 }) {
   const { selection, editor, listResize, listResizeV } = workspace;
   // Shift/Ctrl-click select operates over the currently shown (filtered) rows.
   const shownIds = workspace.shownRules.map((r) => r.id);
-  // Flush the inline editor's pending debounced edit before popping a rule out,
-  // so the detached window loads the just-typed value rather than a stale one.
-  const openWindow = (ruleId: string) => {
-    if (editor.rule?.id === ruleId) void editor.flush().then(() => onOpenRuleWindow(ruleId));
-    else onOpenRuleWindow(ruleId);
-  };
+  const openWindow = popOutOpener(active.id, editor, onOpenRuleWindow);
   const behavior: RuleListBehavior = {
     selectedRuleId: selection.selectedRuleId,
     selectedIds: selection.selectedIds,
@@ -1746,7 +1741,7 @@ function ScenarioView({
   collapsed: boolean;
   onToggleCollapse: () => void;
   openWindowRuleIds: Set<string>;
-  onOpenRuleWindow: (ruleId: string) => void;
+  onOpenRuleWindow: (scenarioId: string, ruleId: string) => void;
 }) {
   const workspace = useScenarioWorkspace(
     active,

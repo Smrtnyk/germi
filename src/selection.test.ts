@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { clickSelection, nextIdAfterDelete, pruneSelection, toggleSelection } from "./selection";
+import {
+  capturedDeletePlan,
+  clickSelection,
+  nextIdAfterDelete,
+  pruneSelection,
+  toggleSelection,
+} from "./selection";
 
 const order = ["a", "b", "c", "d", "e"];
 
@@ -45,6 +51,33 @@ describe("nextIdAfterDelete", () => {
 
   it("treats an unknown focused id as no focus (falls back to last remaining)", () => {
     expect(nextIdAfterDelete(order, new Set(["e"]), "zzz")).toBe("d");
+  });
+});
+
+describe("capturedDeletePlan", () => {
+  it("returns null when nothing was live-captured", () => {
+    expect(capturedDeletePlan([{ id: "a", imported: true }], ["a"], "a")).toBeNull();
+  });
+
+  it("plans to delete every captured flow with its count", () => {
+    const flows = [
+      { id: "c1", imported: false },
+      { id: "i1", imported: true },
+      { id: "c2", imported: false },
+    ];
+    const plan = capturedDeletePlan(flows, ["c1", "i1", "c2"], null);
+    expect(plan?.capturedCount).toBe(2);
+    expect(plan?.deleted).toEqual(new Set(["c1", "c2"]));
+  });
+
+  it("lands the next selection on the next VISIBLE flow, skipping hidden rows", () => {
+    const flows = [
+      { id: "c1", imported: false },
+      { id: "hidden", imported: true },
+      { id: "shown", imported: true },
+    ];
+    const plan = capturedDeletePlan(flows, ["c1", "shown"], "c1");
+    expect(plan?.nextId).toBe("shown");
   });
 });
 

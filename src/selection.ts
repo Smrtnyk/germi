@@ -17,6 +17,30 @@ export function nextIdAfterDelete(
   return null;
 }
 
+export interface CapturedDeletePlan {
+  capturedCount: number;
+  nextId: string | null;
+  deleted: Set<string>;
+}
+
+/** The deferred-selection plan for "Delete captured": which flows go, and which
+ *  VISIBLE row the selection should land on afterwards. Null when there is
+ *  nothing captured to delete. */
+export function capturedDeletePlan(
+  flows: { id: string; imported: boolean }[],
+  visibleOrder: string[],
+  selectedId: string | null,
+): CapturedDeletePlan | null {
+  const capturedIds = flows.filter((f) => !f.imported).map((f) => f.id);
+  if (capturedIds.length === 0) return null;
+  const deleted = new Set(capturedIds);
+  return {
+    capturedCount: capturedIds.length,
+    nextId: nextIdAfterDelete(visibleOrder, deleted, selectedId),
+    deleted,
+  };
+}
+
 /** A copy of `prev` with `item` toggled in or out. */
 export function toggledSet<T>(prev: Set<T>, item: T): Set<T> {
   const next = new Set(prev);
