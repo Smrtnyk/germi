@@ -221,7 +221,7 @@ pub(crate) fn test_rule_slice(rules: &[Rule], input: &TestInput) -> TestResult {
         path,
         version: "HTTP/1.1".to_string(),
         headers: input.req_headers.clone(),
-        body: input.req_body.clone().into_bytes(),
+        body: input.req_body.clone().into(),
         timestamp_ms: now_ms(),
     };
 
@@ -386,7 +386,7 @@ fn continue_result(
         status: input.resp_status,
         version: "HTTP/1.1".to_string(),
         headers: input.resp_headers.clone(),
-        body: input.resp_body.clone().into_bytes(),
+        body: input.resp_body.clone().into(),
         timestamp_ms: now_ms(),
     };
     let fired = apply_response_rules(rules, req, &mut resp);
@@ -422,7 +422,7 @@ fn continue_result(
 fn preview_response(
     status: u16,
     headers: Vec<(String, String)>,
-    body: Vec<u8>,
+    body: bytes::Bytes,
     source: String,
 ) -> TestResponse {
     let display_body = match crate::body::decode_body(&headers, &body) {

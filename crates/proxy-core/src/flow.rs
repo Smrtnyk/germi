@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use bytes::Bytes;
 use serde::Serialize;
 
 /// Milliseconds since the Unix epoch.
@@ -31,7 +32,9 @@ pub struct CapturedRequest {
     pub path: String,
     pub version: String,
     pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
+    /// Refcounted so cloning a flow (store snapshots for search/export/mock
+    /// prep outside the store lock) never copies body bytes.
+    pub body: Bytes,
     pub timestamp_ms: u64,
 }
 
@@ -41,7 +44,8 @@ pub struct CapturedResponse {
     pub status: u16,
     pub version: String,
     pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
+    /// Refcounted — see [`CapturedRequest::body`].
+    pub body: Bytes,
     pub timestamp_ms: u64,
 }
 
@@ -546,7 +550,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            body: vec![],
+            body: Bytes::new(),
             timestamp_ms: 0,
         }
     }
@@ -555,7 +559,7 @@ mod tests {
             status: 200,
             version: "HTTP/1.1".into(),
             headers: vec![("content-type".into(), ct.into())],
-            body: vec![],
+            body: Bytes::new(),
             timestamp_ms: 0,
         }
     }

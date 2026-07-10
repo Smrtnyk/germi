@@ -163,7 +163,7 @@ pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
             path,
             version: entry.request.http_version,
             headers: pairs(entry.request.headers),
-            body: req_body,
+            body: req_body.into(),
             timestamp_ms: now_ms(),
         };
 
@@ -175,7 +175,7 @@ pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
                 status: entry.response.status,
                 version: entry.response.http_version,
                 headers: pairs(entry.response.headers),
-                body: decode_har_body(&entry.response.content),
+                body: decode_har_body(&entry.response.content).into(),
                 timestamp_ms: now_ms(),
             })
         };
@@ -345,7 +345,7 @@ fn parse_request(raw: &[u8]) -> Result<CapturedRequest> {
         path,
         version,
         headers,
-        body,
+        body: body.into(),
         timestamp_ms: now_ms(),
     })
 }
@@ -363,7 +363,7 @@ fn parse_response(raw: &[u8]) -> Result<CapturedResponse> {
         status: res.code.unwrap_or(0),
         version: format!("HTTP/1.{}", res.version.unwrap_or(1)),
         headers,
-        body,
+        body: body.into(),
         timestamp_ms: now_ms(),
     })
 }
@@ -493,10 +493,10 @@ mod tests {
         assert_eq!(f0.duration_ms, Some(12));
         let r0 = f0.response.as_ref().unwrap();
         assert_eq!(r0.status, 200);
-        assert_eq!(r0.body, b"{\"ok\":true}");
+        assert_eq!(r0.body, b"{\"ok\":true}".as_slice());
 
         // base64 body decodes to "hi".
-        assert_eq!(flows[1].response.as_ref().unwrap().body, b"hi");
+        assert_eq!(flows[1].response.as_ref().unwrap().body, b"hi".as_slice());
     }
 
     #[test]
@@ -530,7 +530,7 @@ mod tests {
             "content":{"encoding":"base64","text":"aG\nk="}}}
         ]}}"#;
         let flows = parse_har(har.as_bytes()).unwrap();
-        assert_eq!(flows[0].response.as_ref().unwrap().body, b"hi");
+        assert_eq!(flows[0].response.as_ref().unwrap().body, b"hi".as_slice());
     }
 
     #[test]
@@ -546,12 +546,12 @@ mod tests {
         assert_eq!(r.host, "api.test");
         assert_eq!(r.path, "/api/login");
         assert_eq!(r.uri, "https://api.test/api/login");
-        assert_eq!(r.body, b"{\"u\":1}");
+        assert_eq!(r.body, b"{\"u\":1}".as_slice());
 
         let res = b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\nnope";
         let resp = parse_response(res).unwrap();
         assert_eq!(resp.status, 404);
-        assert_eq!(resp.body, b"nope");
+        assert_eq!(resp.body, b"nope".as_slice());
     }
 
     /// Build an in-memory SAZ of `count` sessions whose response bodies are
@@ -614,6 +614,6 @@ mod tests {
         raw.extend_from_slice(b"\r\n0\r\n\r\n");
 
         let resp = parse_response(&raw).unwrap();
-        assert_eq!(resp.body, b"hello world");
+        assert_eq!(resp.body, b"hello world".as_slice());
     }
 }

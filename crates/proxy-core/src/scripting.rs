@@ -98,7 +98,7 @@ struct MsgState {
     query: String,
     status: u16,
     headers: Vec<(String, String)>,
-    body: Vec<u8>,
+    body: bytes::Bytes,
     ops: Vec<HeaderOp>,
     status_override: Option<u16>,
 }
@@ -150,7 +150,7 @@ impl HttpMessage {
             query: String::new(),
             status: 0,
             headers: Vec::new(),
-            body: Vec::new(),
+            body: bytes::Bytes::new(),
             ops: Vec::new(),
             status_override: None,
         })
@@ -447,7 +447,7 @@ mod tests {
             path: "/v1/data?page=2".into(),
             version: "HTTP/1.1".into(),
             headers: vec![("accept".into(), "application/json".into())],
-            body: b"hello".to_vec(),
+            body: b"hello".to_vec().into(),
             timestamp_ms: 0,
         }
     }
@@ -457,7 +457,7 @@ mod tests {
             status: 200,
             version: "HTTP/1.1".into(),
             headers: vec![("content-type".into(), "application/json".into())],
-            body: b"{}".to_vec(),
+            body: b"{}".to_vec().into(),
             timestamp_ms: 0,
         }
     }
@@ -691,7 +691,7 @@ mod tests {
             r#"fn on_response(req, res) { res.set_header("x-len", res.body.len.to_string()); }"#,
         );
         let mut res = response();
-        res.body = vec![b'a'; 2 * 1024 * 1024];
+        res.body = vec![b'a'; 2 * 1024 * 1024].into();
         let effects = engine.run_response(Some(&request()), &res);
         assert_eq!(
             effects.header_ops,

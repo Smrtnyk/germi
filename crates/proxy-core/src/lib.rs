@@ -56,7 +56,7 @@ pub use flow::{
     Availability, AvailabilityVerdict, BodyComparison, FlowDetail, FlowEvent, FlowSummary,
     MessageDetail, ResourceKind,
 };
-pub use history::{HistoryEntryView, HistoryKind, HistoryTag, HistoryView};
+pub use history::HistoryTag;
 pub use rules::{
     Action, ActionSummary, AutoResponder, AutoResponderSummary, MatchKind, Matcher, Rule,
     RuleSearchScope, RuleSet, RuleSummary, Scenario, ScenarioSummary, GENERAL_SCENARIO_ID,
@@ -92,10 +92,9 @@ pub struct MockResult {
     pub new_rule_ids: Vec<String>,
 }
 
-/// Outcome of an undo/redo/jump: the new timeline view to hand the UI, plus
-/// whether the autoresponder changed (so the Tauri layer re-persists it).
+/// Outcome of an undo/redo/jump: whether the autoresponder changed (so the
+/// Tauri layer re-persists it).
 pub struct HistoryStep {
-    pub view: HistoryView,
     pub mock_changed: bool,
 }
 
@@ -116,14 +115,6 @@ pub enum SearchSide {
     Request,
     Response,
     Either,
-}
-
-/// Which projection of a flow a content search scans.
-#[derive(Deserialize, Clone, Copy)]
-#[serde(rename_all = "lowercase")]
-pub enum SearchField {
-    Body,
-    Headers,
 }
 
 /// A live proxy: its bound address, a shutdown signal, and the serving task's
@@ -463,6 +454,9 @@ impl ProxyController {
     /// message (body + headers) to the searchable text, or `None` to skip that
     /// message (e.g. a binary body). Per flow the request side wins first, then
     /// the response, matching the original `search_bodies` short-circuit.
+    /// Scans a snapshot: flows are cloned out under the store lock (cheap —
+    /// `Bytes` bodies are refcounted) and decoded/matched with it RELEASED, so a
+    /// big search never stalls live capture.
     fn search_messages(
         &self,
         pattern: &str,
@@ -487,10 +481,15 @@ impl ProxyController {
         };
         let needle = pattern.to_lowercase();
 
-        let Ok(store) = self.shared.store.lock() else {
-            return Vec::new();
+        let snapshot: Vec<crate::flow::Flow> = {
+            let Ok(store) = self.shared.store.lock() else {
+                return Vec::new();
+            };
+            match candidates {
+                Some(c) => c.iter().filter_map(|id| store.get(id).cloned()).collect(),
+                None => store.all_flows(),
+            }
         };
-        let ids = candidates.map_or_else(|| store.ids(), |c| c.to_vec());
 
         let hit = |body: &[u8], headers: &[(String, String)]| -> bool {
             let Some(text) = extract(body, headers) else {
@@ -502,11 +501,9 @@ impl ProxyController {
             }
         };
 
-        ids.into_iter()
-            .filter(|id| {
-                let Some(flow) = store.get(id) else {
-                    return false;
-                };
+        snapshot
+            .into_iter()
+            .filter(|flow| {
                 let req = matches!(side, SearchSide::Request | SearchSide::Either)
                     && hit(&flow.request.body, &flow.request.headers);
                 let resp = !req
@@ -517,6 +514,7 @@ impl ProxyController {
                         .is_some_and(|r| hit(&r.body, &r.headers));
                 req || resp
             })
+            .map(|flow| flow.id)
             .collect()
     }
 
@@ -1088,22 +1086,17 @@ impl ProxyController {
         scenario_id: Option<&str>,
         mut on_progress: impl FnMut(usize, usize),
     ) -> MockBatch {
-        let rules = match self.shared.store.lock() {
-            Ok(store) => {
-                let mut rules = Vec::with_capacity(ids.len());
-                for (index, id) in ids.iter().enumerate() {
-                    let Some(flow) = store.get(id) else {
-                        on_progress(index + 1, ids.len());
-                        continue;
-                    };
-                    let rule_id = new_entity_id("rule");
-                    rules.push(rules::respond_rule_from_flow(flow, rule_id));
-                    on_progress(index + 1, ids.len());
-                }
-                rules
-            }
+        let flows: Vec<Option<crate::flow::Flow>> = match self.shared.store.lock() {
+            Ok(store) => ids.iter().map(|id| store.get(id).cloned()).collect(),
             Err(_) => Vec::new(),
         };
+        let mut rules = Vec::with_capacity(flows.len());
+        for (index, flow) in flows.into_iter().enumerate() {
+            if let Some(flow) = flow {
+                rules.push(rules::respond_rule_from_flow(&flow, new_entity_id("rule")));
+            }
+            on_progress(index + 1, ids.len());
+        }
 
         let ar = self.get_autoresponder();
         let scenario_id = scenario_id
@@ -1248,44 +1241,27 @@ impl ProxyController {
         }
     }
 
-    pub fn history_view(&self) -> HistoryView {
-        self.shared
-            .history
-            .lock()
-            .map(|history| history.view())
-            .unwrap_or_default()
-    }
-
     pub fn clear_history(&self) {
         if let Ok(mut history) = self.shared.history.lock() {
             history.clear();
         }
     }
 
-    /// Undo the newest action. Returns the new timeline view and whether the
-    /// autoresponder changed (so the caller re-persists it); `None` when there is
-    /// nothing to undo.
+    /// Undo the newest action. Returns whether the autoresponder changed (so the
+    /// caller re-persists it); `None` when there is nothing to undo.
     pub fn undo(&self) -> Option<HistoryStep> {
         let entry = self.shared.history.lock().ok()?.take_undo()?;
         let mock_changed = self.apply_undo(&entry);
-        let mut history = self.shared.history.lock().ok()?;
-        history.stash_redo(entry);
-        Some(HistoryStep {
-            view: history.view(),
-            mock_changed,
-        })
+        self.shared.history.lock().ok()?.stash_redo(entry);
+        Some(HistoryStep { mock_changed })
     }
 
     /// Redo the most recently undone action.
     pub fn redo(&self) -> Option<HistoryStep> {
         let entry = self.shared.history.lock().ok()?.take_redo()?;
         let mock_changed = self.apply_redo(&entry);
-        let mut history = self.shared.history.lock().ok()?;
-        history.stash_undo(entry);
-        Some(HistoryStep {
-            view: history.view(),
-            mock_changed,
-        })
+        self.shared.history.lock().ok()?.stash_undo(entry);
+        Some(HistoryStep { mock_changed })
     }
 
     /// Undo or redo until the entry with `entry_id` is the current state (the top
@@ -1310,10 +1286,7 @@ impl ProxyController {
                 None => break,
             }
         }
-        Some(HistoryStep {
-            view: self.history_view(),
-            mock_changed,
-        })
+        Some(HistoryStep { mock_changed })
     }
 
     fn apply_undo(&self, entry: &HistoryEntry) -> bool {
@@ -1418,7 +1391,7 @@ mod tests {
             path: "/seq".to_string(),
             version: "HTTP/1.1".to_string(),
             headers: vec![],
-            body: vec![],
+            body: bytes::Bytes::new(),
             timestamp_ms: 0,
         }
     }
@@ -1452,7 +1425,7 @@ mod tests {
             status: 200,
             version: "HTTP/1.1".to_string(),
             headers: vec![("content-type".to_string(), "text/plain".to_string())],
-            body: format!("response-{id}").into_bytes(),
+            body: format!("response-{id}").into_bytes().into(),
             timestamp_ms: 1,
         });
         flow
@@ -2093,7 +2066,7 @@ mod tests {
         resp_body: &[u8],
     ) -> crate::flow::Flow {
         let mut f = flow(id);
-        f.request.body = req_body.to_vec();
+        f.request.body = req_body.to_vec().into();
         f.response = Some(CapturedResponse {
             status: 200,
             version: "HTTP/1.1".to_string(),
@@ -2101,7 +2074,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            body: resp_body.to_vec(),
+            body: resp_body.to_vec().into(),
             timestamp_ms: 1,
         });
         f
@@ -2644,6 +2617,10 @@ mod tests {
         rule
     }
 
+    fn timeline(c: &ProxyController) -> Vec<u64> {
+        c.shared.history.lock().expect("history").timeline_ids()
+    }
+
     #[test]
     fn delete_rules_removes_many_skips_missing_and_undoes_as_one_step() {
         let c = controller();
@@ -2675,7 +2652,7 @@ mod tests {
             .map(|rule| rule.id.clone())
             .collect();
         assert_eq!(remaining, vec!["r2".to_string()], "r1 and r3 are gone, r2 stays");
-        assert_eq!(c.history_view().entries.len(), 1, "a batch delete is a single undo entry");
+        assert_eq!(timeline(&c).len(), 1, "a batch delete is a single undo entry");
 
         c.undo().expect("undo");
         let restored: Vec<String> = c
@@ -2706,7 +2683,7 @@ mod tests {
             .expect("delete_rules");
         assert_eq!(removed, 0, "nothing present to remove");
         assert!(
-            c.history_view().entries.is_empty(),
+            timeline(&c).is_empty(),
             "a batch that removes nothing records no undo entry"
         );
     }
@@ -2724,7 +2701,10 @@ mod tests {
 
         let step = c.undo().expect("undo");
         assert!(step.mock_changed, "a mock undo must signal the caller to re-persist");
-        assert!(!step.view.can_undo && step.view.can_redo);
+        {
+            let history = c.shared.history.lock().expect("history");
+            assert!(!history.can_undo() && history.can_redo());
+        }
         assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/seq", "undo restores the prior url");
 
         let step = c.redo().expect("redo");
@@ -2745,7 +2725,7 @@ mod tests {
         }
         assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/abc");
         assert_eq!(
-            c.history_view().entries.len(),
+            timeline(&c).len(),
             1,
             "three same-key edits collapse to one undo entry"
         );
@@ -2768,14 +2748,14 @@ mod tests {
             ctrl.update_rule("A", respond_rule("r1"))
         })
         .expect("update");
-        assert!(c.history_view().entries.is_empty(), "an identical update records nothing");
+        assert!(timeline(&c).is_empty(), "an identical update records nothing");
 
         // Failed update (missing scenario) → nothing recorded.
         let failed = c.with_history(HistoryTag::new("fail", None), |ctrl| {
             ctrl.update_rule("missing", respond_rule("r1"))
         });
         assert!(failed.is_err());
-        assert!(c.history_view().entries.is_empty(), "a failed mutation records nothing");
+        assert!(timeline(&c).is_empty(), "a failed mutation records nothing");
         assert!(c.undo().is_none(), "nothing to undo");
     }
 
@@ -2866,15 +2846,15 @@ mod tests {
             })
             .expect("update");
         }
-        let entries = c.history_view().entries;
-        assert_eq!(entries.len(), 3);
+        let ids = timeline(&c);
+        assert_eq!(ids.len(), 3);
 
         // Jump back to the oldest entry → rewinds two steps.
-        c.jump_to(entries[0].id).expect("jump back");
+        c.jump_to(ids[0]).expect("jump back");
         assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/one");
 
         // Jump forward to the newest entry → fast-forwards.
-        let last_id = c.history_view().entries.last().expect("entry").id;
+        let last_id = *timeline(&c).last().expect("entry");
         c.jump_to(last_id).expect("jump forward");
         assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/three");
     }
@@ -2887,9 +2867,9 @@ mod tests {
             ctrl.update_rule("A", rule_with_url("/x"))
         })
         .expect("update");
-        assert!(!c.history_view().entries.is_empty());
+        assert!(!timeline(&c).is_empty());
         c.clear_history();
-        assert!(c.history_view().entries.is_empty());
+        assert!(timeline(&c).is_empty());
         assert!(c.undo().is_none());
     }
 
@@ -2911,7 +2891,7 @@ mod tests {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            body: resp_body.to_vec(),
+            body: resp_body.to_vec().into(),
             timestamp_ms: 1,
         });
         flow
@@ -3051,6 +3031,60 @@ mod tests {
             c.search_bodies("response-alpha", SearchSide::Request, false, None).is_empty(),
             "a response-body match must not be reported on the Request side"
         );
+    }
+
+    #[test]
+    fn content_scan_runs_with_the_store_lock_released() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let c = controller();
+        c.shared.record_new(completed_flow("alpha"));
+
+        let probed = AtomicBool::new(false);
+        let ids = c.search_messages(
+            "response-alpha",
+            SearchSide::Either,
+            false,
+            None,
+            |body, _headers| {
+                // Live capture (`record_new` / `record_complete`) needs exactly
+                // this mutex: it must be acquirable while the scan decodes and
+                // matches bodies, or a big search stalls the proxy hot path.
+                assert!(
+                    c.shared.store.try_lock().is_ok(),
+                    "the store lock must not be held during the content scan"
+                );
+                probed.store(true, Ordering::Relaxed);
+                Some(String::from_utf8_lossy(body).into_owned())
+            },
+        );
+        assert!(probed.load(Ordering::Relaxed), "the scan must actually have run");
+        assert_eq!(ids, vec!["alpha".to_string()], "scan results are unchanged");
+    }
+
+    #[test]
+    fn mock_prep_progress_fires_with_the_store_lock_released() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let c = controller();
+        c.shared.record_new(completed_flow("m1"));
+        c.shared.record_new(completed_flow("m2"));
+
+        let calls = AtomicUsize::new(0);
+        let batch = c.prepare_mock_flows(
+            &["m1".to_string(), "m2".to_string()],
+            None,
+            |_done, total| {
+                // The progress callback is on the bulk-mock path; firing it
+                // under the store lock would stall capture for the whole build.
+                assert!(
+                    c.shared.store.try_lock().is_ok(),
+                    "progress must not fire while the store lock is held"
+                );
+                assert_eq!(total, 2);
+                calls.fetch_add(1, Ordering::Relaxed);
+            },
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "one progress tick per requested id");
+        assert_eq!(batch.rules.len(), 2, "both flows produced a rule");
     }
 
     #[test]
@@ -3310,12 +3344,12 @@ mod tests {
         let c = controller();
         let mut both = flow("both");
         both.request.headers = vec![("content-type".to_string(), "text/plain".to_string())];
-        both.request.body = b"shared-needle in request".to_vec();
+        both.request.body = b"shared-needle in request".to_vec().into();
         both.response = Some(CapturedResponse {
             status: 200,
             version: "HTTP/1.1".to_string(),
             headers: vec![("content-type".to_string(), "text/plain".to_string())],
-            body: b"shared-needle in response".to_vec(),
+            body: b"shared-needle in response".to_vec().into(),
             timestamp_ms: 1,
         });
         c.shared.record_new(both);

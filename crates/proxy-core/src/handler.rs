@@ -97,8 +97,8 @@ impl HttpHandler for CaptureHandler {
         // apply to them); everything else is captured up to MAX_CAPTURE_BODY and,
         // if larger, still forwarded in full (prefix + remaining stream).
         let oversized = declared_len(&parts.headers).is_some_and(|n| n > MAX_CAPTURE_BODY);
-        let (body_bytes, stream_forward): (Vec<u8>, Option<Body>) = if oversized {
-            (Vec::new(), Some(body))
+        let (body_bytes, stream_forward): (Bytes, Option<Body>) = if oversized {
+            (Bytes::new(), Some(body))
         } else {
             let (bytes, forward, _complete) = buffer_capped(body, MAX_CAPTURE_BODY as usize).await;
             (bytes, forward)
@@ -164,7 +164,7 @@ impl HttpHandler for CaptureHandler {
 
         match outcome {
             RequestOutcome::Respond { rule, response, .. } => {
-                let out = self.serve_synthetic(&id, &rule, response, &request);
+                let out = self.serve_synthetic(&id, &rule, response, &request).await;
                 self.inflight = None;
                 out.into()
             }
@@ -172,9 +172,9 @@ impl HttpHandler for CaptureHandler {
                 let synthetic = SyntheticResponse {
                     status: 403,
                     headers: vec![("content-type".to_string(), "text/plain".to_string())],
-                    body: b"Blocked by Germi".to_vec(),
+                    body: Bytes::from_static(b"Blocked by Germi"),
                 };
-                let out = self.serve_synthetic(&id, &rule, synthetic, &request);
+                let out = self.serve_synthetic(&id, &rule, synthetic, &request).await;
                 self.inflight = None;
                 out.into()
             }
@@ -232,7 +232,7 @@ impl HttpHandler for CaptureHandler {
                 status: 502,
                 version: "HTTP/1.1".to_string(),
                 headers: vec![("content-type".to_string(), "text/plain".to_string())],
-                body: format!("Upstream request failed: {err}").into_bytes(),
+                body: Bytes::from(format!("Upstream request failed: {err}")),
                 timestamp_ms: now_ms(),
             };
             // Keep the Map Remote provenance on the 502 so a dead mapped
@@ -284,7 +284,7 @@ impl CaptureHandler {
                 status: parts.status.as_u16(),
                 version: format!("{:?}", parts.version),
                 headers: header_pairs(&parts.headers),
-                body: Vec::new(),
+                body: Bytes::new(),
                 timestamp_ms: now_ms(),
             };
             self.shared
@@ -323,6 +323,10 @@ impl CaptureHandler {
             body: body_bytes,
             timestamp_ms: now_ms(),
         };
+        // Snapshot the display strings before rules/scripts run: the wire rebuild
+        // diffs against this to keep untouched headers byte-identical (the
+        // strings are lossy — see `build_wire_response`).
+        let original_pairs = captured.headers.clone();
 
         // The in-flight copy — NOT a store lookup: the bounded store may have
         // evicted the pending flow, and response rules / scripts / the
@@ -351,7 +355,7 @@ impl CaptureHandler {
         // Rules/scripts may have set an out-of-range status; sanitize before the
         // wire response is built AND before recording, so both stay in agreement.
         captured.status = sanitize_status(captured.status);
-        let mut out = build_captured_response(&captured);
+        let mut out = build_wire_response(&parts.headers, &original_pairs, &captured);
 
         // A HEAD response (and a 304) legitimately declares a Content-Length that
         // describes the resource, not the (absent) body. `build_parts` drops it so
@@ -384,7 +388,7 @@ impl CaptureHandler {
             status: 101,
             version: "HTTP/1.1".to_string(),
             headers: Vec::new(),
-            body: Vec::new(),
+            body: Bytes::new(),
             timestamp_ms: now_ms(),
         };
         self.shared.record_complete(id, captured, 0, Some(0), None);
@@ -489,8 +493,10 @@ impl CaptureHandler {
     }
 
     /// Finalize a rule-synthesized response: run response-phase rules then scripts
-    /// over it, record it, and build the wire response the client receives.
-    fn serve_synthetic(
+    /// over it, record it, and build the wire response the client receives —
+    /// after the response-delay throttle, so a configured delay simulates a slow
+    /// backend even when the response never left the proxy.
+    async fn serve_synthetic(
         &self,
         id: &str,
         rule: &str,
@@ -504,6 +510,7 @@ impl CaptureHandler {
         response.status = sanitize_status(response.status);
         let out = build_response(&response);
         self.complete_synthetic(id, rule, response);
+        self.throttle().await;
         out
     }
 }
@@ -629,7 +636,7 @@ impl HttpBody for PrefixThenError {
 ///   captured bytes directly (after any rewrite).
 /// * `complete` — `false` when the upstream stream errored mid-body (the capture
 ///   is a truncated prefix), `true` otherwise.
-async fn buffer_capped(body: Body, cap: usize) -> (Vec<u8>, Option<Body>, bool) {
+async fn buffer_capped(body: Body, cap: usize) -> (Bytes, Option<Body>, bool) {
     let mut body = body;
     let mut buf: Vec<u8> = Vec::new();
     loop {
@@ -638,30 +645,30 @@ async fn buffer_capped(body: Body, cap: usize) -> (Vec<u8>, Option<Body>, bool) 
                 if let Ok(data) = frame.into_data() {
                     buf.extend_from_slice(&data);
                     if buf.len() >= cap {
-                        let prefix = Bytes::from(buf.clone());
-                        buf.truncate(cap);
+                        let prefix = Bytes::from(buf);
+                        let captured = prefix.slice(..cap);
                         let forward = Body::from(BoxBody::new(PrefixThenBody {
                             prefix: Some(prefix),
                             inner: body,
                         }));
-                        return (buf, Some(forward), true);
+                        return (captured, Some(forward), true);
                     }
                 }
             }
             // Upstream errored mid-body: forward the prefix then propagate the
             // error so the client sees a failed (not falsely-complete) transfer.
             Some(Err(e)) => {
-                let prefix = Bytes::from(buf.clone());
+                let prefix = Bytes::from(buf);
                 let forward = Body::from(BoxBody::new(PrefixThenError {
-                    prefix: Some(prefix),
+                    prefix: Some(prefix.clone()),
                     error: Some(e),
                 }));
-                return (buf, Some(forward), false);
+                return (prefix, Some(forward), false);
             }
             None => break,
         }
     }
-    (buf, None, true)
+    (Bytes::from(buf), None, true)
 }
 
 fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
@@ -685,9 +692,57 @@ fn build_response(synthetic: &SyntheticResponse) -> Response<Body> {
     build_parts(synthetic.status, &synthetic.headers, &synthetic.body)
 }
 
-/// Build a hyper response from a captured (possibly rewritten) response.
-fn build_captured_response(captured: &CapturedResponse) -> Response<Body> {
-    build_parts(captured.status, &captured.headers, &captured.body)
+/// Build the wire response for a buffered upstream exchange. The captured
+/// header values are display strings (lossy UTF-8), so rebuilding every header
+/// from them would corrupt legal obs-text bytes (e.g. a latin-1 filename in
+/// Content-Disposition) even when nothing touched the response. Instead, diff
+/// per name (case-insensitive, multi-value aware) against the pre-rules
+/// snapshot: an unchanged name keeps its original `HeaderValue` entries
+/// byte-for-byte; a changed/added name is built from the new strings; a
+/// removed name is dropped. Length/encoding headers are dropped either way so
+/// hyper recomputes them from the (possibly rewritten) body.
+fn build_wire_response(
+    original: &HeaderMap,
+    original_pairs: &[(String, String)],
+    captured: &CapturedResponse,
+) -> Response<Body> {
+    let mut builder = Response::builder().status(captured.status);
+    let mut seen: Vec<&str> = Vec::new();
+    for (name, _) in &captured.headers {
+        if name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("transfer-encoding")
+            || seen.iter().any(|s| s.eq_ignore_ascii_case(name))
+        {
+            continue;
+        }
+        seen.push(name);
+        let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        if header_values(&captured.headers, name) == header_values(original_pairs, name) {
+            for val in original.get_all(&header_name) {
+                builder = builder.header(header_name.clone(), val.clone());
+            }
+        } else {
+            for val in header_values(&captured.headers, name) {
+                if let Ok(val) = HeaderValue::from_bytes(val.as_bytes()) {
+                    builder = builder.header(header_name.clone(), val);
+                }
+            }
+        }
+    }
+    builder
+        .body(Body::from(captured.body.clone()))
+        .unwrap_or_else(|_| Response::new(Body::from(captured.body.clone())))
+}
+
+/// The ordered value list a display-header vec holds for `name`.
+fn header_values<'a>(pairs: &'a [(String, String)], name: &str) -> Vec<&'a str> {
+    pairs
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+        .collect()
 }
 
 /// Clamp a rule/script-supplied status to hyper's valid range (100..=999). An
@@ -703,7 +758,7 @@ fn sanitize_status(status: u16) -> u16 {
     }
 }
 
-fn build_parts(status: u16, headers: &[(String, String)], body: &[u8]) -> Response<Body> {
+fn build_parts(status: u16, headers: &[(String, String)], body: &Bytes) -> Response<Body> {
     let mut builder = Response::builder().status(status);
     for (k, v) in headers {
         // Drop length/encoding headers; hyper recomputes content-length from the
@@ -722,8 +777,8 @@ fn build_parts(status: u16, headers: &[(String, String)], body: &[u8]) -> Respon
         }
     }
     builder
-        .body(Body::from(body.to_vec()))
-        .unwrap_or_else(|_| Response::new(Body::from(body.to_vec())))
+        .body(Body::from(body.clone()))
+        .unwrap_or_else(|_| Response::new(Body::from(body.clone())))
 }
 
 /// Replay a script's header effects onto both the forwarded request (`wire`, a
@@ -767,7 +822,7 @@ fn apply_request_effects(
 }
 
 /// Replay a script's header/status effects onto a captured response. The wire
-/// response is rebuilt from this by `build_captured_response`, so mutating the
+/// response is rebuilt from this by `build_wire_response`, so mutating the
 /// captured copy is enough.
 fn apply_response_effects(captured: &mut CapturedResponse, effects: Effects) {
     for op in effects.header_ops {
@@ -833,7 +888,7 @@ mod tests {
                 ("content-type".into(), "text/html".into()),
                 ("x-drop".into(), "1".into()),
             ],
-            body: Vec::new(),
+            body: Bytes::new(),
             timestamp_ms: 0,
         };
         let effects = Effects {
@@ -966,7 +1021,7 @@ mod tests {
             path: "/api".to_string(),
             version: "HTTP/1.1".to_string(),
             headers: vec![],
-            body: vec![],
+            body: bytes::Bytes::new(),
             timestamp_ms: 0,
         }
     }
@@ -1113,8 +1168,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn invalid_mock_status_keeps_headers_and_store_matches_wire() {
+    #[tokio::test]
+    async fn invalid_mock_status_keeps_headers_and_store_matches_wire() {
         let shared = test_shared(10);
         let handler = CaptureHandler::new(Arc::clone(&shared));
         shared.record_new(pending_flow("f1"));
@@ -1125,9 +1180,9 @@ mod tests {
                 ("x-mock".to_string(), "1".to_string()),
                 ("content-type".to_string(), "application/json".to_string()),
             ],
-            body: b"{}".to_vec(),
+            body: b"{}".to_vec().into(),
         };
-        let out = handler.serve_synthetic("f1", "rule", synthetic, &req);
+        let out = handler.serve_synthetic("f1", "rule", synthetic, &req).await;
         assert_eq!(
             out.headers().get("x-mock").and_then(|v| v.to_str().ok()),
             Some("1"),
@@ -1153,13 +1208,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mock_response_waits_for_the_configured_delay() {
+        let shared = Shared::new(
+            10,
+            crate::rules::AutoResponder::default(),
+            crate::settings::ProxySettings { response_delay_ms: 60, ..Default::default() },
+        );
+        let handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        let synthetic = SyntheticResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+            body: b"mock".to_vec().into(),
+        };
+        let start = Instant::now();
+        let _ = handler.serve_synthetic("f1", "rule", synthetic, &test_request()).await;
+        assert!(
+            start.elapsed() >= Duration::from_millis(60),
+            "a mocked response must honor the response-delay throttle"
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_response_without_delay_stays_fast() {
+        let shared = test_shared(10);
+        let handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        let synthetic = SyntheticResponse {
+            status: 200,
+            headers: vec![],
+            body: b"mock".to_vec().into(),
+        };
+        let start = Instant::now();
+        let _ = handler.serve_synthetic("f1", "rule", synthetic, &test_request()).await;
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "the default zero delay must not slow the mock path down"
+        );
+    }
+
+    const LATIN1_DISPOSITION: &[u8] = b"attachment; filename=\"caf\xE9.pdf\"";
+
+    fn obs_text_response() -> Response<Body> {
+        Response::builder()
+            .status(200)
+            .header(
+                "content-disposition",
+                HeaderValue::from_bytes(LATIN1_DISPOSITION).expect("obs-text value"),
+            )
+            .body(Body::from("hi"))
+            .expect("response")
+    }
+
+    #[tokio::test]
+    async fn untouched_obs_text_header_is_forwarded_byte_identical() {
+        let shared = test_shared(10);
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+        let out = handler.process_response(obs_text_response()).await;
+        assert_eq!(
+            out.headers().get("content-disposition").map(HeaderValue::as_bytes),
+            Some(LATIN1_DISPOSITION),
+            "untouched obs-text header bytes must never degrade on the wire"
+        );
+    }
+
+    #[tokio::test]
+    async fn rule_setting_an_unrelated_header_keeps_obs_text_bytes() {
+        let shared = shared_with_responder(
+            10,
+            responder_with(crate::rules::Action::SetResponseHeader {
+                name: "x-rule".to_string(),
+                value: "on".to_string(),
+            }),
+        );
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+        let out = handler.process_response(obs_text_response()).await;
+        assert_eq!(
+            out.headers().get("x-rule").and_then(|v| v.to_str().ok()),
+            Some("on"),
+            "the rule's header must land on the wire"
+        );
+        assert_eq!(
+            out.headers().get("content-disposition").map(HeaderValue::as_bytes),
+            Some(LATIN1_DISPOSITION),
+            "an unrelated rule edit must not degrade obs-text bytes elsewhere"
+        );
+    }
+
+    #[tokio::test]
+    async fn rule_rewriting_the_obs_text_header_wins() {
+        let shared = shared_with_responder(
+            10,
+            responder_with(crate::rules::Action::SetResponseHeader {
+                name: "content-disposition".to_string(),
+                value: "inline".to_string(),
+            }),
+        );
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+        let out = handler.process_response(obs_text_response()).await;
+        assert_eq!(
+            out.headers().get("content-disposition").map(HeaderValue::as_bytes),
+            Some(b"inline".as_slice()),
+            "a rule that rewrites the header must win with its new value"
+        );
+    }
+
+    #[tokio::test]
     async fn buffer_capped_marks_mid_body_error_incomplete() {
         let body = Body::from(BoxBody::new(ErrAfter {
             data: Some(Bytes::from_static(b"partial")),
             errored: false,
         }));
         let (captured, forward, complete) = buffer_capped(body, 1024).await;
-        assert_eq!(captured, b"partial", "the prefix before the error is captured");
+        assert_eq!(captured, b"partial".as_slice(), "the prefix before the error is captured");
         assert!(!complete, "a mid-body error marks the capture incomplete");
         // The forwarded body must surface the error (not end cleanly), so the
         // client sees a failed transfer rather than a falsely-complete response.

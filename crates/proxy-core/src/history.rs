@@ -12,24 +12,15 @@
 //! it merges consecutive entries that share a frontend-supplied key, so typing a
 //! rule URL lands as one undo step instead of one-per-keystroke.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-use crate::flow::{now_ms, Flow};
+use crate::flow::Flow;
 use crate::rules::{Action, AutoResponder};
 
 /// Entries retained before the oldest are dropped.
 const DEFAULT_DEPTH_CAP: usize = 200;
 /// Soft ceiling on retained payload bytes (sum of per-entry estimates).
 const DEFAULT_BYTE_CAP: usize = 256 * 1024 * 1024;
-
-/// Which domain an entry belongs to — drives the UI icon, and tells the caller
-/// whether applying it changed the autoresponder (so it must re-persist).
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum HistoryKind {
-    Mock,
-    Traffic,
-}
 
 /// Metadata the frontend attaches to a mock mutation: a human label and an
 /// optional coalescing key. Consecutive mock entries sharing a key merge into
@@ -67,13 +58,6 @@ pub enum HistoryOp {
 }
 
 impl HistoryOp {
-    fn kind(&self) -> HistoryKind {
-        match self {
-            HistoryOp::Mock { .. } => HistoryKind::Mock,
-            HistoryOp::FlowsRemoved { .. } | HistoryOp::FlowsCleared { .. } => HistoryKind::Traffic,
-        }
-    }
-
     /// Rough payload size, for the byte budget. Bodies dominate; everything else
     /// is a small constant per entity.
     fn size(&self) -> usize {
@@ -101,50 +85,13 @@ fn flow_size(f: &Flow) -> usize {
     f.request.body.len() + f.response.as_ref().map_or(0, |r| r.body.len()) + 256
 }
 
-/// One timeline entry. `id` is stable across coalescing merges so the UI can
+/// One timeline entry. `id` is stable across coalescing merges so a caller can
 /// jump to it.
 #[derive(Clone, Debug)]
 pub struct HistoryEntry {
     pub id: u64,
     pub op: HistoryOp,
-    pub label: String,
-    pub kind: HistoryKind,
-    pub timestamp_ms: u64,
     pub bytes: usize,
-}
-
-impl HistoryEntry {
-    fn to_view(&self, undone: bool) -> HistoryEntryView {
-        HistoryEntryView {
-            id: self.id,
-            label: self.label.clone(),
-            kind: self.kind,
-            timestamp_ms: self.timestamp_ms,
-            undone,
-        }
-    }
-}
-
-/// Lightweight per-entry row for the history panel (no payloads).
-#[derive(Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct HistoryEntryView {
-    pub id: u64,
-    pub label: String,
-    pub kind: HistoryKind,
-    pub timestamp_ms: u64,
-    /// True when this entry sits in the redo stack (a future state).
-    pub undone: bool,
-}
-
-/// The whole timeline, as the frontend renders it: applied entries oldest→newest,
-/// then undone (future) entries in chronological order.
-#[derive(Serialize, Clone, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct HistoryView {
-    pub entries: Vec<HistoryEntryView>,
-    pub can_undo: bool,
-    pub can_redo: bool,
 }
 
 /// Undo/redo stacks plus the coalescing cursor and eviction caps.
@@ -182,9 +129,7 @@ impl History {
     /// the future), then either merges into the open entry or pushes a new one.
     pub fn record(&mut self, op: HistoryOp, tag: HistoryTag) {
         self.redo.clear();
-        let ts = now_ms();
         let bytes = op.size();
-        let kind = op.kind();
         let key = tag.coalesce_key;
 
         let can_merge = matches!((&key, &self.open_key), (Some(k), Some(open)) if k == open)
@@ -198,9 +143,7 @@ impl History {
             {
                 *slot = after;
             }
-            top.label = tag.label;
             top.bytes = bytes;
-            top.timestamp_ms = ts;
             self.evict();
             return;
         }
@@ -208,9 +151,6 @@ impl History {
         let entry = HistoryEntry {
             id: self.next_id,
             op,
-            label: tag.label,
-            kind,
-            timestamp_ms: ts,
             bytes,
         };
         self.next_id += 1;
@@ -248,11 +188,13 @@ impl History {
         self.open_key = None;
     }
 
-    pub fn can_undo(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
 
-    pub fn can_redo(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
 
@@ -268,17 +210,16 @@ impl History {
         self.redo.iter().any(|e| e.id == id)
     }
 
-    pub fn view(&self) -> HistoryView {
-        let mut entries: Vec<HistoryEntryView> =
-            self.undo.iter().map(|e| e.to_view(false)).collect();
-        // Redo stack is LIFO (top = next to reapply); reverse it so the panel
-        // reads in chronological order after the current position.
-        entries.extend(self.redo.iter().rev().map(|e| e.to_view(true)));
-        HistoryView {
-            entries,
-            can_undo: self.can_undo(),
-            can_redo: self.can_redo(),
-        }
+    /// Entry ids as a timeline: applied entries oldest→newest, then undone
+    /// (future) entries in chronological order — the redo stack is LIFO (top =
+    /// next to reapply), so it reads reversed. Test observation seam.
+    #[cfg(test)]
+    pub(crate) fn timeline_ids(&self) -> Vec<u64> {
+        self.undo
+            .iter()
+            .map(|e| e.id)
+            .chain(self.redo.iter().rev().map(|e| e.id))
+            .collect()
     }
 
     fn evict(&mut self) {
@@ -338,7 +279,7 @@ mod tests {
 
         h.record(mock(Some("typed2"), Some("formatted")), HistoryTag::new("Format body", None));
         assert_eq!(h.undo.len(), 2, "a no-key commit never folds into the coalesced edit run");
-        assert_eq!(h.undo[1].label, "Format body");
+        assert_eq!(after_of(&h.undo[1].op).as_deref(), Some("formatted"));
         assert_eq!(
             after_of(&h.undo[0].op).as_deref(),
             Some("typed2"),
@@ -387,9 +328,6 @@ mod tests {
         h.stash_redo(HistoryEntry {
             id: 999,
             op: mock(None, Some("a")),
-            label: "x".into(),
-            kind: HistoryKind::Mock,
-            timestamp_ms: 0,
             bytes: 0,
         });
         h.record(mock(None, Some("a")), HistoryTag::new("edit", key));
@@ -419,29 +357,24 @@ mod tests {
     }
 
     #[test]
-    fn view_orders_applied_then_future_with_flags() {
+    fn timeline_orders_applied_then_future_chronologically() {
         let mut h = History::default();
         h.record(mock(None, Some("a")), HistoryTag::new("A", None));
         h.record(mock(Some("a"), Some("b")), HistoryTag::new("B", None));
         h.record(mock(Some("b"), Some("c")), HistoryTag::new("C", None));
+        let recorded = h.timeline_ids();
         // Undo two → redo stack holds C then B (B on top).
         let c = h.take_undo().unwrap();
         h.stash_redo(c);
         let b = h.take_undo().unwrap();
         h.stash_redo(b);
 
-        let view = h.view();
-        let labels: Vec<(&str, bool)> = view
-            .entries
-            .iter()
-            .map(|e| (e.label.as_str(), e.undone))
-            .collect();
         assert_eq!(
-            labels,
-            vec![("A", false), ("B", true), ("C", true)],
+            h.timeline_ids(),
+            recorded,
             "applied (A) first, then future B, C in chronological order"
         );
-        assert!(view.can_undo && view.can_redo);
+        assert!(h.can_undo() && h.can_redo());
     }
 
     #[test]

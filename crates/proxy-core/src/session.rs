@@ -143,7 +143,7 @@ pub fn import_session(bytes: &[u8]) -> Result<Vec<Flow>> {
                 path: sf.path,
                 version: sf.req_version,
                 headers: sf.req_headers,
-                body: b64d(&sf.req_body),
+                body: b64d(&sf.req_body).into(),
                 timestamp_ms: ts,
             };
             let response = if sf.has_response || sf.status.is_some() {
@@ -156,7 +156,7 @@ pub fn import_session(bytes: &[u8]) -> Result<Vec<Flow>> {
                     status: sf.status.unwrap_or(0),
                     version: sf.resp_version,
                     headers: sf.resp_headers,
-                    body: b64d(&sf.resp_body),
+                    body: b64d(&sf.resp_body).into(),
                     timestamp_ms: resp_ts,
                 })
             } else {
@@ -198,14 +198,14 @@ mod tests {
                 path: "/p".into(),
                 version: "HTTP/1.1".into(),
                 headers: vec![("Accept".into(), "*/*".into())],
-                body: vec![1, 2, 3],
+                body: vec![1, 2, 3].into(),
                 timestamp_ms: 42,
             },
             response: Some(CapturedResponse {
                 status: 200,
                 version: "HTTP/1.1".into(),
                 headers: vec![("Content-Type".into(), "text/plain".into())],
-                body: b"hello".to_vec(),
+                body: b"hello".to_vec().into(),
                 timestamp_ms: 50,
             }),
             matched_rule: Some("r".into()),
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(f.request.timestamp_ms, 42);
         let r = f.response.as_ref().unwrap();
         assert_eq!(r.status, 200);
-        assert_eq!(r.body, b"hello");
+        assert_eq!(r.body, b"hello".as_slice());
         assert_eq!(r.timestamp_ms, 50, "the response's own timestamp survives the round-trip");
         assert_eq!(f.matched_rule.as_deref(), Some("r"));
         assert_eq!(f.duration_ms, Some(7));
