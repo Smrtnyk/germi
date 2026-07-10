@@ -57,6 +57,28 @@ describe("parseFilter summary matching", () => {
     expect(matches("-json", s)).toBe(true);
   });
 
+  it("treats a quoted phrase with a leading '-' as a literal, never a negation", () => {
+    expect(matches('"-bar"', summary({ path: "/api/foo-bar" }))).toBe(true);
+    expect(matches('"-bar"', summary({ path: "/api/x" }))).toBe(false);
+  });
+
+  it("negates a quoted phrase with a leading '-' (DevTools style)", () => {
+    expect(matches('-"foo bar"', summary({ path: "/x/foo bar" }))).toBe(false);
+    expect(matches('-"foo bar"', summary({ path: "/x/foo" }))).toBe(true);
+  });
+
+  it("parses a negated phrase plus a bare word as two terms, agreeing with rawSegments", () => {
+    expect(matches('-"foo bar" x', summary({ path: "/x" }))).toBe(true);
+    expect(rawSegments('-"foo bar" x')).toEqual(['-"foo bar"', "x"]);
+  });
+
+  it('keeps the key:"quoted value" form working, including negated', () => {
+    expect(matches('path:"a b"', summary({ path: "/x/a b" }))).toBe(true);
+    expect(matches('path:"a b"', summary({ path: "/x/a" }))).toBe(false);
+    expect(matches('-path:"a b"', summary({ path: "/x/a b" }))).toBe(false);
+    expect(matches('-path:"a b"', summary({ path: "/x/a" }))).toBe(true);
+  });
+
   it("supports /regex/ terms and ignores an unparseable one", () => {
     expect(matches("/\\.js$/", summary({ path: "/app.js" }))).toBe(true);
     expect(matches("/\\.js$/", summary({ path: "/app.css" }))).toBe(false);
