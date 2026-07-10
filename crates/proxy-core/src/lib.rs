@@ -374,22 +374,22 @@ impl ProxyController {
     }
 
     pub fn clear_flows(&self) {
+        // Emitted under the store lock, like every event in `shared.rs`, so a
+        // concurrent capture can't slot its New between the clear and `Cleared`.
         if let Ok(mut store) = self.shared.store.lock() {
             store.clear();
+            let _ = self.shared.events.send(FlowEvent::Cleared);
         }
-        let _ = self.shared.events.send(FlowEvent::Cleared);
     }
 
     /// Remove specific captured flows by id, so the user can prune noise before
     /// saving a `.germi` session. Emits `Removed` with the ids (the UI drops
     /// those rows); a no-op that emits nothing when none of the ids were present.
     pub fn remove_flows(&self, ids: &[String]) {
-        let removed = match self.shared.store.lock() {
-            Ok(mut store) => store.remove(ids),
-            Err(_) => 0,
-        };
-        if removed > 0 {
-            let _ = self.shared.events.send(FlowEvent::Removed { ids: ids.to_vec() });
+        if let Ok(mut store) = self.shared.store.lock() {
+            if store.remove(ids) > 0 {
+                let _ = self.shared.events.send(FlowEvent::Removed { ids: ids.to_vec() });
+            }
         }
     }
 
@@ -1046,12 +1046,11 @@ impl ProxyController {
         if let Ok(mut guard) = self.shared.settings.write() {
             *guard = settings;
         }
-        let evicted = match self.shared.store.lock() {
-            Ok(mut store) => store.set_max(max),
-            Err(_) => Vec::new(),
-        };
-        if !evicted.is_empty() {
-            let _ = self.shared.events.send(FlowEvent::Removed { ids: evicted });
+        if let Ok(mut store) = self.shared.store.lock() {
+            let evicted = store.set_max(max);
+            if !evicted.is_empty() {
+                let _ = self.shared.events.send(FlowEvent::Removed { ids: evicted });
+            }
         }
     }
 
@@ -1187,14 +1186,20 @@ impl ProxyController {
     /// in the history entry.
     pub fn remove_flows_tracked(&self, ids: &[String]) {
         let items = match self.shared.store.lock() {
-            Ok(mut store) => store.remove_capturing(ids),
+            Ok(mut store) => {
+                let items = store.remove_capturing(ids);
+                if !items.is_empty() {
+                    let removed_ids: Vec<String> =
+                        items.iter().map(|(_, flow)| flow.id.clone()).collect();
+                    let _ = self.shared.events.send(FlowEvent::Removed { ids: removed_ids });
+                }
+                items
+            }
             Err(_) => Vec::new(),
         };
         if items.is_empty() {
             return;
         }
-        let removed_ids: Vec<String> = items.iter().map(|(_, flow)| flow.id.clone()).collect();
-        let _ = self.shared.events.send(FlowEvent::Removed { ids: removed_ids });
         let label = format!(
             "Delete {} flow{}",
             items.len(),
@@ -1225,11 +1230,11 @@ impl ProxyController {
             Ok(mut store) => {
                 let all = store.all_flows();
                 store.clear();
+                let _ = self.shared.events.send(FlowEvent::Cleared);
                 all
             }
             Err(_) => Vec::new(),
         };
-        let _ = self.shared.events.send(FlowEvent::Cleared);
         if flows.is_empty() {
             return;
         }
@@ -1350,8 +1355,8 @@ impl ProxyController {
     fn restore_flows(&self, items: Vec<(usize, crate::flow::Flow)>) {
         if let Ok(mut store) = self.shared.store.lock() {
             store.restore(items);
+            let _ = self.shared.events.send(FlowEvent::Resync);
         }
-        let _ = self.shared.events.send(FlowEvent::Resync);
     }
 }
 
@@ -1585,6 +1590,168 @@ mod tests {
         assert_eq!(flow.matched_rule.as_deref(), Some(r".*agent_(\w+)_\d+\.js"));
 
         c.stop().await;
+    }
+
+    /// A response-phase rule must still apply when the pending flow was evicted
+    /// from the bounded store before its response arrived (cap 1, two
+    /// overlapping requests): the response path may not depend on re-fetching
+    /// the request from the store.
+    #[tokio::test]
+    async fn response_rules_apply_after_cap_eviction_through_the_live_proxy() {
+        use std::io::{Read, Write};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // The origin: holds the FIRST request's response until released, so the
+        // second capture evicts the first while it's still pending.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind origin");
+        let origin = listener.local_addr().expect("addr");
+        let (first_seen_tx, first_seen_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let mut first_conn = Some((first_seen_tx, release_rx));
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let gate = first_conn.take();
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 2048];
+                    let _ = s.read(&mut buf);
+                    if let Some((first_seen, release)) = gate {
+                        let _ = first_seen.send(());
+                        let _ = release.recv_timeout(std::time::Duration::from_secs(10));
+                    }
+                    let _ = s.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    );
+                    let _ = s.flush();
+                });
+            }
+        });
+
+        let c = controller();
+        let mut ar = AutoResponder::default();
+        ar.ensure_general();
+        ar.scenarios.push(Scenario {
+            id: "s".to_string(),
+            name: "s".to_string(),
+            rules: vec![Rule {
+                id: "hdr".to_string(),
+                enabled: true,
+                fire_limit: None,
+                repeat: false,
+                matcher: Matcher {
+                    method: None,
+                    url: "/".to_string(),
+                    url_match: MatchKind::Contains,
+                },
+                action: Action::SetResponseHeader {
+                    name: "x-germi-rule".to_string(),
+                    value: "on".to_string(),
+                },
+            }],
+        });
+        ar.active_scenario_id = Some("s".to_string());
+        c.set_autoresponder(ar);
+        c.set_settings(ProxySettings { max_flows: 1, ..Default::default() });
+
+        let proxy_addr = c.start(loopback(0)).await.expect("start proxy");
+
+        let mut held_client =
+            tokio::net::TcpStream::connect(proxy_addr).await.expect("connect proxy");
+        held_client
+            .write_all(
+                format!(
+                    "GET http://{origin}/one HTTP/1.1\r\nHost: {origin}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("send held request");
+        tokio::time::timeout(std::time::Duration::from_secs(10), first_seen_rx)
+            .await
+            .expect("origin saw the held request")
+            .expect("first-seen signal");
+
+        // Second request completes fully first; at cap 1 it evicted the pending
+        // first flow when it was recorded.
+        let mut second_client =
+            tokio::net::TcpStream::connect(proxy_addr).await.expect("connect proxy");
+        second_client
+            .write_all(
+                format!(
+                    "GET http://{origin}/two HTTP/1.1\r\nHost: {origin}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("send second request");
+        let mut second_response = Vec::new();
+        second_client.read_to_end(&mut second_response).await.expect("read second response");
+        let second_response = String::from_utf8_lossy(&second_response).to_lowercase();
+        assert!(
+            second_response.contains("x-germi-rule: on"),
+            "second response: {second_response}"
+        );
+
+        release_tx.send(()).expect("release the held origin response");
+        let mut held_response = Vec::new();
+        held_client.read_to_end(&mut held_response).await.expect("read held response");
+        let held_response = String::from_utf8_lossy(&held_response).to_lowercase();
+        assert!(
+            held_response.contains("x-germi-rule: on"),
+            "the rule must apply even though the flow was evicted mid-flight: {held_response}"
+        );
+
+        c.stop().await;
+    }
+
+    /// `Cleared` must be ordered with concurrent captures: replaying the event
+    /// stream after a clear racing a burst of inserts must reproduce the store.
+    #[test]
+    fn cleared_event_stays_ordered_with_concurrent_captures() {
+        use std::collections::HashSet;
+        let c = controller();
+        let mut next_id = 0u32;
+        for _ in 0..600 {
+            c.clear_flows();
+            let mut rx = c.subscribe();
+            let producers: Vec<_> = (0..8)
+                .map(|_| {
+                    let shared = Arc::clone(&c.shared);
+                    let base = next_id;
+                    next_id += 50;
+                    std::thread::spawn(move || {
+                        for i in base..base + 50 {
+                            shared.record_new(flow(&format!("r{i}")));
+                        }
+                    })
+                })
+                .collect();
+            while c.shared.store.lock().unwrap().len() < 20 {
+                std::hint::spin_loop();
+            }
+            c.clear_flows();
+            for p in producers {
+                p.join().expect("producer thread");
+            }
+            let mut live: HashSet<String> = HashSet::new();
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    FlowEvent::New { summary } | FlowEvent::Completed { summary } => {
+                        live.insert(summary.id);
+                    }
+                    FlowEvent::Removed { ids } => {
+                        for id in ids {
+                            live.remove(&id);
+                        }
+                    }
+                    FlowEvent::Cleared => live.clear(),
+                    FlowEvent::Resync => {}
+                }
+            }
+            let stored: HashSet<String> =
+                c.shared.store.lock().unwrap().ids().into_iter().collect();
+            assert_eq!(live, stored, "replaying the event stream must reproduce the store");
+        }
     }
 
     #[tokio::test]
