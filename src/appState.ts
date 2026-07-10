@@ -56,6 +56,7 @@ import {
   reorderRuleSummary,
   replaceRuleSummary,
   ruleLabel,
+  type RuleSeed,
 } from "./autoresponderState";
 import type {
   AutoResponderSummary,
@@ -695,6 +696,12 @@ function activateLabel(ar: AutoResponderSummary, scenarioId: string | null): str
   return scenarioId ? `Activate "${scenarioNameIn(ar, scenarioId)}"` : "Turn mocking off";
 }
 
+function useRuleSeedState() {
+  const [ruleSeed, setRuleSeed] = useState<RuleSeed | null>(null);
+  const consumeRuleSeed = useCallback(() => setRuleSeed(null), []);
+  return { ruleSeed, setRuleSeed, consumeRuleSeed };
+}
+
 function useAutoresponder(
   setError: SetError,
   setRightTab: (tab: RightTab) => void,
@@ -706,7 +713,7 @@ function useAutoresponder(
     activeScenarioId: null,
     generalActive: true,
   });
-  const [selectRuleId, setSelectRuleId] = useState<string | null>(null);
+  const { ruleSeed, setRuleSeed, consumeRuleSeed } = useRuleSeedState();
   const [bulkMockProgress, setBulkMockProgress] = useState<BulkMockEvent | null>(null);
   const { ruleHits, resetRuleState } = useRuleHits(
     autoresponder.activeScenarioId,
@@ -957,7 +964,8 @@ function useAutoresponder(
           appendBulkRuleSummaries(current, event.scenarioId, event.rules),
         );
       });
-      setSelectRuleId(result.newRuleIds[0] ?? null);
+      const firstRuleId = result.newRuleIds[0];
+      setRuleSeed(firstRuleId ? { scenarioId: result.scenarioId, ruleId: firstRuleId } : null);
       setRightTab("autoresponder");
       const n = result.newRuleIds.length;
       notify("success", n > 1 ? `Created ${plural(n, "mock rule")}` : "Mock rule created");
@@ -997,7 +1005,8 @@ function useAutoresponder(
     autoresponder,
     setAutoresponder,
     refresh,
-    selectRuleId,
+    ruleSeed,
+    consumeRuleSeed,
     bulkMockProgress,
     activateScenario,
     setGeneralActive,

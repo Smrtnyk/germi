@@ -1,8 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 
 import { api } from "../ipc";
 import { blankScript, errorsById, scriptFromExample, type ScriptExample } from "../scriptsState";
-import { currentWindowLabel, emitScriptsChanged, onScriptsChanged } from "../scriptWindows";
+import {
+  currentWindowLabel,
+  emitScriptsChanged,
+  isScriptsWindowOpen,
+  onScriptsChanged,
+  onScriptsWindowClosed,
+} from "../scriptWindows";
 import type { Script } from "../types";
 import { ScriptsPanel } from "./ScriptsPanel";
 
@@ -32,7 +38,7 @@ function useScriptPersistence(setErrors: (errors: Map<string, string>) => void, 
   const persist = useCallback(
     (next: Script[]) => {
       pending.current = null;
-      api
+      return api
         .setScripts(next)
         .then((diagnostics) => {
           setErrors(errorsById(diagnostics));
@@ -52,15 +58,47 @@ function useScriptPersistence(setErrors: (errors: Map<string, string>) => void, 
     [persist],
   );
 
+  const flush = useCallback(() => {
+    if (saveTimer.current !== null) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    return pending.current ? persist(pending.current) : Promise.resolve();
+  }, [persist]);
+
   useEffect(
     () => () => {
-      if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
-      if (pending.current) persist(pending.current);
+      void flush();
     },
-    [persist],
+    [flush],
   );
 
-  return { persist, persistDebounced };
+  return { persist, persistDebounced, flush };
+}
+
+function useScriptsWindowGate(enabled: boolean) {
+  const [windowOpen, setWindowOpen] = useState(false);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    void isScriptsWindowOpen()
+      .then((open) => {
+        if (alive && open) setWindowOpen(true);
+      })
+      .catch(() => {});
+    let unlisten: (() => void) | undefined;
+    void onScriptsWindowClosed(() => setWindowOpen(false)).then((fn) => {
+      if (alive) unlisten = fn;
+      else fn();
+    });
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, [enabled]);
+
+  return { windowOpen, setWindowOpen };
 }
 
 /** Reload when the OTHER window saves (own broadcasts are skipped via `source`). */
@@ -81,41 +119,21 @@ function useExternalScriptsReload(label: string, reload: () => void) {
   }, [label, reload]);
 }
 
-/** Owns the script list + persistence, wiring the presentational
- *  {@link ScriptsPanel} to the Tauri commands. Kept mounted in the docked tab (its
- *  pane is only hidden) so edits survive tab switches; also reused by the detached
- *  {@link ScriptsWindow}. */
-export function ScriptsContainer({ onPopOut }: { onPopOut?: () => void } = {}) {
-  const [scripts, setScripts] = useState<Script[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [errors, setErrors] = useState<Map<string, string>>(new Map());
-  const label = currentWindowLabel();
-
-  const reload = useCallback(() => {
-    void loadScriptsWithDiagnostics()
-      .then((loaded) => {
-        setScripts(loaded.scripts);
-        setErrors(loaded.errors);
-        setSelectedId((current) => current ?? loaded.scripts[0]?.id ?? null);
-      })
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    reload();
-  }, [reload]);
-  useExternalScriptsReload(label, reload);
-
-  const { persist, persistDebounced } = useScriptPersistence(setErrors, label);
-
+function useScriptListActions(
+  scripts: Script[],
+  setScripts: (next: Script[]) => void,
+  setSelectedId: (update: (current: string | null) => string | null) => void,
+  persist: (next: Script[]) => unknown,
+  persistDebounced: (next: Script[]) => void,
+) {
   const addScript = useCallback(
     (script: Script) => {
       const next = [...scripts, script];
       setScripts(next);
-      setSelectedId(script.id);
+      setSelectedId(() => script.id);
       persist(next);
     },
-    [scripts, persist],
+    [scripts, setScripts, setSelectedId, persist],
   );
 
   const patchScript = useCallback(
@@ -124,7 +142,7 @@ export function ScriptsContainer({ onPopOut }: { onPopOut?: () => void } = {}) {
       setScripts(next);
       persistDebounced(next);
     },
-    [scripts, persistDebounced],
+    [scripts, setScripts, persistDebounced],
   );
 
   const onAdd = useCallback(() => addScript(blankScript(scripts)), [addScript, scripts]);
@@ -149,7 +167,7 @@ export function ScriptsContainer({ onPopOut }: { onPopOut?: () => void } = {}) {
       setScripts(next);
       persist(next);
     },
-    [scripts, persist],
+    [scripts, setScripts, persist],
   );
 
   const onDelete = useCallback(
@@ -159,7 +177,62 @@ export function ScriptsContainer({ onPopOut }: { onPopOut?: () => void } = {}) {
       setSelectedId((current) => (current === id ? (next[0]?.id ?? null) : current));
       persist(next);
     },
-    [scripts, persist],
+    [scripts, setScripts, setSelectedId, persist],
+  );
+
+  return { onAdd, onInsertExample, onRename, onSourceChange, onToggle, onDelete };
+}
+
+/** Owns the script list + persistence, wiring the presentational
+ *  {@link ScriptsPanel} to the Tauri commands. Kept mounted in the docked tab (its
+ *  pane is only hidden) so edits survive tab switches; also reused by the detached
+ *  {@link ScriptsWindow}. */
+export function ScriptsContainer({
+  onPopOut,
+  flushRef,
+}: {
+  onPopOut?: () => Promise<unknown>;
+  flushRef?: RefObject<() => Promise<void>>;
+} = {}) {
+  const [scripts, setScripts] = useState<Script[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Map<string, string>>(new Map());
+  const label = currentWindowLabel();
+
+  const reload = useCallback(() => {
+    void loadScriptsWithDiagnostics()
+      .then((loaded) => {
+        setScripts(loaded.scripts);
+        setErrors(loaded.errors);
+        setSelectedId((current) => current ?? loaded.scripts[0]?.id ?? null);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+  useExternalScriptsReload(label, reload);
+
+  const { persist, persistDebounced, flush } = useScriptPersistence(setErrors, label);
+  const { windowOpen, setWindowOpen } = useScriptsWindowGate(onPopOut !== undefined);
+  if (flushRef) flushRef.current = flush;
+
+  const popOut = useCallback(() => {
+    void flush()
+      .then(() => {
+        setWindowOpen(true);
+        return onPopOut?.();
+      })
+      .catch(() => setWindowOpen(false));
+  }, [flush, onPopOut, setWindowOpen]);
+
+  const actions = useScriptListActions(
+    scripts,
+    setScripts,
+    setSelectedId,
+    persist,
+    persistDebounced,
   );
 
   return (
@@ -168,13 +241,10 @@ export function ScriptsContainer({ onPopOut }: { onPopOut?: () => void } = {}) {
       selectedId={selectedId}
       errors={errors}
       onSelect={setSelectedId}
-      onAdd={onAdd}
-      onInsertExample={onInsertExample}
-      onDelete={onDelete}
-      onToggle={onToggle}
-      onRename={onRename}
-      onSourceChange={onSourceChange}
-      onPopOut={onPopOut}
+      {...actions}
+      onPopOut={onPopOut ? popOut : undefined}
+      poppedOut={windowOpen}
+      onFocusWindow={onPopOut ? popOut : undefined}
     />
   );
 }

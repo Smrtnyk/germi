@@ -82,4 +82,25 @@ describe("ScriptsPanel", () => {
     await screen.getByRole("button", { name: "Open window" }).click();
     expect(onPopOut).toHaveBeenCalledOnce();
   });
+
+  it("replaces the editor with a read-only placeholder while the scripts window is open", async () => {
+    const screen = await render(
+      <ScriptsPanel {...props({ selectedId: "s1", poppedOut: true, onFocusWindow: vi.fn() })} />,
+    );
+    await expect.element(screen.getByText(/Editing in the scripts window/)).toBeVisible();
+    await expect
+      .element(screen.getByRole("checkbox", { name: "Enable CORS" }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(screen.getByRole("textbox", { name: "Script name" }))
+      .not.toBeInTheDocument();
+    await expect.element(screen.getByRole("button", { name: "New" })).not.toBeInTheDocument();
+  });
+
+  it("focuses the scripts window from the placeholder", async () => {
+    const onFocusWindow = vi.fn();
+    const screen = await render(<ScriptsPanel {...props({ poppedOut: true, onFocusWindow })} />);
+    await screen.getByRole("button", { name: "Focus window" }).click();
+    expect(onFocusWindow).toHaveBeenCalledOnce();
+  });
 });

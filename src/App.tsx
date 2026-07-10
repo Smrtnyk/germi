@@ -535,7 +535,7 @@ function RightPanel({
           <FiltersPanel {...filters} />
         </div>
         <div className={panes.scripts ? "pane" : "pane hidden"}>
-          <ScriptsContainer onPopOut={() => void openOrFocusScriptsWindow()} />
+          <ScriptsContainer onPopOut={openOrFocusScriptsWindow} />
         </div>
       </div>
     </div>
@@ -765,7 +765,7 @@ export function App() {
                   importRules: s.ar.importRules,
                   dropMock: s.dropMockFlows,
                 },
-                selectRuleId: s.ar.selectRuleId,
+                seed: { ruleSeed: s.ar.ruleSeed, onRuleSeedConsumed: s.ar.consumeRuleSeed },
                 ruleHits: s.ar.ruleHits,
                 bulkMockProgress: s.ar.bulkMockProgress,
                 reloadToken: s.history.version,

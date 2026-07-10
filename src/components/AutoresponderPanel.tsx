@@ -17,7 +17,13 @@ import { debounce, isEqual } from "es-toolkit";
 
 import { api } from "../ipc";
 import { GENERAL_SCENARIO_ID } from "../types";
-import { popOutOpener, ruleLabel, selectedTabEnabled } from "../autoresponderState";
+import {
+  popOutOpener,
+  ruleLabel,
+  seededRuleId,
+  selectedTabEnabled,
+  type RuleSeed,
+} from "../autoresponderState";
 import { clickSelection, pruneSelection } from "../selection";
 import { decodeFlowIds, FLOW_DRAG_MIME, hasFlowDrag, RULE_DRAG_MIME } from "../dnd";
 import type {
@@ -112,13 +118,17 @@ interface TransferActions {
   dropMock: (ids: string[], scenarioId: string | null) => void;
 }
 
+interface RuleSeedProps {
+  ruleSeed?: RuleSeed | null;
+  onRuleSeedConsumed?: () => void;
+}
+
 export interface AutoresponderPanelProps {
   ar: AutoResponderSummary;
   scenarioActions: ScenarioActions;
   ruleActions: RuleActions;
   transferActions: TransferActions;
-  /** When set (e.g. via "Mock this"), select this rule for editing. */
-  selectRuleId?: string | null;
+  seed: RuleSeedProps;
   ruleHits: Record<string, number>;
   bulkMockProgress: BulkMockEvent | null;
   /** Bumped on every undo/redo so the open rule re-fetches its reverted value. */
@@ -565,7 +575,7 @@ export function useSelectedRule(
  *  shows exactly when `selectedIds.size <= 1`. Click semantics reuse the shared,
  *  tested pure helpers (`rangeSelection` / `toggleSelection`); the ordered id list
  *  (the currently shown, filtered rules) is passed in at call time. */
-export function useRuleSelection(selectRuleId?: string | null) {
+export function useRuleSelection() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
   const anchorRef = useRef<string | null>(null);
@@ -579,10 +589,6 @@ export function useRuleSelection(selectRuleId?: string | null) {
     setSelectedIds(id ? new Set([id]) : new Set());
     anchorRef.current = id;
   }, []);
-
-  useEffect(() => {
-    if (selectRuleId) selectOne(selectRuleId);
-  }, [selectRuleId, selectOne]);
 
   function onRowClick(order: string[], id: string, e: ReactMouseEvent) {
     const patch = clickSelection(order, selectedIds, selectedRuleId, anchorRef.current, id, e);
@@ -638,6 +644,20 @@ export function useRuleSelection(selectRuleId?: string | null) {
     overId,
     setOverId,
   };
+}
+
+export function useRuleSeed(
+  seed: RuleSeed | null | undefined,
+  scenarioId: string,
+  selectOne: (id: string | null) => void,
+  onConsumed?: () => void,
+) {
+  useEffect(() => {
+    if (!seed) return;
+    const id = seededRuleId(seed, scenarioId);
+    if (id) selectOne(id);
+    onConsumed?.();
+  }, [seed, scenarioId, selectOne, onConsumed]);
 }
 
 function useDeepRuleSearch(
@@ -1299,28 +1319,20 @@ function useScenarioName(
 
 function useScenarioWorkspace(
   active: ScenarioSummary,
-  selectRuleId: string | null | undefined,
+  seed: RuleSeedProps,
   ruleActions: RuleActions,
   openWindowRuleIds: Set<string>,
   reloadToken?: number,
 ) {
-  const selection = useRuleSelection(selectRuleId);
+  const selection = useRuleSelection();
+  useRuleSeed(seed.ruleSeed, active.id, selection.selectOne, seed.onRuleSeedConsumed);
   const selectedId = selection.selectedRuleId;
   // Editing is disabled while several rules are selected (issue #106): feed the
   // editor a null id so it neither loads nor saves against the multi-selection.
   const editingRuleId = selection.selectedIds.size <= 1 ? selectedId : null;
   const selectedPopped = editingRuleId ? openWindowRuleIds.has(editingRuleId) : false;
 
-  // When the selected rule's detached window closes, the inline copy loaded here
-  // is stale (the window saved a newer version). Bump a reload nonce on that
-  // pop→unpop transition so the inline editor re-fetches instead of showing —
-  // and then letting a follow-up edit overwrite — the old body.
-  const [externalReload, setExternalReload] = useState(0);
-  const prevPoppedRef = useRef(selectedPopped);
-  useEffect(() => {
-    if (prevPoppedRef.current && !selectedPopped) setExternalReload((n) => n + 1);
-    prevPoppedRef.current = selectedPopped;
-  }, [selectedPopped]);
+  const externalReload = useUnpopReloadNonce(selectedPopped);
 
   const editor = useSelectedRule(
     active.id,
@@ -1375,6 +1387,38 @@ function useScenarioWorkspace(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shownRules]);
 
+  return {
+    selection,
+    editor,
+    rulesRef,
+    listResize,
+    listResizeV,
+    shownRules,
+    ...ruleMutations(active, selection, editor, ruleActions, openWindowRuleIds),
+  };
+}
+
+/** When the selected rule's detached window closes, the inline copy loaded here
+ *  is stale (the window saved a newer version). Bump a reload nonce on that
+ *  pop→unpop transition so the inline editor re-fetches instead of showing —
+ *  and then letting a follow-up edit overwrite — the old body. */
+function useUnpopReloadNonce(selectedPopped: boolean): number {
+  const [externalReload, setExternalReload] = useState(0);
+  const prevPoppedRef = useRef(selectedPopped);
+  useEffect(() => {
+    if (prevPoppedRef.current && !selectedPopped) setExternalReload((n) => n + 1);
+    prevPoppedRef.current = selectedPopped;
+  }, [selectedPopped]);
+  return externalReload;
+}
+
+function ruleMutations(
+  active: ScenarioSummary,
+  selection: ReturnType<typeof useRuleSelection>,
+  editor: ReturnType<typeof useSelectedRule>,
+  ruleActions: RuleActions,
+  openWindowRuleIds: Set<string>,
+) {
   async function addRule() {
     const created = await ruleActions.create(active.id);
     if (created) selection.selectOne(created.id);
@@ -1416,19 +1460,7 @@ function useScenarioWorkspace(
     ruleActions.deleteMany(active.id, ids);
   }
 
-  return {
-    selection,
-    editor,
-    rulesRef,
-    listResize,
-    listResizeV,
-    shownRules,
-    addRule,
-    toggleRule,
-    duplicateRule,
-    deleteRule,
-    deleteSelected,
-  };
+  return { addRule, toggleRule, duplicateRule, deleteRule, deleteSelected };
 }
 
 type ScenarioWorkspace = ReturnType<typeof useScenarioWorkspace>;
@@ -1713,7 +1745,7 @@ function ScenarioView({
   isGeneral,
   generalActive,
   onRequestDelete,
-  selectRuleId,
+  seed,
   reloadToken,
   ruleHits,
   drop,
@@ -1730,7 +1762,7 @@ function ScenarioView({
   isGeneral: boolean;
   generalActive: boolean;
   onRequestDelete: () => void;
-  selectRuleId?: string | null;
+  seed: RuleSeedProps;
   reloadToken?: number;
   ruleHits: Record<string, number>;
   drop: { active: boolean; props: FlowDropZone };
@@ -1743,13 +1775,7 @@ function ScenarioView({
   openWindowRuleIds: Set<string>;
   onOpenRuleWindow: (scenarioId: string, ruleId: string) => void;
 }) {
-  const workspace = useScenarioWorkspace(
-    active,
-    selectRuleId,
-    ruleActions,
-    openWindowRuleIds,
-    reloadToken,
-  );
+  const workspace = useScenarioWorkspace(active, seed, ruleActions, openWindowRuleIds, reloadToken);
   // The General layer is not renamable; `rename` is never called for it.
   const nameEditor = useScenarioName(active, scenarioActions.rename);
   const exportScenario = () => {
@@ -1921,7 +1947,7 @@ export function AutoresponderPanel({
   scenarioActions,
   ruleActions,
   transferActions,
-  selectRuleId,
+  seed,
   ruleHits,
   bulkMockProgress,
   reloadToken,
@@ -2005,7 +2031,7 @@ export function AutoresponderPanel({
           isGeneral={isGeneral}
           generalActive={ar.generalActive}
           onRequestDelete={() => setPendingDelete(viewed)}
-          selectRuleId={selectRuleId}
+          seed={seed}
           reloadToken={reloadToken}
           ruleHits={ruleHits}
           drop={{ active: zone === "__body__", props: zoneProps("__body__", viewed.id) }}

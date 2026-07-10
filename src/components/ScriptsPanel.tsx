@@ -2,7 +2,7 @@ import { lazy, Suspense, useState } from "react";
 
 import { SCRIPT_EXAMPLES, type ScriptExample } from "../scriptsState";
 import type { Script } from "../types";
-import { IconClose, IconScript, IconWarn } from "./icons";
+import { IconClose, IconExternal, IconScript, IconWarn } from "./icons";
 import { Button } from "./ui/Button";
 
 // Keep CodeMirror out of the startup bundle (same boundary as the mock editor).
@@ -22,6 +22,8 @@ export interface ScriptsPanelProps {
   onSourceChange: (id: string, source: string) => void;
   /** Optional "open in a window" action (present in the docked panel only). */
   onPopOut?: () => void;
+  poppedOut?: boolean;
+  onFocusWindow?: () => void;
 }
 
 /** Presentational (IPC-free) editor for user request/response scripts: a list of
@@ -39,11 +41,21 @@ export function ScriptsPanel({
   onRename,
   onSourceChange,
   onPopOut,
+  poppedOut,
+  onFocusWindow,
 }: ScriptsPanelProps) {
   const [showGuide, setShowGuide] = useState(false);
   const selected = scripts.find((script) => script.id === selectedId) ?? null;
   // The guide doubles as the empty state, so it also shows when nothing's picked.
   const guideVisible = showGuide || !selected;
+
+  if (poppedOut) {
+    return (
+      <div className="scripts-panel">
+        <ScriptsPoppedOutNotice onFocusWindow={onFocusWindow} />
+      </div>
+    );
+  }
 
   return (
     <div className="scripts-panel">
@@ -57,25 +69,17 @@ export function ScriptsPanel({
         onPopOut={onPopOut}
       />
 
-      <div className="scripts-list">
-        {scripts.length === 0 && (
-          <p className="muted pad small">No scripts yet — see the guide below.</p>
-        )}
-        {scripts.map((script) => (
-          <ScriptRow
-            key={script.id}
-            script={script}
-            selected={script.id === selectedId}
-            error={errors.get(script.id)}
-            onSelect={() => {
-              onSelect(script.id);
-              setShowGuide(false);
-            }}
-            onToggle={() => onToggle(script.id)}
-            onDelete={() => onDelete(script.id)}
-          />
-        ))}
-      </div>
+      <ScriptsList
+        scripts={scripts}
+        selectedId={selectedId}
+        errors={errors}
+        onSelect={(id) => {
+          onSelect(id);
+          setShowGuide(false);
+        }}
+        onToggle={onToggle}
+        onDelete={onDelete}
+      />
 
       {guideVisible ? (
         <ScriptsGuide
@@ -93,6 +97,55 @@ export function ScriptsPanel({
             onSourceChange={onSourceChange}
           />
         )
+      )}
+    </div>
+  );
+}
+
+function ScriptsList({
+  scripts,
+  selectedId,
+  errors,
+  onSelect,
+  onToggle,
+  onDelete,
+}: {
+  scripts: Script[];
+  selectedId: string | null;
+  errors: Map<string, string>;
+  onSelect: (id: string) => void;
+  onToggle: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  return (
+    <div className="scripts-list">
+      {scripts.length === 0 && (
+        <p className="muted pad small">No scripts yet — see the guide below.</p>
+      )}
+      {scripts.map((script) => (
+        <ScriptRow
+          key={script.id}
+          script={script}
+          selected={script.id === selectedId}
+          error={errors.get(script.id)}
+          onSelect={() => onSelect(script.id)}
+          onToggle={() => onToggle(script.id)}
+          onDelete={() => onDelete(script.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ScriptsPoppedOutNotice({ onFocusWindow }: { onFocusWindow?: () => void }) {
+  return (
+    <div className="rule-locked muted pad">
+      <IconExternal />
+      <p>Editing in the scripts window. Close it to edit here.</p>
+      {onFocusWindow && (
+        <Button size="small" onClick={onFocusWindow}>
+          Focus window
+        </Button>
       )}
     </div>
   );

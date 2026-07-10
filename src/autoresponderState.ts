@@ -36,6 +36,18 @@ export function popOutOpener(
   };
 }
 
+export interface RuleSeed {
+  scenarioId: string;
+  ruleId: string;
+}
+
+export function seededRuleId(
+  seed: RuleSeed | null | undefined,
+  viewedScenarioId: string,
+): string | null {
+  return seed && seed.scenarioId === viewedScenarioId ? seed.ruleId : null;
+}
+
 function updateScenarioRules(
   state: AutoResponderSummary,
   scenarioId: string,

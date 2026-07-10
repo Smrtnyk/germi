@@ -309,7 +309,7 @@ function VLine({
   return (
     <div
       data-index={index}
-      ref={wrap ? measureElement : undefined}
+      ref={measureElement}
       className={`vline ${isHit ? "hit" : ""} ${isActive ? "active" : ""}`}
       style={style}
     >
@@ -321,7 +321,7 @@ function VLine({
 const NO_COUNT = () => {};
 
 /** Virtualized text viewer driven by the lifted inspector find (when present). */
-function VirtualText({
+export function VirtualText({
   text,
   hex,
   wrap,
@@ -344,6 +344,14 @@ function VirtualText({
     estimateSize: () => ROW_H,
     overscan: 40,
   });
+
+  const prevWrap = useRef(wrap);
+  useEffect(() => {
+    if (prevWrap.current !== wrap) {
+      prevWrap.current = wrap;
+      virtualizer.measure();
+    }
+  }, [wrap, virtualizer]);
 
   const { activeLine, activeOcc } = useFind(
     rows,
