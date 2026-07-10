@@ -51,9 +51,11 @@ bounded `FlowStore` (`store.rs`). `CaptureHandler` (`handler.rs`) implements
 hudsucker's traits, runs each request/response through the `AutoResponder`
 (`rules.rs`), and records flows via `Shared` (`shared.rs`, the state shared by
 every cloned handler). `ProxyController` (`lib.rs`) owns the lifecycle and is the
-only public surface. The **AutoResponder** holds many `Scenario`s but exactly one
-is active at a time (or none = "Off"); only the active scenario's enabled rules
-are evaluated.
+only public surface. The **AutoResponder** holds many `Scenario`s; at most one is
+active at a time (or none = "Off"), **plus** a built-in **General** layer
+(`GENERAL_SCENARIO_ID` in `rules.rs`) whose enabled rules stack — evaluated
+*before* the active scenario's — whenever `general_active` is on (default true),
+independently of which scenario is active, including Off.
 
 ## Commands
 
@@ -107,10 +109,11 @@ Engine (proxy-core — these work without the GUI system libs):
   borrow across an await). JS passes camelCase arg names; Rust receives
   snake_case (Tauri converts).
 - **Persistence:** the CA (`germi-ca.{pem,key,der}`),
-  `autoresponder.sqlite3`, and `settings.json` (proxy-wide settings, e.g. host
-  exclusions) live in the OS app-data dir (`AppState.ca_dir`).
-  `src-tauri/src/rule_store.rs` owns normalized scenario/rule persistence and
-  `src-tauri/src/persist.rs` handles settings. On writable open, `rule_store`
+  `autoresponder.sqlite3`, `settings.json` (proxy-wide settings, e.g. host
+  exclusions), and `scripts.json` (user scripts) live in the OS app-data dir
+  (`AppState.ca_dir`). `src-tauri/src/rule_store.rs` owns normalized
+  scenario/rule persistence and `src-tauri/src/persist.rs` handles settings and
+  scripts. On writable open, `rule_store`
   self-heals a DB written by an older schema (column diff → rebuild, preserving
   rules via their stored `rule_json`; viewer instances never heal). Schema
   changes must keep that self-heal working — an existing DB must still load —
@@ -190,8 +193,9 @@ scenarios + rules + offline tester, HAR/SAZ import, multi-select → mock,
 CodeMirror mock editor, rich filtering + backend body search, configurable
 traffic columns (timing/TTFB, per-flow comments, pinned-header columns), a
 multi-section Settings panel (Connections incl. allow-remote, Certificates
-export+regenerate, host exclusion, Capture filter + max-flows + capture-on-start,
-response-delay throttling), settings import/export, and `.germi` session
+export+regenerate, host exclusion, Capture filter + max-flows +
+auto-start-on-launch, response-delay throttling, Shortcuts incl. the
+system-proxy hotkey), settings import/export, and `.germi` session
 save/open. Settings import/export is **partial by section** (issue #112): a
 checklist dialog (`SettingsSectionsDialog.tsx`) picks what to export, and import
 is two-phase (`peek_settings_import` previews the picked file's sections →
@@ -251,6 +255,15 @@ the custom properties live and commits once per interaction (native `change`).
 Rows also take direct hex entry (6-digit keeps the row's opacity, 8-digit
 sets it — `parseHexEntry`) and drag-a-swatch-onto-another-row hue copy
 (`COLOR_DRAG_MIME` in `dnd.ts`; drops copy the hue, never the opacity).
+
+**User scripts** (Rhai): `proxy-core/src/scripting.rs` runs optional
+`on_request`/`on_response` hooks over live traffic — the generic escape hatch
+for rewrites the rule actions don't cover. Edited in the docked `ScriptsPanel`
+or a detached scripts window (`ScriptsWindow.tsx`, rule-window pattern),
+persisted to `scripts.json` via the `get_scripts`/`set_scripts`/`check_script`
+commands (diagnostics come back per script). Rules additionally have a
+dedicated `cors` action (regex-scoped "Allow CORS", `Action::Cors` in
+`rules.rs`) so mocks can answer preflights without a script.
 
 Deferred (not started): repeater (edit & resend), breakpoints, WebSocket frame
 editing, HTTP/2, upstream/parent-proxy chaining, SQLite-backed persistent store.
