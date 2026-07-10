@@ -32,7 +32,7 @@ use crate::shared::Shared;
 /// Bodies with no declared length are buffered up to this bound and, if they
 /// exceed it, the FULL body is still forwarded (capped prefix + remaining stream)
 /// while only the prefix is captured — so the wire is never truncated.
-const MAX_CAPTURE_BODY: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_CAPTURE_BODY: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct CaptureHandler {
@@ -47,6 +47,12 @@ struct Inflight {
     /// The Map Remote rule that redirected this request, if any — stamped as
     /// the flow's matched rule when the (upstream) response completes.
     rule: Option<String>,
+    /// The captured request, carried here rather than re-fetched from the
+    /// store: the bounded store may evict the pending flow before its response
+    /// arrives, and response-phase rules, scripts and the HEAD/304
+    /// Content-Length restore must still see the request. Lives only for the
+    /// request's duration, so the clone is cheap relative to the store copy.
+    request: CapturedRequest,
 }
 
 impl CaptureHandler {
@@ -137,13 +143,10 @@ impl HttpHandler for CaptureHandler {
         let id = self.shared.next_id();
         let start = Instant::now();
 
-        // Mocks never reach handle_response, so response-phase scripts run over
-        // them here; keep the request for that (it's about to move into the Flow).
-        let req_for_scripts = matches!(
-            outcome,
-            RequestOutcome::Respond { .. } | RequestOutcome::Block { .. }
-        )
-        .then(|| captured.clone());
+        // Keep a copy of the request (it's about to move into the Flow): mocks
+        // never reach handle_response and run their response-phase rules/scripts
+        // here, and forwarded requests carry it on the in-flight entry.
+        let request = captured.clone();
 
         // Emit the request immediately (response pending).
         self.shared.record_new(Flow {
@@ -161,7 +164,7 @@ impl HttpHandler for CaptureHandler {
 
         match outcome {
             RequestOutcome::Respond { rule, response, .. } => {
-                let out = self.serve_synthetic(&id, &rule, response, req_for_scripts.as_ref());
+                let out = self.serve_synthetic(&id, &rule, response, &request);
                 self.inflight = None;
                 out.into()
             }
@@ -171,7 +174,7 @@ impl HttpHandler for CaptureHandler {
                     headers: vec![("content-type".to_string(), "text/plain".to_string())],
                     body: b"Blocked by Germi".to_vec(),
                 };
-                let out = self.serve_synthetic(&id, &rule, synthetic, req_for_scripts.as_ref());
+                let out = self.serve_synthetic(&id, &rule, synthetic, &request);
                 self.inflight = None;
                 out.into()
             }
@@ -179,7 +182,8 @@ impl HttpHandler for CaptureHandler {
                 // Forward the streaming remainder (oversized/truncated) or a body
                 // rebuilt from the captured bytes.
                 let forward = stream_forward.unwrap_or_else(|| Body::from(body_bytes));
-                self.forward_upstream(&id, start, None, parts, &set_headers, forward)
+                let inflight = Inflight { id, start, rule: None, request };
+                self.forward_upstream(inflight, None, parts, &set_headers, forward)
             }
             // Map Remote: same forwarding as Continue, but pointed at the
             // rule's rewritten URL. The flow keeps the ORIGINAL request (what
@@ -192,7 +196,8 @@ impl HttpHandler for CaptureHandler {
                 ..
             } => {
                 let forward = stream_forward.unwrap_or_else(|| Body::from(body_bytes));
-                self.forward_upstream(&id, start, Some((rule, url)), parts, &set_headers, forward)
+                let inflight = Inflight { id, start, rule: Some(rule), request };
+                self.forward_upstream(inflight, Some(url), parts, &set_headers, forward)
             }
         }
     }
@@ -202,6 +207,60 @@ impl HttpHandler for CaptureHandler {
         _ctx: &HttpContext,
         res: Response<Body>,
     ) -> Response<Body> {
+        self.process_response(res).await
+    }
+
+    /// Decide whether to MITM a CONNECT. Bypassed hosts return `false`, so
+    /// hudsucker blind-tunnels them (no certificate, decryption, or capture).
+    async fn should_intercept(&mut self, _ctx: &HttpContext, req: &Request<Body>) -> bool {
+        let host = req.uri().host().unwrap_or_default();
+        !self.shared.should_bypass(host)
+    }
+
+    /// The upstream request failed (connection refused, DNS failure, upstream
+    /// TLS error). `handle_response` never fires, so complete the pending row
+    /// with a 502 instead of stranding it forever-"pending", then return the
+    /// same bare 502 the client would otherwise get.
+    async fn handle_error(
+        &mut self,
+        _ctx: &HttpContext,
+        err: hudsucker::hyper_util::client::legacy::Error,
+    ) -> Response<Body> {
+        if let Some(inflight) = self.inflight.take() {
+            let duration = inflight.start.elapsed().as_millis() as u64;
+            let captured = CapturedResponse {
+                status: 502,
+                version: "HTTP/1.1".to_string(),
+                headers: vec![("content-type".to_string(), "text/plain".to_string())],
+                body: format!("Upstream request failed: {err}").into_bytes(),
+                timestamp_ms: now_ms(),
+            };
+            // Keep the Map Remote provenance on the 502 so a dead mapped
+            // target is attributable to the rule that pointed there.
+            self.shared
+                .record_complete(&inflight.id, captured, duration, None, inflight.rule);
+        }
+        Response::builder()
+            .status(502)
+            .body(Body::empty())
+            .unwrap_or_else(|_| Response::new(Body::empty()))
+    }
+}
+
+impl CaptureHandler {
+    /// Apply the configured response-delay throttle (simulate a slow response),
+    /// after recording so the captured duration stays real. Skipped for bypassed
+    /// traffic (which returns before reaching here).
+    async fn throttle(&self) {
+        let delay = self.shared.response_delay_ms();
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+    }
+
+    /// The body of `handle_response`, split out so tests can drive it directly
+    /// (hudsucker's `HttpContext` is non-exhaustive and can't be constructed).
+    async fn process_response(&mut self, res: Response<Body>) -> Response<Body> {
         let inflight = self.inflight.take();
         let (parts, body) = res.into_parts();
 
@@ -265,22 +324,23 @@ impl HttpHandler for CaptureHandler {
             timestamp_ms: now_ms(),
         };
 
-        let req = self.shared.get_request(&inflight.id);
+        // The in-flight copy — NOT a store lookup: the bounded store may have
+        // evicted the pending flow, and response rules / scripts / the
+        // Content-Length restore must still see the request.
+        let req = &inflight.request;
         let mut matched = None;
-        if let Some(req) = &req {
-            // Lock order autoresponder→cursors matches handle_request, so the two
-            // never deadlock; held only for this synchronous rewrite (no .await).
-            if let (Ok(ar), Ok(mut cursors)) =
-                (self.shared.autoresponder.read(), self.shared.cursors.lock())
-            {
-                matched = ar.apply_response_stateful(req, &mut captured, &mut cursors);
-            }
+        // Lock order autoresponder→cursors matches handle_request, so the two
+        // never deadlock; held only for this synchronous rewrite (no .await).
+        if let (Ok(ar), Ok(mut cursors)) =
+            (self.shared.autoresponder.read(), self.shared.cursors.lock())
+        {
+            matched = ar.apply_response_stateful(req, &mut captured, &mut cursors);
         }
 
         // User scripts get the last word on the response the client sees.
         let script_res_effects = match self.shared.scripts.read() {
             Ok(engine) if engine.wants_response() => {
-                Some(engine.run_response(req.as_ref(), &captured))
+                Some(engine.run_response(Some(req), &captured))
             }
             _ => None,
         };
@@ -288,14 +348,17 @@ impl HttpHandler for CaptureHandler {
             apply_response_effects(&mut captured, effects);
         }
 
+        // Rules/scripts may have set an out-of-range status; sanitize before the
+        // wire response is built AND before recording, so both stay in agreement.
+        captured.status = sanitize_status(captured.status);
         let mut out = build_captured_response(&captured);
 
         // A HEAD response (and a 304) legitimately declares a Content-Length that
         // describes the resource, not the (absent) body. `build_parts` drops it so
         // hyper recomputes the length from the body — which is empty here, giving a
         // wrong `content-length: 0`. Restore the upstream value for these.
-        let bodyless = parts.status.as_u16() == 304
-            || req.as_ref().is_some_and(|r| r.method.eq_ignore_ascii_case("HEAD"));
+        let bodyless =
+            parts.status.as_u16() == 304 || req.method.eq_ignore_ascii_case("HEAD");
         if bodyless {
             if let Some(cl) = parts.headers.get(CONTENT_LENGTH) {
                 out.headers_mut().insert(CONTENT_LENGTH, cl.clone());
@@ -312,54 +375,6 @@ impl HttpHandler for CaptureHandler {
 
         self.throttle().await;
         out
-    }
-
-    /// Decide whether to MITM a CONNECT. Bypassed hosts return `false`, so
-    /// hudsucker blind-tunnels them (no certificate, decryption, or capture).
-    async fn should_intercept(&mut self, _ctx: &HttpContext, req: &Request<Body>) -> bool {
-        let host = req.uri().host().unwrap_or_default();
-        !self.shared.should_bypass(host)
-    }
-
-    /// The upstream request failed (connection refused, DNS failure, upstream
-    /// TLS error). `handle_response` never fires, so complete the pending row
-    /// with a 502 instead of stranding it forever-"pending", then return the
-    /// same bare 502 the client would otherwise get.
-    async fn handle_error(
-        &mut self,
-        _ctx: &HttpContext,
-        err: hudsucker::hyper_util::client::legacy::Error,
-    ) -> Response<Body> {
-        if let Some(inflight) = self.inflight.take() {
-            let duration = inflight.start.elapsed().as_millis() as u64;
-            let captured = CapturedResponse {
-                status: 502,
-                version: "HTTP/1.1".to_string(),
-                headers: vec![("content-type".to_string(), "text/plain".to_string())],
-                body: format!("Upstream request failed: {err}").into_bytes(),
-                timestamp_ms: now_ms(),
-            };
-            // Keep the Map Remote provenance on the 502 so a dead mapped
-            // target is attributable to the rule that pointed there.
-            self.shared
-                .record_complete(&inflight.id, captured, duration, None, inflight.rule);
-        }
-        Response::builder()
-            .status(502)
-            .body(Body::empty())
-            .unwrap_or_else(|_| Response::new(Body::empty()))
-    }
-}
-
-impl CaptureHandler {
-    /// Apply the configured response-delay throttle (simulate a slow response),
-    /// after recording so the captured duration stays real. Skipped for bypassed
-    /// traffic (which returns before reaching here).
-    async fn throttle(&self) {
-        let delay = self.shared.response_delay_ms();
-        if delay > 0 {
-            tokio::time::sleep(Duration::from_millis(delay)).await;
-        }
     }
 
     /// Record a tentative 101 for a forwarded WebSocket upgrade so its row isn't
@@ -450,35 +465,26 @@ impl CaptureHandler {
 
     /// Forward a request upstream (the Continue and Map Remote paths): stash the
     /// in-flight entry, apply rule header edits, repoint at a Map Remote target
-    /// when `mapped` carries one, and record a tentative 101 for a WebSocket
+    /// when `target` carries one, and record a tentative 101 for a WebSocket
     /// upgrade — a successful upgrade hands the connection to the WS handler
     /// and `handle_response` never fires, which would strand a forever-"pending"
     /// row (a real response, e.g. a rejected upgrade, overwrites it by id).
     fn forward_upstream(
         &mut self,
-        id: &str,
-        start: Instant,
-        mapped: Option<(String, String)>,
+        inflight: Inflight,
+        target: Option<String>,
         mut parts: hudsucker::hyper::http::request::Parts,
         set_headers: &[(String, String)],
         body: Body,
     ) -> RequestOrResponse {
-        let (rule, target) = match mapped {
-            Some((rule, url)) => (Some(rule), Some(url)),
-            None => (None, None),
-        };
-        self.inflight = Some(Inflight {
-            id: id.to_string(),
-            start,
-            rule,
-        });
         apply_set_headers(&mut parts.headers, set_headers);
         if let Some(target) = target {
             remap_request_target(&mut parts, &target);
         }
         if is_websocket_upgrade(&parts.headers) {
-            self.record_ws_upgrade(id);
+            self.record_ws_upgrade(&inflight.id);
         }
+        self.inflight = Some(inflight);
         Request::from_parts(parts, body).into()
     }
 
@@ -489,12 +495,13 @@ impl CaptureHandler {
         id: &str,
         rule: &str,
         mut response: SyntheticResponse,
-        req: Option<&CapturedRequest>,
+        req: &CapturedRequest,
     ) -> Response<Body> {
-        if let Some(req) = req {
-            self.run_rules_on_synthetic(req, &mut response);
-            self.run_scripts_on_synthetic(req, &mut response);
-        }
+        self.run_rules_on_synthetic(req, &mut response);
+        self.run_scripts_on_synthetic(req, &mut response);
+        // Sanitize the (rule/script-supplied) status before the wire response is
+        // built AND before recording, so both stay in agreement.
+        response.status = sanitize_status(response.status);
         let out = build_response(&response);
         self.complete_synthetic(id, rule, response);
         out
@@ -681,6 +688,19 @@ fn build_response(synthetic: &SyntheticResponse) -> Response<Body> {
 /// Build a hyper response from a captured (possibly rewritten) response.
 fn build_captured_response(captured: &CapturedResponse) -> Response<Body> {
     build_parts(captured.status, &captured.headers, &captured.body)
+}
+
+/// Clamp a rule/script-supplied status to hyper's valid range (100..=999). An
+/// out-of-range value poisons `Response::builder`, whose fallback serves 200
+/// with EVERY header dropped — while the store would record the configured
+/// status, so wire and inspector disagree. Falling back to 200 here, before the
+/// response is built or recorded, keeps the headers and keeps them in sync.
+fn sanitize_status(status: u16) -> u16 {
+    if (100..=999).contains(&status) {
+        status
+    } else {
+        200
+    }
 }
 
 fn build_parts(status: u16, headers: &[(String, String)], body: &[u8]) -> Response<Body> {
@@ -935,6 +955,201 @@ mod tests {
             }
             Poll::Ready(None)
         }
+    }
+
+    fn test_request() -> CapturedRequest {
+        CapturedRequest {
+            method: "GET".to_string(),
+            uri: "https://example.com/api".to_string(),
+            scheme: "https".to_string(),
+            host: "example.com".to_string(),
+            path: "/api".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+            timestamp_ms: 0,
+        }
+    }
+
+    fn pending_flow(id: &str) -> Flow {
+        Flow {
+            id: id.to_string(),
+            seq: 0,
+            request: test_request(),
+            response: None,
+            matched_rule: None,
+            duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
+            availability: None,
+            imported: false,
+        }
+    }
+
+    fn test_shared(max_flows: usize) -> Arc<Shared> {
+        shared_with_responder(max_flows, crate::rules::AutoResponder::default())
+    }
+
+    fn shared_with_responder(
+        max_flows: usize,
+        responder: crate::rules::AutoResponder,
+    ) -> Arc<Shared> {
+        Shared::new(max_flows, responder, crate::settings::ProxySettings::default())
+    }
+
+    fn responder_with(action: crate::rules::Action) -> crate::rules::AutoResponder {
+        let mut ar = crate::rules::AutoResponder::default();
+        ar.ensure_general();
+        ar.scenarios.push(crate::rules::Scenario {
+            id: "s".to_string(),
+            name: "s".to_string(),
+            rules: vec![crate::rules::Rule {
+                id: "r".to_string(),
+                enabled: true,
+                fire_limit: None,
+                repeat: false,
+                matcher: crate::rules::Matcher {
+                    method: None,
+                    url: "/".to_string(),
+                    url_match: crate::rules::MatchKind::Contains,
+                },
+                action,
+            }],
+        });
+        ar.active_scenario_id = Some("s".to_string());
+        ar
+    }
+
+    fn inflight_for(id: &str, request: CapturedRequest) -> Inflight {
+        Inflight {
+            id: id.to_string(),
+            start: Instant::now(),
+            rule: None,
+            request,
+        }
+    }
+
+    #[tokio::test]
+    async fn response_rules_use_the_inflight_request_after_eviction() {
+        let shared = shared_with_responder(
+            1,
+            responder_with(crate::rules::Action::SetResponseHeader {
+                name: "x-rule".to_string(),
+                value: "on".to_string(),
+            }),
+        );
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+        // Cap 1: a second pending capture evicts "f1" before its response arrives.
+        shared.record_new(pending_flow("f2"));
+        assert!(shared.store.lock().unwrap().get("f1").is_none(), "f1 must be evicted");
+
+        let res = Response::builder().status(200).body(Body::from("hi")).expect("response");
+        let out = handler.process_response(res).await;
+        assert_eq!(
+            out.headers().get("x-rule").and_then(|v| v.to_str().ok()),
+            Some("on"),
+            "response-phase rules must still apply to an evicted flow's response"
+        );
+    }
+
+    #[tokio::test]
+    async fn head_content_length_restore_survives_eviction() {
+        let shared = test_shared(1);
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        let mut req = test_request();
+        req.method = "HEAD".to_string();
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", req));
+        shared.record_new(pending_flow("f2"));
+
+        let res = Response::builder()
+            .status(200)
+            .header(CONTENT_LENGTH, "5000")
+            .body(Body::empty())
+            .expect("response");
+        let out = handler.process_response(res).await;
+        assert_eq!(
+            out.headers().get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()),
+            Some("5000"),
+            "HEAD's resource Content-Length must be restored even after eviction"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_set_status_falls_back_to_200_keeping_headers() {
+        let shared =
+            shared_with_responder(10, responder_with(crate::rules::Action::SetStatus {
+                status: 1000,
+            }));
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+
+        let res = Response::builder()
+            .status(200)
+            .header("x-upstream", "1")
+            .body(Body::from("hi"))
+            .expect("response");
+        let out = handler.process_response(res).await;
+        assert_eq!(out.status().as_u16(), 200, "an out-of-range SetStatus falls back to 200");
+        assert_eq!(
+            out.headers().get("x-upstream").and_then(|v| v.to_str().ok()),
+            Some("1"),
+            "upstream headers must survive an invalid SetStatus"
+        );
+        let recorded = shared
+            .store
+            .lock()
+            .unwrap()
+            .get("f1")
+            .and_then(|f| f.response.clone())
+            .expect("recorded response");
+        assert_eq!(
+            recorded.status,
+            out.status().as_u16(),
+            "the store must record the status that actually went on the wire"
+        );
+    }
+
+    #[test]
+    fn invalid_mock_status_keeps_headers_and_store_matches_wire() {
+        let shared = test_shared(10);
+        let handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        let req = test_request();
+        let synthetic = SyntheticResponse {
+            status: 99,
+            headers: vec![
+                ("x-mock".to_string(), "1".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+            ],
+            body: b"{}".to_vec(),
+        };
+        let out = handler.serve_synthetic("f1", "rule", synthetic, &req);
+        assert_eq!(
+            out.headers().get("x-mock").and_then(|v| v.to_str().ok()),
+            Some("1"),
+            "configured headers must survive an invalid status"
+        );
+        assert_eq!(
+            out.headers().get("content-type").and_then(|v| v.to_str().ok()),
+            Some("application/json"),
+            "the dedicated content-type must survive an invalid status"
+        );
+        let recorded = shared
+            .store
+            .lock()
+            .unwrap()
+            .get("f1")
+            .and_then(|f| f.response.clone())
+            .expect("recorded response");
+        assert_eq!(
+            recorded.status,
+            out.status().as_u16(),
+            "the store must record the status that actually went on the wire"
+        );
     }
 
     #[tokio::test]

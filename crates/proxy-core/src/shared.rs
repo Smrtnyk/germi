@@ -3,15 +3,20 @@
 //! Locks are held only for the brief synchronous critical sections (insert /
 //! update / read rules) and never across an `.await`, so plain std `Mutex` /
 //! `RwLock` are correct and cheaper than their async cousins here.
+//!
+//! `FlowEvent`s are emitted while the store lock is still held, so each store
+//! mutation and its event are atomic: a send after unlocking lets a concurrent
+//! insert deliver `Removed{X}` (or `Cleared`) before `New{X}` reaches the
+//! channel — a permanent ghost row in the UI (the issue-#80 class this event
+//! system exists to prevent). `broadcast::send` is synchronous and never
+//! blocks, so it adds no hold time and takes no other lock (no ordering risk).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::sync::broadcast;
 
-use crate::flow::{
-    extract_header_columns, CapturedRequest, CapturedResponse, Flow, FlowEvent,
-};
+use crate::flow::{extract_header_columns, CapturedResponse, Flow, FlowEvent};
 use crate::history::History;
 use crate::rules::{AutoResponder, RuleCursors};
 use crate::scripting::ScriptEngine;
@@ -100,12 +105,10 @@ impl Shared {
         let cols = self.header_cols();
         let mut summary = flow.summary();
         summary.extra = extract_header_columns(&flow.request, flow.response.as_ref(), &cols);
-        let evicted = {
-            let Ok(mut store) = self.store.lock() else {
-                return;
-            };
-            store.insert(flow)
+        let Ok(mut store) = self.store.lock() else {
+            return;
         };
+        let evicted = store.insert(flow);
         if !evicted.is_empty() {
             let _ = self.events.send(FlowEvent::Removed { ids: evicted });
         }
@@ -122,17 +125,15 @@ impl Shared {
         matched_rule: Option<String>,
     ) {
         let cols = self.header_cols();
-        let summary = {
-            let Ok(mut store) = self.store.lock() else {
-                return;
-            };
-            store.set_response(id, resp, duration_ms, ttfb_ms, matched_rule);
-            store.get(id).map(|f| {
-                let mut s = f.summary();
-                s.extra = extract_header_columns(&f.request, f.response.as_ref(), &cols);
-                s
-            })
+        let Ok(mut store) = self.store.lock() else {
+            return;
         };
+        store.set_response(id, resp, duration_ms, ttfb_ms, matched_rule);
+        let summary = store.get(id).map(|f| {
+            let mut s = f.summary();
+            s.extra = extract_header_columns(&f.request, f.response.as_ref(), &cols);
+            s
+        });
         if let Some(summary) = summary {
             let _ = self.events.send(FlowEvent::Completed { summary });
         }
@@ -145,12 +146,10 @@ impl Shared {
         let cols = self.header_cols();
         let mut summary = flow.summary();
         summary.extra = extract_header_columns(&flow.request, flow.response.as_ref(), &cols);
-        let evicted = {
-            let Ok(mut store) = self.store.lock() else {
-                return;
-            };
-            store.insert(flow)
+        let Ok(mut store) = self.store.lock() else {
+            return;
         };
+        let evicted = store.insert(flow);
         if !evicted.is_empty() {
             let _ = self.events.send(FlowEvent::Removed { ids: evicted });
         }
@@ -160,17 +159,15 @@ impl Shared {
     /// Set (or clear) a flow's user comment and emit the updated row.
     pub fn set_comment(&self, id: &str, comment: Option<String>) {
         let cols = self.header_cols();
-        let summary = {
-            let Ok(mut store) = self.store.lock() else {
-                return;
-            };
-            store.set_comment(id, comment);
-            store.get(id).map(|f| {
-                let mut s = f.summary();
-                s.extra = extract_header_columns(&f.request, f.response.as_ref(), &cols);
-                s
-            })
+        let Ok(mut store) = self.store.lock() else {
+            return;
         };
+        store.set_comment(id, comment);
+        let summary = store.get(id).map(|f| {
+            let mut s = f.summary();
+            s.extra = extract_header_columns(&f.request, f.response.as_ref(), &cols);
+            s
+        });
         if let Some(summary) = summary {
             let _ = self.events.send(FlowEvent::Completed { summary });
         }
@@ -180,31 +177,22 @@ impl Shared {
     /// frontend upserts by id, so the inline icon refreshes live).
     pub fn set_availability(&self, id: &str, availability: crate::flow::Availability) {
         let cols = self.header_cols();
-        let summary = {
-            let Ok(mut store) = self.store.lock() else {
-                return;
-            };
-            if !store.set_availability(id, availability) {
-                return;
-            }
-            store.get(id).map(|f| {
-                let mut s = f.summary();
-                s.extra = extract_header_columns(&f.request, f.response.as_ref(), &cols);
-                s
-            })
+        let Ok(mut store) = self.store.lock() else {
+            return;
         };
+        if !store.set_availability(id, availability) {
+            return;
+        }
+        let summary = store.get(id).map(|f| {
+            let mut s = f.summary();
+            s.extra = extract_header_columns(&f.request, f.response.as_ref(), &cols);
+            s
+        });
         if let Some(summary) = summary {
             let _ = self.events.send(FlowEvent::Completed { summary });
         }
     }
 
-    /// Clone of a recorded request, for response-phase rule evaluation.
-    pub fn get_request(&self, id: &str) -> Option<CapturedRequest> {
-        self.store
-            .lock()
-            .ok()
-            .and_then(|store| store.get(id).map(|f| f.request.clone()))
-    }
 }
 
 #[cfg(test)]
@@ -436,11 +424,44 @@ mod tests {
     }
 
     #[test]
-    fn get_request_returns_a_clone_for_known_ids_only() {
-        let s = shared_with(ProxySettings::default());
-        s.record_new(flow("a"));
-        let got = s.get_request("a").expect("known id");
-        assert_eq!(got.path, "/a");
-        assert!(s.get_request("ghost").is_none());
+    fn concurrent_record_new_never_delivers_removed_before_new() {
+        use std::collections::HashSet;
+        for _ in 0..20 {
+            let s = Shared::new(3, AutoResponder::example(), ProxySettings::default());
+            let mut rx = s.events.subscribe();
+            let producers: Vec<_> = (0..4)
+                .map(|t| {
+                    let s = Arc::clone(&s);
+                    std::thread::spawn(move || {
+                        for i in 0..250 {
+                            s.record_new(flow(&format!("t{t}-{i}")));
+                        }
+                    })
+                })
+                .collect();
+            for p in producers {
+                p.join().expect("producer thread");
+            }
+            let mut live: HashSet<String> = HashSet::new();
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    FlowEvent::New { summary } => {
+                        live.insert(summary.id);
+                    }
+                    FlowEvent::Removed { ids } => {
+                        for id in ids {
+                            assert!(
+                                live.remove(&id),
+                                "Removed {{{id}}} delivered before its New — permanent ghost row"
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let stored: HashSet<String> =
+                s.store.lock().unwrap().ids().into_iter().collect();
+            assert_eq!(live, stored, "replaying the event stream must reproduce the store");
+        }
     }
 }
