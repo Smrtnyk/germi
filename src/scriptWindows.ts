@@ -1,5 +1,6 @@
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 import { openOrFocusWindow } from "./windows";
 
@@ -12,6 +13,7 @@ import { openOrFocusWindow } from "./windows";
  * skipping the event it sent itself.
  */
 const SCRIPTS_CHANGED = "germi://scripts-changed";
+const SCRIPTS_WINDOW_CLOSED = "germi://scripts-window-closed";
 const SCRIPTS_WINDOW_LABEL = "scripts";
 
 const DEFAULT_SIZE = { width: 780, height: 720 };
@@ -45,4 +47,16 @@ export function emitScriptsChanged(source: string): void {
 
 export function onScriptsChanged(handler: (p: ScriptsChangedPayload) => void): Promise<UnlistenFn> {
   return listen<ScriptsChangedPayload>(SCRIPTS_CHANGED, (e) => handler(e.payload));
+}
+
+export async function isScriptsWindowOpen(): Promise<boolean> {
+  return (await WebviewWindow.getByLabel(SCRIPTS_WINDOW_LABEL)) !== null;
+}
+
+export function emitScriptsWindowClosed(): void {
+  void emit(SCRIPTS_WINDOW_CLOSED);
+}
+
+export function onScriptsWindowClosed(handler: () => void): Promise<UnlistenFn> {
+  return listen(SCRIPTS_WINDOW_CLOSED, () => handler());
 }

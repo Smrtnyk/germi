@@ -8,6 +8,7 @@ import {
   removeRuleSummary,
   reorderRuleSummary,
   replaceRuleSummary,
+  seededRuleId,
   selectedTabEnabled,
 } from "./autoresponderState";
 import { GENERAL_SCENARIO_ID, type AutoResponderSummary, type RuleSummary } from "./types";
@@ -147,5 +148,20 @@ describe("popOutOpener (detached rule window)", () => {
     const open = vi.fn();
     popOutOpener("viewed", { rule: { id: "other" }, flush: () => Promise.resolve() }, open)("r1");
     expect(open).toHaveBeenCalledWith("viewed", "r1");
+  });
+});
+
+describe("seededRuleId (one-shot Mock-this selection seed)", () => {
+  it("yields the rule id when the viewed scenario is the one the mock landed in", () => {
+    expect(seededRuleId({ scenarioId: "s1", ruleId: "r7" }, "s1")).toBe("r7");
+  });
+
+  it("yields null for a seed that landed in another scenario", () => {
+    expect(seededRuleId({ scenarioId: "s2", ruleId: "r7" }, "s1")).toBeNull();
+  });
+
+  it("yields null without a seed", () => {
+    expect(seededRuleId(null, "s1")).toBeNull();
+    expect(seededRuleId(undefined, "s1")).toBeNull();
   });
 });
