@@ -63,14 +63,20 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
 - **Capture & inspect** — virtualized traffic list; content-aware inspector with
   decoded gzip/br/deflate bodies, pretty/raw, hex view, and image preview.
 - **Auto-responder** — rules grouped into switchable **scenarios** (one active, or
-  Off). Each rule is `matcher → action`: auto-respond, map-local-file, map-remote
-  (transparently forward to another URL, with `$1` regex capture groups — e.g. match
-  `.*agent_(\w+)_\d+\.js`, forward to `http://localhost:8080/agent_$1_1.js`), block,
-  set request/response header, set status, or regex-rewrite the body. Built-in **offline
+  Off), plus a built-in **General** layer whose rules stack on top of whichever
+  scenario is active. Each rule is `matcher → action`: auto-respond, map-local-file,
+  map-remote (transparently forward to another URL, with `$1` regex capture groups —
+  e.g. match `.*agent_(\w+)_\d+\.js`, forward to `http://localhost:8080/agent_$1_1.js`),
+  block, set request/response header, set status, regex-rewrite the body, or **allow
+  CORS** (answer preflights and stamp CORS headers on matched routes). Built-in **offline
   tester**, lazy-loaded rule details, and SQLite-backed persistence. Manage the rule
   list with the keyboard: **Shift/Ctrl-⌘-click** multi-selects, **Ctrl/⌘ A** selects
   all, and **Del** deletes the selection in one undoable step (editing is disabled
   while several rules are selected).
+- **User scripts** — small **Rhai** scripts with `on_request` / `on_response` hooks
+  run over live traffic (set/remove headers, override the status) for rewrites the
+  rule actions don't cover. Edited in a docked panel or a detached window, with
+  inline diagnostics; scripts run sandboxed with strict operation limits.
 - **Import & bulk-mock** — load **HAR** or Fiddler **SAZ** archives via **Open**; multi-select
   rows (Shift-range, Ctrl/⌘-click, **Ctrl/⌘ A** to select all) → **Add to scenario**
   to seed mock rules from real responses, or **⚡ Mock this** on one. Selecting
@@ -103,7 +109,8 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   editable **Comment**, and **pin-any-header** columns.
 - **Settings** — Connections (port, **allow remote devices**), Certificates
   (export/regenerate), Interception (host exclusions, tunneled), Capture (max flows,
-  record-only filter, capture-on-start), Throttling (response delay), Appearance
+  record-only filter, auto-start on launch), Throttling (response delay), Shortcuts
+  (incl. a global system-proxy toggle hotkey), Appearance
   (**configurable highlight colors** — selected/multi-selected rows, filter matches,
   mocked/imported tints, compare-pane match tints, diff added/removed — each a
   color + opacity pair with direct hex entry, live preview, per-row reset, and
