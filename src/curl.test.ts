@@ -24,6 +24,12 @@ describe("toCurl", () => {
     expect(emptyBody).not.toContain("--data-raw");
   });
 
+  it("keeps -X GET when a GET carries a body", () => {
+    const out = toCurl(detail({ request: message({ bodyText: "q=1", size: 3 }) }));
+    expect(out).toContain("-X GET");
+    expect(out).toContain("--data-raw 'q=1'");
+  });
+
   it("skips hop-by-hop headers but keeps the rest", () => {
     const out = toCurl(
       detail({

@@ -252,6 +252,14 @@ function spanTooBroad(span: CharSpan, text: string): boolean {
   return text.length > 0 && (span.end - span.start) / text.length > MAX_SPAN_COVERAGE;
 }
 
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
 /** The changed middle of two versions of a line (common prefix/suffix trimmed
  *  away) — the "show the exact change" mark for a paired del/add row. Null when
  *  the lines are equal or differ almost everywhere (a mark would just shout). */
@@ -265,6 +273,11 @@ export function changedSpans(a: string, b: string): { left: CharSpan; right: Cha
   while (endA > prefix && endB > prefix && a[endA - 1] === b[endB - 1]) {
     endA--;
     endB--;
+  }
+  if (prefix > 0 && isHighSurrogate(a.charCodeAt(prefix - 1))) prefix--;
+  if (endA < a.length && isLowSurrogate(a.charCodeAt(endA))) {
+    endA++;
+    endB++;
   }
   const left = { start: prefix, end: endA };
   const right = { start: prefix, end: endB };

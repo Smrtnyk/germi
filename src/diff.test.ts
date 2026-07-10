@@ -149,6 +149,27 @@ describe("changedSpans", () => {
     expect("a=1&x=9&b=2".slice(right?.start, right?.end)).toBe("x=9&");
   });
 
+  it("never places a span boundary inside a surrogate pair", () => {
+    expect(changedSpans("😀x", "😁x")).toEqual({
+      left: { start: 0, end: 2 },
+      right: { start: 0, end: 2 },
+    });
+  });
+
+  it("extends the boundary over a shared low surrogate after differing highs", () => {
+    expect(changedSpans("😀x", "🨀x")).toEqual({
+      left: { start: 0, end: 2 },
+      right: { start: 0, end: 2 },
+    });
+  });
+
+  it("keeps a clean boundary before an identical trailing emoji", () => {
+    expect(changedSpans("a😀", "b😀")).toEqual({
+      left: { start: 0, end: 1 },
+      right: { start: 0, end: 1 },
+    });
+  });
+
   it("returns null for equal lines and for lines that differ almost everywhere", () => {
     expect(changedSpans("same", "same")).toBeNull();
     expect(changedSpans("completely different content", "nothing shared here at all!")).toBeNull();

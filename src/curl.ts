@@ -11,13 +11,13 @@ export function toCurl(detail: FlowDetail): string {
   const url = `${detail.scheme}://${detail.host}${detail.path}`;
   const parts = [`curl ${shellQuote(url)}`];
   const method = detail.method.toUpperCase();
-  if (method !== "GET") parts.push(`-X ${method}`);
+  const body = detail.request.size > 0 ? detail.request.bodyText : "";
+  if (method !== "GET" || body) parts.push(`-X ${method}`);
   for (const [k, v] of detail.request.headers) {
     if (SKIP_HEADERS.has(k.toLowerCase())) continue;
     parts.push(`-H ${shellQuote(`${k}: ${v}`)}`);
   }
-  const body = detail.request.bodyText;
-  if (body && detail.request.size > 0) parts.push(`--data-raw ${shellQuote(body)}`);
+  if (body) parts.push(`--data-raw ${shellQuote(body)}`);
   return parts.join(" \\\n  ");
 }
 
