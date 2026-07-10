@@ -220,6 +220,10 @@ const SAZ_TOTAL_BUDGET: u64 = 512 * 1024 * 1024;
 
 /// Parse a Fiddler SAZ (Session Archive Zip) into flows.
 pub fn parse_saz(bytes: &[u8]) -> Result<Vec<Flow>> {
+    parse_saz_budgeted(bytes, SAZ_TOTAL_BUDGET)
+}
+
+fn parse_saz_budgeted(bytes: &[u8], budget: u64) -> Result<Vec<Flow>> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| anyhow::anyhow!("not a valid SAZ archive: {e}"))?;
 
@@ -241,8 +245,8 @@ pub fn parse_saz(bytes: &[u8]) -> Result<Vec<Flow>> {
         let Ok(n) = caps[1].parse::<u64>() else {
             continue;
         };
-        if total_bytes > SAZ_TOTAL_BUDGET {
-            tracing::warn!("SAZ import exceeded {SAZ_TOTAL_BUDGET} bytes; remaining sessions skipped");
+        if total_bytes > budget {
+            tracing::warn!("SAZ import exceeded {budget} bytes; remaining sessions skipped");
             break;
         }
         let is_client = caps[2].eq_ignore_ascii_case("c");
@@ -266,7 +270,16 @@ pub fn parse_saz(bytes: &[u8]) -> Result<Vec<Flow>> {
     }
 
     let mut flows = Vec::new();
+    // The zip-layer total above only bounds what the archive itself inflates to;
+    // bodies may additionally carry Content-Encoding (decoded per-body in
+    // `decode_body`), so budget that decoded output too or a small archive of
+    // many gzip-bomb bodies would expand to members x the per-body cap.
+    let mut decoded_bytes: u64 = 0;
     for (_n, raw) in sessions {
+        if decoded_bytes > budget {
+            tracing::warn!("SAZ import decoded more than {budget} bytes; remaining sessions skipped");
+            break;
+        }
         let Some(client) = raw.client else {
             continue;
         };
@@ -274,6 +287,10 @@ pub fn parse_saz(bytes: &[u8]) -> Result<Vec<Flow>> {
             continue; // skip unparseable sessions (e.g. odd CONNECT records)
         };
         let response = raw.server.as_deref().and_then(|s| parse_response(s).ok());
+        decoded_bytes = decoded_bytes.saturating_add(request.body.len() as u64);
+        if let Some(res) = &response {
+            decoded_bytes = decoded_bytes.saturating_add(res.body.len() as u64);
+        }
         flows.push(Flow {
             id: String::new(),
             seq: 0,
@@ -535,6 +552,49 @@ mod tests {
         let resp = parse_response(res).unwrap();
         assert_eq!(resp.status, 404);
         assert_eq!(resp.body, b"nope");
+    }
+
+    /// Build an in-memory SAZ of `count` sessions whose response bodies are
+    /// gzip Content-Encoded and each inflate to `inflated_len` bytes.
+    fn saz_with_gzip_sessions(count: usize, inflated_len: usize) -> Vec<u8> {
+        use std::io::Write;
+        let opts = zip::write::SimpleFileOptions::default();
+        let mut zw = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for n in 1..=count {
+            zw.start_file(format!("raw/{n}_c.txt"), opts).unwrap();
+            zw.write_all(b"GET /big HTTP/1.1\r\nHost: api.test\r\n\r\n")
+                .unwrap();
+            let mut enc =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            enc.write_all(&vec![b'a'; inflated_len]).unwrap();
+            let gz = enc.finish().unwrap();
+            zw.start_file(format!("raw/{n}_s.txt"), opts).unwrap();
+            zw.write_all(b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n")
+                .unwrap();
+            zw.write_all(&gz).unwrap();
+        }
+        zw.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn saz_decoded_body_budget_truncates_sessions() {
+        // Each gzip body is a few hundred bytes in the archive but inflates to
+        // 100 KB; the archive-layer totals stay tiny, so only counting the
+        // Content-Encoding-decoded output can stop this.
+        let saz = saz_with_gzip_sessions(4, 100 * 1024);
+        let flows = parse_saz_budgeted(&saz, 150 * 1024).unwrap();
+        assert_eq!(flows.len(), 2, "sessions past the decoded-bytes budget are skipped");
+        assert_eq!(flows[0].response.as_ref().unwrap().body.len(), 100 * 1024);
+    }
+
+    #[test]
+    fn saz_under_budget_decodes_every_session() {
+        let saz = saz_with_gzip_sessions(4, 100 * 1024);
+        let flows = parse_saz(&saz).unwrap();
+        assert_eq!(flows.len(), 4);
+        for f in &flows {
+            assert_eq!(f.response.as_ref().unwrap().body, vec![b'a'; 100 * 1024]);
+        }
     }
 
     #[test]

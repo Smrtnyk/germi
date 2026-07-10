@@ -25,6 +25,19 @@ use crate::flow::{CapturedRequest, CapturedResponse};
 /// "this script did nothing" rather than stalling every request.
 const MAX_OPERATIONS: u64 = 500_000;
 
+/// Per-value data caps (Rhai checks them on every operation AND on values
+/// returned from native functions). Bodies reach scripts as strings and can
+/// legitimately be as large as [`MAX_CAPTURE_BODY`], so the string cap matches
+/// it — smaller and `req.body`/`res.body` on a big-but-legit exchange would
+/// abort the script; anything a script *builds* beyond it (e.g. a
+/// string-doubling loop) errors out instead of ballooning to gigabytes within
+/// the op cap. Arrays/maps are script-built only, so a modest element count is
+/// plenty.
+///
+/// [`MAX_CAPTURE_BODY`]: crate::handler::MAX_CAPTURE_BODY
+const MAX_STRING_SIZE: usize = crate::handler::MAX_CAPTURE_BODY as usize;
+const MAX_COLLECTION_SIZE: usize = 64 * 1024;
+
 /// A single user script. `source` is Rhai and may define `on_request(req)` and/or
 /// `on_response(req, res)`. Persisted verbatim in the shell's `scripts.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -365,13 +378,16 @@ impl Default for ScriptEngine {
     }
 }
 
-/// Build the sandboxed Rhai engine: operation/recursion caps, muted print/debug,
+/// Build the sandboxed Rhai engine: operation/recursion/data-size caps, muted print/debug,
 /// and the `HttpMessage` API (properties + header/status mutators) scripts use.
 fn build_engine() -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(MAX_OPERATIONS);
     engine.set_max_call_levels(64);
     engine.set_max_expr_depths(128, 64);
+    engine.set_max_string_size(MAX_STRING_SIZE);
+    engine.set_max_array_size(MAX_COLLECTION_SIZE);
+    engine.set_max_map_size(MAX_COLLECTION_SIZE);
     // Scripts run on the hot path; don't let print/debug spam the proxy log.
     engine.on_print(|_| {});
     engine.on_debug(|_, _, _| {});
@@ -654,6 +670,33 @@ mod tests {
         let engine = engine_with("fn on_response(req, res) { let i = 0; while true { i += 1; } }");
         let effects = engine.run_response(Some(&request()), &response());
         assert_eq!(effects, Effects::default(), "the aborted script leaves no changes");
+    }
+
+    #[test]
+    fn a_string_doubling_bomb_is_bounded_not_oom() {
+        // Doubling blows the string-size cap within ~23 iterations; without it
+        // the op cap would permit multi-gigabyte allocations first.
+        let engine = engine_with(
+            r#"fn on_request(req) { let s = "0123456789abcdef"; loop { s += s; } }"#,
+        );
+        let effects = engine.run_request(&request());
+        assert_eq!(effects, Effects::default(), "the aborted script leaves no changes");
+    }
+
+    #[test]
+    fn a_multi_megabyte_body_is_still_readable_by_scripts() {
+        // The string cap must stay >= MAX_CAPTURE_BODY or legit large bodies
+        // would abort every script that touches `.body`.
+        let engine = engine_with(
+            r#"fn on_response(req, res) { res.set_header("x-len", res.body.len.to_string()); }"#,
+        );
+        let mut res = response();
+        res.body = vec![b'a'; 2 * 1024 * 1024];
+        let effects = engine.run_response(Some(&request()), &res);
+        assert_eq!(
+            effects.header_ops,
+            vec![HeaderOp::Set("x-len".into(), (2 * 1024 * 1024).to_string())]
+        );
     }
 
     #[test]
