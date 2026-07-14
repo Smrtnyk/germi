@@ -1,6 +1,6 @@
 //! Proxy-wide settings. Currently: hosts to exclude from interception.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 
 /// User-configurable proxy settings, persisted by the shell.
@@ -32,7 +32,10 @@ pub struct ProxySettings {
 
     // ---- Capture ----
     /// Max flows retained in memory before the oldest are evicted.
-    #[serde(default = "default_max_flows")]
+    #[serde(
+        default = "default_max_flows",
+        deserialize_with = "deserialize_max_flows"
+    )]
     pub max_flows: usize,
     /// Host include-filter: when non-empty, only matching hosts are intercepted
     /// + recorded (others are tunneled). Same subdomain matching as exclusions.
@@ -69,6 +72,12 @@ fn default_port() -> u16 {
 }
 fn default_max_flows() -> usize {
     5_000
+}
+fn deserialize_max_flows<'de, D: Deserializer<'de>>(deserializer: D) -> Result<usize, D::Error> {
+    // FlowStore has the same lower bound. Normalize at the serde boundary so a
+    // hand-edited/imported zero cannot be persisted and shown in the UI while
+    // the runtime silently retains one flow instead.
+    Ok(usize::deserialize(deserializer)?.max(1))
 }
 fn default_true() -> bool {
     true
@@ -132,7 +141,9 @@ fn strip_port(host: &str) -> &str {
     }
     match host.rsplit_once(':') {
         Some((name, port))
-            if !name.contains(':') && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) =>
+            if !name.contains(':')
+                && !port.is_empty()
+                && port.bytes().all(|b| b.is_ascii_digit()) =>
         {
             name
         }
@@ -272,6 +283,13 @@ mod tests {
         let off: ProxySettings =
             serde_json::from_str("{\"autoStartOnLaunch\":false}").expect("load explicit off");
         assert!(!off.auto_start_on_launch);
+    }
+
+    #[test]
+    fn zero_max_flows_normalizes_to_the_runtime_minimum() {
+        let settings: ProxySettings =
+            serde_json::from_str(r#"{"maxFlows":0}"#).expect("load settings");
+        assert_eq!(settings.max_flows, 1);
     }
 
     #[test]

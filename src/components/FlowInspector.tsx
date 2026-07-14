@@ -1,5 +1,7 @@
 import {
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -18,8 +20,9 @@ import { statusCls } from "../filter";
 import { useToast } from "../toast";
 import { copyText, useCopy } from "../useCopy";
 import { useResizable } from "../useResizable";
-import { headersToText, parseCookies, parseQuery, toCurl, type KV } from "../curl";
+import { headersToText, parseCookies, parseQuery, type KV } from "../curl";
 import { rawMessage, requestLine, statusLine } from "../rawHttp";
+import { flowDetailUrl } from "../flowUrl";
 import { MaximizedOverlay } from "./MaximizedOverlay";
 import {
   IconArrowDown,
@@ -45,6 +48,25 @@ import {
 const ROW_H = 18;
 const MAX_ROW = 2000;
 const PRETTY_CAP = 512 * 1024;
+const InspectorActiveContext = createContext(true);
+
+function useInspectorVirtualizer(
+  parentRef: { current: HTMLDivElement | null },
+  count: number,
+  rowHeight: number,
+  overscan: number,
+) {
+  const active = useContext(InspectorActiveContext);
+  return useVirtualizer({
+    count,
+    // Inactive workbench panes stay mounted under `display: none`. Detaching
+    // while hidden makes the virtualizer synchronously re-read the viewport
+    // when the Inspector becomes active again instead of retaining a zero rect.
+    getScrollElement: () => (active ? parentRef.current : null),
+    estimateSize: () => rowHeight,
+    overscan,
+  });
+}
 
 function toRows(text: string): string[] {
   const rows: string[] = [];
@@ -338,12 +360,7 @@ export function VirtualText({
   const caseSensitive = !!find && find.caseSensitive;
   const bodyActive = !!find && find.bodyActive >= 0;
 
-  const virtualizer = useVirtualizer({
-    count: rows.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => ROW_H,
-    overscan: 40,
-  });
+  const virtualizer = useInspectorVirtualizer(parentRef, rows.length, ROW_H, 40);
 
   const prevWrap = useRef(wrap);
   useEffect(() => {
@@ -393,6 +410,7 @@ interface SingleProps {
   summary: FlowSummary | undefined;
   loading: boolean;
   onMock: (detail: FlowDetail) => void;
+  onCopyCurl: (id: string) => void;
   /** Viewer mode disables the autoresponder, so the mock buttons are hidden. */
   viewer: boolean;
   decode: boolean;
@@ -401,6 +419,7 @@ interface SingleProps {
 }
 
 interface Props extends SingleProps {
+  active: boolean;
   selectedSummaries: FlowSummary[];
   onSelectOne: (id: string) => void;
   onMockMany: (ids: string[]) => void;
@@ -1071,6 +1090,7 @@ function RequestHead({
   url,
   find,
   copy,
+  onCopyCurl,
 }: {
   detail: FlowDetail;
   ttfb: number | null;
@@ -1079,6 +1099,7 @@ function RequestHead({
   url: string;
   find: InspectorFind;
   copy: (label: string, value: string) => void;
+  onCopyCurl: (id: string) => void;
 }) {
   const urlQuery = find.scope === "all" || find.scope === "url" ? find.query : "";
   const caseSensitive = find.caseSensitive;
@@ -1122,7 +1143,7 @@ function RequestHead({
             variant="ghost"
             className="url-copy"
             title="Copy as cURL"
-            onClick={() => copy("cURL command", toCurl(detail))}
+            onClick={() => onCopyCurl(detail.id)}
           >
             cURL
           </Button>
@@ -1193,12 +1214,7 @@ function MultiSelectView({
 }) {
   const notify = useToast();
   const parentRef = useRef<HTMLDivElement>(null);
-  const virtualizer = useVirtualizer({
-    count: flows.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 24,
-    overscan: 20,
-  });
+  const virtualizer = useInspectorVirtualizer(parentRef, flows.length, 24, 20);
   const stats = useMemo(() => summarize(flows), [flows]);
 
   const copyUrls = () => {
@@ -1402,7 +1418,7 @@ function resolveActive(detail: FlowDetail | null, side: Side) {
   const showResponse = !!detail?.response && side === "response";
   const activeSide: Side = showResponse ? "response" : "request";
   const activeMsg = detail ? (showResponse ? detail.response : detail.request) : null;
-  const url = detail ? `${detail.scheme}://${detail.host}${detail.path}` : "";
+  const url = detail ? flowDetailUrl(detail) : "";
   return { activeSide, activeMsg, url };
 }
 
@@ -1481,6 +1497,7 @@ function SingleFlowView({
   summary,
   loading,
   onMock,
+  onCopyCurl,
   viewer,
   decode,
   onLoadFull,
@@ -1510,6 +1527,7 @@ function SingleFlowView({
         url={url}
         find={find}
         copy={copy}
+        onCopyCurl={onCopyCurl}
       />
       {summary?.availability && <AvailabilityPanel availability={summary.availability} url={url} />}
       <div className="inspect-modes">
@@ -1530,8 +1548,8 @@ function SingleFlowView({
 }
 
 export function FlowInspector(props: Props) {
-  if (props.selectedSummaries.length > 1) {
-    return (
+  const content =
+    props.selectedSummaries.length > 1 ? (
       <MultiSelectView
         flows={props.selectedSummaries}
         onSelectOne={props.onSelectOne}
@@ -1540,18 +1558,23 @@ export function FlowInspector(props: Props) {
         onClearSelection={props.onClearSelection}
         viewer={props.viewer}
       />
+    ) : (
+      <SingleFlowView
+        detail={props.detail}
+        summary={props.summary}
+        loading={props.loading}
+        onMock={props.onMock}
+        onCopyCurl={props.onCopyCurl}
+        viewer={props.viewer}
+        decode={props.decode}
+        onLoadFull={props.onLoadFull}
+        inspectorFindRef={props.inspectorFindRef}
+      />
     );
-  }
+
   return (
-    <SingleFlowView
-      detail={props.detail}
-      summary={props.summary}
-      loading={props.loading}
-      onMock={props.onMock}
-      viewer={props.viewer}
-      decode={props.decode}
-      onLoadFull={props.onLoadFull}
-      inspectorFindRef={props.inspectorFindRef}
-    />
+    <InspectorActiveContext.Provider value={props.active}>
+      {content}
+    </InspectorActiveContext.Provider>
   );
 }

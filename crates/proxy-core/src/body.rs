@@ -111,9 +111,19 @@ pub(crate) fn decoded_or_raw<'m>(
     headers: &[(String, String)],
     body: &'m [u8],
 ) -> std::borrow::Cow<'m, [u8]> {
-    match decode_body(headers, body) {
-        Some((decoded, _truncated)) => std::borrow::Cow::Owned(decoded),
-        None => std::borrow::Cow::Borrowed(body),
+    exact_decoded_or_raw(body, decode_body(headers, body))
+}
+
+/// Equality callers need an exact projection. A capped decoded prefix cannot
+/// prove that the unseen tails are equal, so fall back to the complete raw bytes
+/// instead of creating a false equality between two large encoded bodies.
+fn exact_decoded_or_raw(
+    body: &[u8],
+    decoded: Option<(Vec<u8>, bool)>,
+) -> std::borrow::Cow<'_, [u8]> {
+    match decoded {
+        Some((decoded, false)) => std::borrow::Cow::Owned(decoded),
+        Some((_, true)) | None => std::borrow::Cow::Borrowed(body),
     }
 }
 
@@ -121,12 +131,13 @@ pub(crate) fn decoded_or_raw<'m>(
 /// encoding is unknown or decompression fails (e.g. the body isn't actually
 /// compressed) — callers fall back to the raw bytes. Output is truncated to
 /// [`MAX_DECOMPRESSED_BYTES`] (see [`try_decompress_checked`] to detect that).
+#[cfg(test)]
 pub fn try_decompress(encoding: &str, body: &[u8]) -> Option<Vec<u8>> {
     try_decompress_checked(encoding, body).map(|(b, _)| b)
 }
 
-/// Like [`try_decompress`] but also reports whether the output hit the
-/// decompression cap (and was therefore truncated).
+/// Decompress `body` and also report whether the output hit the decompression
+/// cap (and was therefore truncated).
 pub fn try_decompress_checked(encoding: &str, body: &[u8]) -> Option<(Vec<u8>, bool)> {
     try_decompress_capped(encoding, body, MAX_DECOMPRESSED_BYTES)
 }
@@ -146,13 +157,14 @@ fn try_decompress_capped(encoding: &str, body: &[u8], cap: usize) -> Option<(Vec
         }
         Some((out, truncated))
     }
-    if encoding.contains("gzip") {
+    let encoding = encoding.trim().to_ascii_lowercase();
+    if matches!(encoding.as_str(), "gzip" | "x-gzip") {
         // MultiGzDecoder reads every concatenated member, not just the first.
         read_all(flate2::read::MultiGzDecoder::new(body), cap)
-    } else if encoding.contains("deflate") {
+    } else if matches!(encoding.as_str(), "deflate" | "x-deflate") {
         read_all(flate2::read::ZlibDecoder::new(body), cap)
             .or_else(|| read_all(flate2::read::DeflateDecoder::new(body), cap))
-    } else if encoding.contains("br") {
+    } else if encoding == "br" {
         read_all(brotli::Decompressor::new(body, 4096), cap)
     } else {
         None
@@ -160,28 +172,29 @@ fn try_decompress_capped(encoding: &str, body: &[u8], cap: usize) -> Option<(Vec
 }
 
 /// Encode (compress) `body` with the single given `Content-Encoding` token. The
-/// inverse of [`try_decompress`]: used by the autoresponder to re-compress a
+/// inverse of [`try_decompress_checked`]: used by the autoresponder to re-compress a
 /// mock body on the wire when a rule opts into a compressed response. Returns
 /// `None` for an unknown encoding (callers send the identity body instead).
 ///
 /// Only single-token encodings are supported (`gzip` / `deflate` / `br`), not
 /// arbitrary chains — that matches real-world `Content-Encoding` usage and the
-/// autoresponder's single-toggle model. Accepts the same lenient token matching
-/// as `try_decompress` (e.g. `x-gzip` works).
+/// autoresponder's single-toggle model. The legacy aliases `x-gzip` and
+/// `x-deflate` are accepted, but substrings and comma-separated chains are not.
 pub fn compress_body(encoding: &str, body: &[u8]) -> Option<Vec<u8>> {
     use std::io::Write;
-    if encoding.contains("gzip") {
+    let encoding = encoding.trim().to_ascii_lowercase();
+    if matches!(encoding.as_str(), "gzip" | "x-gzip") {
         // GzEncoder produces a single-member stream; MultiGzDecoder reads it
         // back, so the round-trip matches the public decompress path.
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(body).ok()?;
         enc.finish().ok()
-    } else if encoding.contains("deflate") {
+    } else if matches!(encoding.as_str(), "deflate" | "x-deflate") {
         // Zlib (RFC 1950) — the deflate-with-zlib-wrapper variant servers send.
         let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(body).ok()?;
         enc.finish().ok()
-    } else if encoding.contains("br") {
+    } else if encoding == "br" {
         let mut out = Vec::new();
         // Quality 5 / window 22 mirror the decompressor's read window and keep
         // encoding fast for interactive mock editing.
@@ -203,8 +216,7 @@ mod tests {
 
     #[test]
     fn gzip_round_trips() {
-        let mut enc =
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(b"hello body").unwrap();
         let gz = enc.finish().unwrap();
         assert_eq!(try_decompress("gzip", &gz).unwrap(), b"hello body");
@@ -220,8 +232,7 @@ mod tests {
     fn decompression_is_capped() {
         // A highly compressible payload that decompresses to far more than the
         // (test) cap must be truncated to the cap, never allocated in full.
-        let mut enc =
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(&vec![b'A'; 100_000]).unwrap();
         let gz = enc.finish().unwrap();
         assert!(gz.len() < 1_000, "payload should compress tiny");
@@ -267,6 +278,21 @@ mod tests {
     }
 
     #[test]
+    fn exact_comparison_never_uses_a_truncated_decoded_prefix() {
+        assert_eq!(
+            exact_decoded_or_raw(
+                b"complete raw body",
+                Some((b"shared prefix".to_vec(), true))
+            ),
+            std::borrow::Cow::Borrowed(b"complete raw body".as_slice())
+        );
+        assert_eq!(
+            exact_decoded_or_raw(b"encoded", Some((b"decoded".to_vec(), false))),
+            std::borrow::Cow::Owned::<[u8]>(b"decoded".to_vec())
+        );
+    }
+
+    #[test]
     fn looks_textual_separates_text_from_compressed() {
         assert!(looks_textual(b""));
         assert!(looks_textual(b"{\"ok\":true}\nplain text"));
@@ -274,16 +300,22 @@ mod tests {
         // Real compressed payloads must read as binary (so a genuine decode
         // failure still shows as hex, not mislabeled text).
         let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        e.write_all(b"the quick brown fox jumps over the lazy dog").unwrap();
+        e.write_all(b"the quick brown fox jumps over the lazy dog")
+            .unwrap();
         assert!(!looks_textual(&e.finish().unwrap()));
-        assert!(!looks_textual(&[0x00, 0xff, 0xfe, 0x80, 0x01, 0x02, 0x9c, 0x8b]));
+        assert!(!looks_textual(&[
+            0x00, 0xff, 0xfe, 0x80, 0x01, 0x02, 0x9c, 0x8b
+        ]));
     }
 
     #[test]
     fn encoding_tokens() {
         let h = vec![("Content-Encoding".to_string(), "br, gzip".to_string())];
         assert_eq!(content_encoding_of(&h).as_deref(), Some("br"));
-        assert_eq!(content_encodings_of(&h), vec!["br".to_string(), "gzip".to_string()]);
+        assert_eq!(
+            content_encodings_of(&h),
+            vec!["br".to_string(), "gzip".to_string()]
+        );
         let none = vec![("Content-Encoding".to_string(), "identity".to_string())];
         assert_eq!(content_encoding_of(&none), None);
         assert!(content_encodings_of(&none).is_empty());
@@ -312,6 +344,9 @@ mod tests {
     fn compress_body_unknown_encoding_returns_none() {
         assert!(compress_body("identity", b"abc").is_none());
         assert!(compress_body("snappy", b"abc").is_none());
+        assert!(compress_body("notgzip", b"abc").is_none());
+        assert!(compress_body("gzip, br", b"abc").is_none());
+        assert!(try_decompress("broccoli", b"abc").is_none());
     }
 
     #[test]

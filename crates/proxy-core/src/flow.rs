@@ -77,11 +77,27 @@ pub fn rfc3339_to_epoch_ms(stamp: &str) -> Option<u64> {
     {
         return None;
     }
-    let num = |r: std::ops::Range<usize>| stamp.get(r).and_then(|p| p.parse::<i64>().ok());
+    let decimal = |digits: &[u8]| {
+        digits.iter().try_fold(0_i64, |value, digit| {
+            if digit.is_ascii_digit() {
+                Some(value * 10 + i64::from(digit - b'0'))
+            } else {
+                None
+            }
+        })
+    };
+    let num = |r: std::ops::Range<usize>| bytes.get(r).and_then(decimal);
     let (year, month, day) = (num(0..4)?, num(5..7)?, num(8..10)?);
     let (hour, minute, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || sec > 60
-    {
+    let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap_year => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if !(1..=days_in_month).contains(&day) || hour > 23 || minute > 59 || sec > 60 {
         return None;
     }
     let mut rest = &bytes[19..];
@@ -100,22 +116,28 @@ pub fn rfc3339_to_epoch_ms(stamp: &str) -> Option<u64> {
         None => 0,
         Some(b'Z' | b'z') if rest.len() == 1 => 0,
         Some(sign @ (b'+' | b'-')) => {
-            let o = std::str::from_utf8(&rest[1..]).ok()?.replace(':', "");
-            if o.len() != 4 {
+            let (hours, minutes) = match rest.len() {
+                5 => (&rest[1..3], &rest[3..5]),
+                6 if rest[3] == b':' => (&rest[1..3], &rest[4..6]),
+                _ => return None,
+            };
+            let hh = decimal(hours)?;
+            let mm = decimal(minutes)?;
+            if hh > 23 || mm > 59 {
                 return None;
             }
-            let hh: i64 = o[..2].parse().ok()?;
-            let mm: i64 = o[2..].parse().ok()?;
             let total = hh * 60 + mm;
-            if *sign == b'-' { -total } else { total }
+            if *sign == b'-' {
+                -total
+            } else {
+                total
+            }
         }
         Some(_) => return None,
     };
-    let secs = days_from_civil(year, month as u32, day as u32) * 86400
-        + hour * 3600
-        + minute * 60
-        + sec
-        - offset_min * 60;
+    let secs =
+        days_from_civil(year, month as u32, day as u32) * 86400 + hour * 3600 + minute * 60 + sec
+            - offset_min * 60;
     u64::try_from(secs * 1000 + frac_ms).ok()
 }
 
@@ -314,8 +336,8 @@ pub enum ResourceKind {
 }
 
 /// Verdict of an on-demand "is this doc reachable without my credentials?" check
-/// (issue #40): the request is re-issued stripped of cookies/auth and WITHOUT
-/// following redirects, then classified by the response.
+/// (issue #40): the request is re-issued stripped of cookies/auth, following
+/// redirects without restoring private headers, then classified by the response.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AvailabilityVerdict {
@@ -427,13 +449,12 @@ impl MessageDetail {
 
         // Skip base64 for text bodies (the UI renders those from `body_text`);
         // raw-compressed bytes — and binary bytes mislabeled with a text
-        // content-type — still need it for the hex view. A NUL byte is a strong
-        // binary signal (e.g. BOM-less UTF-16, which is valid UTF-8 and would
-        // otherwise render as NUL-interleaved garbage with no hex fallback).
+        // content-type — still need it for the hex view. UTF-8 validity alone is
+        // insufficient because arbitrary control bytes are valid UTF-8 too.
         let needs_base64 = !is_textual(headers)
             || (!decoded && encoding.is_some())
             || std::str::from_utf8(display).is_err()
-            || display.contains(&0);
+            || !crate::body::looks_textual(display);
 
         Self {
             headers: headers.to_vec(),
@@ -525,13 +546,15 @@ pub(crate) fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<
 /// `Sec-Fetch-Dest` (near-browser fidelity) → `Sec-Fetch-Mode` → `X-Requested-With`
 /// → response Content-Type → URL extension → `Accept` hint.
 fn classify_kind(req: &CapturedRequest, resp: Option<&CapturedResponse>) -> ResourceKind {
-    use ResourceKind::{Ws, Doc, Js, Css, Font, Img, Media, Other, Xhr, Wasm};
+    use ResourceKind::{Css, Doc, Font, Img, Js, Media, Other, Wasm, Ws, Xhr};
     let h = &req.headers;
 
     // 1. WebSocket handshake (most reliable; must precede Sec-Fetch-Dest:empty).
-    if header(h, "upgrade")
-        .is_some_and(|u| u.to_ascii_lowercase().contains("websocket"))
-        || resp.is_some_and(|r| r.status == 101)
+    if header(h, "upgrade").is_some_and(|value| {
+        value
+            .split(',')
+            .any(|protocol| protocol.trim().eq_ignore_ascii_case("websocket"))
+    }) || resp.is_some_and(|r| r.status == 101)
     {
         return Ws;
     }
@@ -560,9 +583,7 @@ fn classify_kind(req: &CapturedRequest, resp: Option<&CapturedResponse>) -> Reso
     }
 
     // 4. Legacy XHR signal.
-    if header(h, "x-requested-with")
-        .is_some_and(|v| v.eq_ignore_ascii_case("XMLHttpRequest"))
-    {
+    if header(h, "x-requested-with").is_some_and(|v| v.eq_ignore_ascii_case("XMLHttpRequest")) {
         return Xhr;
     }
 
@@ -695,6 +716,14 @@ mod tests {
             classify_kind(&req(&[("upgrade", "websocket")], "/ws"), None),
             ResourceKind::Ws
         );
+        assert_eq!(
+            classify_kind(&req(&[("upgrade", "h2c, websocket")], "/ws"), None),
+            ResourceKind::Ws
+        );
+        assert_ne!(
+            classify_kind(&req(&[("upgrade", "notwebsocket")], "/ws"), None),
+            ResourceKind::Ws
+        );
     }
 
     #[test]
@@ -703,13 +732,16 @@ mod tests {
         let mut response = resp("text/html");
         response.headers.push(("cf-ray".into(), "abc123".into()));
         let specs = vec![
-            "cf-ray".to_string(),    // response side (default)
+            "cf-ray".to_string(),      // response side (default)
             "req:referer".to_string(), // request side
-            "x-missing".to_string(), // absent → skipped
+            "x-missing".to_string(),   // absent → skipped
         ];
         let extra = extract_header_columns(&request, Some(&response), &specs);
         assert_eq!(extra.get("cf-ray").map(String::as_str), Some("abc123"));
-        assert_eq!(extra.get("req:referer").map(String::as_str), Some("https://app"));
+        assert_eq!(
+            extra.get("req:referer").map(String::as_str),
+            Some("https://app")
+        );
         assert!(!extra.contains_key("x-missing"));
     }
 
@@ -722,12 +754,25 @@ mod tests {
         // A body that declares `Content-Encoding: br` but is actually identity
         // text (stale/incorrect header) must render as text — not a "br · failed"
         // hex wall. This is the regression reported by users.
-        let headers = vec![h("content-type", "application/json"), h("content-encoding", "br")];
+        let headers = vec![
+            h("content-type", "application/json"),
+            h("content-encoding", "br"),
+        ];
         let md = MessageDetail::new(&headers, b"{\"ok\":true}", true, true);
         assert_eq!(md.body_text, "{\"ok\":true}");
         assert_eq!(md.encoding, None, "stale encoding label is dropped");
         assert!(!md.decoded);
-        assert!(md.body_base64.is_empty(), "a textual body needs no hex/base64");
+        assert!(
+            md.body_base64.is_empty(),
+            "a textual body needs no hex/base64"
+        );
+    }
+
+    #[test]
+    fn valid_utf8_control_bytes_still_get_the_binary_fallback() {
+        let headers = vec![h("content-type", "text/plain")];
+        let md = MessageDetail::new(&headers, &[1, 2, 3, 4], true, true);
+        assert!(!md.body_base64.is_empty());
     }
 
     #[test]
@@ -750,7 +795,10 @@ mod tests {
         assert_eq!(epoch_ms_to_rfc3339(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(epoch_ms_to_rfc3339(86_400_000), "1970-01-02T00:00:00.000Z");
         // 1e9 seconds is the well-known 2001-09-09T01:46:40Z anchor.
-        assert_eq!(epoch_ms_to_rfc3339(1_000_000_000_123), "2001-09-09T01:46:40.123Z");
+        assert_eq!(
+            epoch_ms_to_rfc3339(1_000_000_000_123),
+            "2001-09-09T01:46:40.123Z"
+        );
     }
 
     #[test]
@@ -770,15 +818,33 @@ mod tests {
         assert_eq!(rfc3339_to_epoch_ms("2001-09-09T03:46:40+02:00"), anchor);
         assert_eq!(rfc3339_to_epoch_ms("2001-09-08T17:46:40-0800"), anchor);
         assert_eq!(rfc3339_to_epoch_ms("2001-09-09T01:46:40"), anchor);
-        assert_eq!(rfc3339_to_epoch_ms("2001-09-09T01:46:40.5Z"), Some(1_000_000_000_500));
+        assert_eq!(
+            rfc3339_to_epoch_ms("2001-09-09T01:46:40.5Z"),
+            Some(1_000_000_000_500)
+        );
     }
 
     #[test]
     fn rfc3339_rejects_garbage() {
-        for bad in ["", "not a date", "2001-09-09", "2001-13-09T01:46:40Z",
-            "2001-09-09T25:46:40Z", "2001-09-09T01:46:40.Z", "2001-09-09T01:46:40+2:00",
-            "1969-12-31T23:59:59Z"]
-        {
+        for bad in [
+            "",
+            "not a date",
+            "2001-09-09",
+            "2001-13-09T01:46:40Z",
+            "2001-02-29T01:46:40Z",
+            "2000-02-30T01:46:40Z",
+            "2001-04-31T01:46:40Z",
+            "2001-09-09T25:46:40Z",
+            "2001-09-09T-1:46:40Z",
+            "2001-09-09T01:-1:40Z",
+            "2001-09-09T01:46:-1Z",
+            "2001-09-09T01:46:40.Z",
+            "2001-09-09T01:46:40+2:00",
+            "2001-09-09T01:46:40+24:00",
+            "2001-09-09T01:46:40+02:60",
+            "2001-09-09T01:46:40+0é0",
+            "1969-12-31T23:59:59Z",
+        ] {
             assert_eq!(rfc3339_to_epoch_ms(bad), None, "{bad:?} must not parse");
         }
     }
@@ -788,8 +854,7 @@ mod tests {
         // Genuinely-undecodable binary keeps its encoding label and provides
         // base64 for the hex view — it must NOT be reinterpreted as text.
         let headers = vec![h("content-encoding", "gzip")];
-        let body: Vec<u8> =
-            [0x00, 0xff, 0xfe, 0x80, 0x9c, 0x01, 0x02, 0x88, 0xaa, 0x55].repeat(40);
+        let body: Vec<u8> = [0x00, 0xff, 0xfe, 0x80, 0x9c, 0x01, 0x02, 0x88, 0xaa, 0x55].repeat(40);
         let md = MessageDetail::new(&headers, &body, true, true);
         assert_eq!(md.encoding.as_deref(), Some("gzip"));
         assert!(!md.decoded);

@@ -7,11 +7,12 @@ mod persist;
 mod portal_hotkey;
 mod rule_store;
 mod state;
+mod system_proxy;
 
 use std::sync::Arc;
 
-use proxy_core::ProxyController;
-use tauri::Manager;
+use proxy_core::{CertAuthority, ProxyController};
+use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
 use state::AppState;
@@ -60,11 +61,25 @@ fn init_app_state(app: &mut tauri::App, viewer: bool) -> Result<(), Box<dyn std:
             std::process::exit(1);
         }
         instance::GuardOutcome::Unavailable(e) => {
-            tracing::warn!("single-instance lock unavailable, continuing unguarded: {e}");
+            return Err(format!(
+                "could not acquire the single-instance lock; refusing to open shared writable state: {e}"
+            )
+            .into());
         }
     }
-    let ca = ProxyController::load_or_generate_ca(&ca_dir)
-        .map_err(|e| format!("failed to initialize CA: {e}"))?;
+    let ca = if viewer {
+        // A viewer never runs the proxy. Load the shared identity when it is
+        // already valid so CA information remains accurate, but never generate
+        // or repair shared files from this read-only process. If the main
+        // process is midway through regeneration, an ephemeral authority is
+        // sufficient for the disabled engine and avoids clobbering its commit.
+        CertAuthority::load(&ca_dir)
+            .map_err(|e| format!("failed to read CA: {e}"))?
+            .map_or_else(CertAuthority::generate, Ok)?
+    } else {
+        ProxyController::load_or_generate_ca(&ca_dir)
+            .map_err(|e| format!("failed to initialize CA: {e}"))?
+    };
     let controller = Arc::new(ProxyController::new(ca));
     let (rule_store, autoresponder) = rule_store::RuleStore::open(&ca_dir, viewer)
         .map_err(|e| format!("failed to initialize autoresponder database: {e}"))?;
@@ -77,19 +92,70 @@ fn init_app_state(app: &mut tauri::App, viewer: bool) -> Result<(), Box<dyn std:
     if let Some(scripts) = persist::load_scripts(&ca_dir) {
         controller.set_scripts(scripts);
     }
+    // Viewer processes share the app-data directory with the capturing process,
+    // but they do not own its OS-proxy lease. Loading the main process's journal
+    // here would let closing a viewer restore the main process's proxy out from
+    // under it.
+    let system_proxy_ownership = if viewer {
+        state::SystemProxyOwnership::default()
+    } else {
+        persist::load_system_proxy_ownership(&ca_dir).unwrap_or_default()
+    };
     app.manage(AppState {
         controller,
         rule_store: Arc::new(rule_store),
         ca_dir,
         flow_forwarder: std::sync::Mutex::new(None),
-        prior_system_proxy: std::sync::Mutex::new(None),
+        system_proxy_ownership: std::sync::Mutex::new(system_proxy_ownership),
         compare_seed: std::sync::Mutex::new(None),
         pending_settings_import: std::sync::Mutex::new(None),
+        settings_ops: tokio::sync::Mutex::new(()),
+        scripts_ops: tokio::sync::Mutex::new(()),
         pending_har_rules: std::sync::Mutex::new(None),
         portal_hotkey: portal_hotkey::PortalHotkey::default(),
         viewer,
     });
     Ok(())
+}
+
+fn handle_run_event(app_handle: &tauri::AppHandle, event: tauri::RunEvent) {
+    match event {
+        tauri::RunEvent::Exit => {
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                if !state.viewer {
+                    if let Err(e) = commands::restore_prior_system_proxy(state.inner()) {
+                        tracing::warn!("failed to restore system proxy on exit: {e}");
+                    }
+                }
+            }
+        }
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::Destroyed,
+            ..
+        } if label == "scripts" => {
+            // The shell, not the closing webview, owns this notification:
+            // it fires only after real destruction (including crashes) and
+            // can never unlock the docked editor after a failed destroy.
+            let _ = app_handle.emit("germi://scripts-window-closed", ());
+        }
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::Destroyed,
+            ..
+        } if label.starts_with("rule-") => {
+            // As with the scripts editor, the shell is the only reliable
+            // owner of the closed notification: a webview cannot emit after
+            // successful destruction, and emitting before it would unlock
+            // the inline editor when destruction fails.
+            let rule_id = &label["rule-".len()..];
+            let _ = app_handle.emit(
+                "germi://rule-window-closed",
+                serde_json::json!({ "ruleId": rule_id }),
+            );
+        }
+        _ => {}
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -159,6 +225,7 @@ pub fn run() {
             commands::export_ca,
             commands::regenerate_ca,
             commands::set_system_proxy,
+            commands::system_proxy_status,
             commands::clear_system_proxy,
             commands::pick_file,
             commands::file_exists,
@@ -184,15 +251,7 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building Germi")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
-                if let Some(state) = app_handle.try_state::<AppState>() {
-                    if let Err(e) = commands::restore_prior_system_proxy(state.inner()) {
-                        tracing::warn!("failed to restore system proxy on exit: {e}");
-                    }
-                }
-            }
-        });
+        .run(handle_run_event);
 }
 
 #[cfg(test)]

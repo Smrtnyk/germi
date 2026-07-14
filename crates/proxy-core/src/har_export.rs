@@ -96,6 +96,8 @@ struct Content {
     text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     encoding: Option<&'static str>,
+    #[serde(rename = "_germiBodyEncoded", skip_serializing_if = "is_false")]
+    germi_body_encoded: bool,
 }
 
 #[derive(Serialize)]
@@ -105,6 +107,8 @@ struct PostData {
     text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     encoding: Option<&'static str>,
+    #[serde(rename = "_germiBodyEncoded", skip_serializing_if = "is_false")]
+    germi_body_encoded: bool,
 }
 
 #[derive(Serialize)]
@@ -123,8 +127,16 @@ struct Timings {
 #[derive(Serialize)]
 struct Empty {}
 
+/// HAR's timing fields are JSON numbers, represented by `f64` in its schema.
+#[allow(clippy::cast_precision_loss)]
 fn ms_f64(ms: u64) -> f64 {
-    f64::from(u32::try_from(ms).unwrap_or(u32::MAX))
+    ms as f64
+}
+
+// Serde's `skip_serializing_if` callback receives a reference to the field.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn pairs(headers: &[(String, String)]) -> Vec<NameValue> {
@@ -158,15 +170,26 @@ fn query_pairs(url: &str) -> Vec<NameValue> {
 /// A body in HAR `content` terms: (text, base64 marker, decoded size). The body
 /// is decoded (Content-Encoding undone) first, then written as plain text when
 /// it is valid UTF-8 and base64 otherwise.
-fn body_text(headers: &[(String, String)], body: &[u8]) -> (String, Option<&'static str>, u64) {
-    let decoded = crate::body::decoded_or_raw(headers, body);
+fn body_text(
+    headers: &[(String, String)],
+    body: &[u8],
+) -> (String, Option<&'static str>, u64, bool) {
+    let has_http_encoding = !crate::body::content_encodings_of(headers).is_empty();
+    let (decoded, germi_body_encoded) = match crate::body::decode_body(headers, body) {
+        Some((decoded, false)) => (std::borrow::Cow::Owned(decoded), false),
+        // A capped decode is only a prefix. Exporting that prefix would make a
+        // save/open cycle silently destroy the original compressed payload, so
+        // retain the exact raw bytes just as we do for an undecodable encoding.
+        Some((_, true)) | None => (std::borrow::Cow::Borrowed(body), has_http_encoding),
+    };
     let size = decoded.len() as u64;
     match std::str::from_utf8(&decoded) {
-        Ok(text) => (text.to_string(), None, size),
+        Ok(text) => (text.to_string(), None, size, germi_body_encoded),
         Err(_) => (
             base64::engine::general_purpose::STANDARD.encode(&decoded),
             Some("base64"),
             size,
+            germi_body_encoded,
         ),
     }
 }
@@ -176,11 +199,14 @@ fn entry(flow: &Flow) -> Entry<'_> {
     let post_data = if req.body.is_empty() {
         None
     } else {
-        let (text, encoding, _) = body_text(&req.headers, &req.body);
+        let (text, encoding, _, germi_body_encoded) = body_text(&req.headers, &req.body);
         Some(PostData {
-            mime_type: header(&req.headers, "content-type").unwrap_or("").to_string(),
+            mime_type: header(&req.headers, "content-type")
+                .unwrap_or("")
+                .to_string(),
             text,
             encoding,
+            germi_body_encoded,
         })
     };
     let request = Request {
@@ -200,7 +226,7 @@ fn entry(flow: &Flow) -> Entry<'_> {
     // exactly what `parse_har` maps back to `response: None`.
     let response = match &flow.response {
         Some(resp) => {
-            let (text, encoding, size) = body_text(&resp.headers, &resp.body);
+            let (text, encoding, size, germi_body_encoded) = body_text(&resp.headers, &resp.body);
             Response {
                 status: resp.status,
                 status_text: String::new(),
@@ -209,9 +235,12 @@ fn entry(flow: &Flow) -> Entry<'_> {
                 headers: pairs(&resp.headers),
                 content: Content {
                     size,
-                    mime_type: header(&resp.headers, "content-type").unwrap_or("").to_string(),
+                    mime_type: header(&resp.headers, "content-type")
+                        .unwrap_or("")
+                        .to_string(),
                     text,
                     encoding,
+                    germi_body_encoded,
                 },
                 redirect_url: header(&resp.headers, "location").unwrap_or("").to_string(),
                 headers_size: -1,
@@ -229,6 +258,7 @@ fn entry(flow: &Flow) -> Entry<'_> {
                 mime_type: String::new(),
                 text: String::new(),
                 encoding: None,
+                germi_body_encoded: false,
             },
             redirect_url: String::new(),
             headers_size: -1,
@@ -367,13 +397,25 @@ mod tests {
         assert_eq!(f.request.method, original.request.method);
         assert_eq!(f.request.uri, original.request.uri);
         assert_eq!(f.request.headers, original.request.headers);
-        assert_eq!(f.request.body, original.request.body, "text request body survives");
+        assert_eq!(
+            f.request.body, original.request.body,
+            "text request body survives"
+        );
         assert_eq!(f.request.timestamp_ms, original.request.timestamp_ms);
-        let (r, orig_r) = (f.response.as_ref().unwrap(), original.response.as_ref().unwrap());
+        let (r, orig_r) = (
+            f.response.as_ref().unwrap(),
+            original.response.as_ref().unwrap(),
+        );
         assert_eq!(r.status, orig_r.status);
         assert_eq!(r.headers, orig_r.headers);
-        assert_eq!(r.body, orig_r.body, "binary response body survives via base64");
-        assert_eq!(r.timestamp_ms, orig_r.timestamp_ms, "resp ts reconstructs as start + time");
+        assert_eq!(
+            r.body, orig_r.body,
+            "binary response body survives via base64"
+        );
+        assert_eq!(
+            r.timestamp_ms, orig_r.timestamp_ms,
+            "resp ts reconstructs as start + time"
+        );
         assert_eq!(f.duration_ms, original.duration_ms);
         assert_eq!(f.ttfb_ms, original.ttfb_ms);
         assert_eq!(f.comment, original.comment);
@@ -385,8 +427,12 @@ mod tests {
     fn binary_request_body_round_trips_as_base64_post_data() {
         let original = flow(&[1u8, 2, 0, 255], b"ok");
         let har = parse(&export_har(std::slice::from_ref(&original), None));
-        assert_eq!(har["log"]["entries"][0]["request"]["postData"]["encoding"], "base64");
-        let back = crate::import::parse_har(&export_har(std::slice::from_ref(&original), None)).unwrap();
+        assert_eq!(
+            har["log"]["entries"][0]["request"]["postData"]["encoding"],
+            "base64"
+        );
+        let back =
+            crate::import::parse_har(&export_har(std::slice::from_ref(&original), None)).unwrap();
         assert_eq!(back[0].request.body, original.request.body);
     }
 
@@ -398,14 +444,38 @@ mod tests {
         f.ttfb_ms = None;
         let har = parse(&export_har(&[f.clone()], None));
         let e = &har["log"]["entries"][0];
-        assert_eq!(e["response"]["status"], 0, "HAR still carries a stub response object");
+        assert_eq!(
+            e["response"]["status"], 0,
+            "HAR still carries a stub response object"
+        );
         assert_eq!(e["time"], -1.0);
-        assert!(e["request"].get("postData").is_none(), "empty body → no postData");
+        assert!(
+            e["request"].get("postData").is_none(),
+            "empty body → no postData"
+        );
 
         let back = crate::import::parse_har(&export_har(&[f], None)).unwrap();
         assert!(back[0].response.is_none());
         assert_eq!(back[0].duration_ms, None);
         assert_eq!(back[0].ttfb_ms, None);
+    }
+
+    #[test]
+    fn zero_and_long_timings_round_trip_without_becoming_unknown_or_clamped() {
+        let mut zero = flow(b"", b"ok");
+        zero.duration_ms = Some(0);
+        zero.ttfb_ms = Some(0);
+        let back = crate::import::parse_har(&export_har(&[zero], None)).unwrap();
+        assert_eq!(back[0].duration_ms, Some(0));
+        assert_eq!(back[0].ttfb_ms, Some(0));
+
+        let mut long = flow(b"", b"ok");
+        let duration = u64::from(u32::MAX) + 123;
+        long.duration_ms = Some(duration);
+        long.ttfb_ms = Some(duration - 1);
+        let back = crate::import::parse_har(&export_har(&[long], None)).unwrap();
+        assert_eq!(back[0].duration_ms, Some(duration));
+        assert_eq!(back[0].ttfb_ms, Some(duration - 1));
     }
 
     fn mock_scenario() -> Scenario {
@@ -432,13 +502,19 @@ mod tests {
     fn rules_ride_in_the_germi_rules_extension_only_when_given() {
         let f = flow(b"", b"ok");
         let plain = parse(&export_har(std::slice::from_ref(&f), None));
-        assert!(plain["log"].get("_germiRules").is_none(), "no bundle unless opted in");
+        assert!(
+            plain["log"].get("_germiRules").is_none(),
+            "no bundle unless opted in"
+        );
 
         let har = parse(&export_har(&[f], Some(&[mock_scenario()])));
         let bundle = &har["log"]["_germiRules"];
         assert_eq!(bundle["version"], 1);
         assert_eq!(bundle["scenarios"][0]["name"], "Checkout mocks");
-        assert_eq!(bundle["scenarios"][0]["rules"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            bundle["scenarios"][0]["rules"].as_array().map(Vec::len),
+            Some(1)
+        );
     }
 
     #[test]
@@ -476,10 +552,45 @@ mod tests {
             ("Content-Type".into(), "text/plain".into()),
             ("Content-Encoding".into(), "gzip".into()),
         ];
-        let har = parse(&export_har(&[f], None));
+        let bytes = export_har(&[f], None);
+        let har = parse(&bytes);
         let content = &har["log"]["entries"][0]["response"]["content"];
-        assert_eq!(content["text"], "hello world", "the shared HAR carries the readable body");
+        assert_eq!(
+            content["text"], "hello world",
+            "the shared HAR carries the readable body"
+        );
         assert_eq!(content["size"], 11);
         assert!(content.get("encoding").is_none());
+        assert!(content.get("_germiBodyEncoded").is_none());
+        let reopened = crate::import::parse_har(&bytes).unwrap();
+        let response = reopened[0].response.as_ref().unwrap();
+        assert_eq!(response.body, b"hello world".as_slice());
+        assert!(response
+            .headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("content-encoding")));
+    }
+
+    #[test]
+    fn undecodable_encoded_body_round_trips_with_a_raw_marker() {
+        let mut f = flow(b"", &[0, 1, 2]);
+        f.response.as_mut().unwrap().headers = vec![
+            ("Content-Type".into(), "application/octet-stream".into()),
+            ("Content-Encoding".into(), "zstd".into()),
+            ("Content-Length".into(), "3".into()),
+        ];
+        let bytes = export_har(&[f], None);
+        let har = parse(&bytes);
+        assert_eq!(
+            har["log"]["entries"][0]["response"]["content"]["_germiBodyEncoded"],
+            true
+        );
+        let reopened = crate::import::parse_har(&bytes).unwrap();
+        let response = reopened[0].response.as_ref().unwrap();
+        assert_eq!(response.body, [0, 1, 2].as_slice());
+        assert!(response
+            .headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("content-encoding") && value == "zstd"));
     }
 }

@@ -27,6 +27,7 @@ interface ToolbarProps {
   onInstallCa: () => void;
   decode: boolean;
   onToggleDecode: () => void;
+  settingsReady: boolean;
   onOpenSettings: () => void;
   onOpen: () => void;
   onSaveSession: () => void;
@@ -99,6 +100,7 @@ export function Toolbar(props: ToolbarProps) {
     onInstallCa,
     decode,
     onToggleDecode,
+    settingsReady,
     onOpenSettings,
     onOpen,
     onSaveSession,
@@ -173,6 +175,7 @@ export function Toolbar(props: ToolbarProps) {
         <Button
           variant="ghost"
           onClick={onOpenSettings}
+          disabled={!settingsReady}
           title="Settings — connections, certificates, interception, capture"
         >
           <IconSettings /> Settings

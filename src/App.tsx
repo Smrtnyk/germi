@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type RefObject,
+  type SetStateAction,
+} from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { useAppState, type RightTab } from "./appState";
 import {
@@ -10,6 +19,7 @@ import {
 } from "./shortcuts";
 import { paneVisibility } from "./rightPanel";
 import { useCaptureDrop } from "./captureDrop";
+import { flushDetachedRuleWindows } from "./ruleWindows";
 import { WorkbenchTabs } from "./components/WorkbenchTabs";
 import { CaptureDropOverlay } from "./components/CaptureDropOverlay";
 import type { CaInfo, FlowDetail, FlowSummary } from "./types";
@@ -20,7 +30,8 @@ import { TrafficList } from "./components/TrafficList";
 import { FlowInspector } from "./components/FlowInspector";
 import { AutoresponderPanel, type AutoresponderPanelProps } from "./components/AutoresponderPanel";
 import { ScriptsContainer } from "./components/ScriptsContainer";
-import { openOrFocusScriptsWindow } from "./scriptWindows";
+import { flushDetachedScriptsWindow, openOrFocusScriptsWindow } from "./scriptWindows";
+import { closeMainWindowWithEditors } from "./scriptsClose";
 import { CaDialog } from "./components/CaDialog";
 import { SettingsDialog, type SettingsDialogProps } from "./components/SettingsDialog";
 import { StatusBar } from "./components/StatusBar";
@@ -165,6 +176,7 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       id: "settings",
       group: "App",
       label: "Open Settings…",
+      disabled: !s.settingsReady,
       run: () => s.settings.setSettingsOpen(true),
     },
     { id: "ca", group: "App", label: "CA certificate…", run: () => s.setCaOpen(true) },
@@ -256,7 +268,11 @@ function focusSearch(s: AppStateValue): void {
 
 // Fixed Ctrl/⌘ combos that aren't user-rebindable: select-all and undo/redo.
 // Other Mod combos (copy / paste / cut, …) fall through to the browser.
-function handleModShortcut(e: KeyboardEvent, s: AppStateValue) {
+function handleModShortcut(
+  e: KeyboardEvent,
+  s: AppStateValue,
+  runHistory: (redo: boolean) => void,
+) {
   const k = e.key.toLowerCase();
   if (k === "a" && !isTyping(e.target)) {
     e.preventDefault();
@@ -266,8 +282,7 @@ function handleModShortcut(e: KeyboardEvent, s: AppStateValue) {
   // Undo/redo — pass through to CodeMirror / inputs when one is focused so they
   // keep their native undo. The History panel always works otherwise.
   if ((k === "z" || k === "y") && !isTyping(e.target)) {
-    if (k === "y" || e.shiftKey) s.history.redo();
-    else s.history.undo();
+    runHistory(k === "y" || e.shiftKey);
     e.preventDefault();
   }
 }
@@ -286,6 +301,7 @@ function handleShortcut(
   reverse: Map<Accel, CommandId>,
   actions: Record<CommandId, () => void>,
   setCheatOpen: (v: boolean) => void,
+  runHistory: (redo: boolean) => void,
 ) {
   // Configurable commands run first; only their accels live in `reverse`, so the
   // fixed combos keep their exact semantics. All bound commands fire even while
@@ -302,7 +318,7 @@ function handleShortcut(
     return;
   }
   if (e.metaKey || e.ctrlKey) {
-    handleModShortcut(e, s);
+    handleModShortcut(e, s, runHistory);
     return;
   }
   if (isTyping(e.target)) return;
@@ -421,6 +437,7 @@ interface InspectorProps {
   loading: boolean;
   decode: boolean;
   onMock: (detail: FlowDetail) => void;
+  onCopyCurl: (id: string) => void;
   onLoadFull: () => void;
   selectedSummaries: FlowSummary[];
   onSelectOne: (id: string) => void;
@@ -436,12 +453,14 @@ function ViewerPanel({
   rightTab,
   setRightTab,
   onCollapse,
+  panelVisible,
   inspector,
   filters,
 }: {
   rightTab: RightTab;
   setRightTab: (tab: RightTab) => void;
   onCollapse: () => void;
+  panelVisible: boolean;
   inspector: InspectorProps;
   filters: FiltersPanelProps;
 }) {
@@ -472,7 +491,7 @@ function ViewerPanel({
       </div>
       <div className="right-content">
         <div className={!filtersVisible ? "pane" : "pane hidden"}>
-          <FlowInspector {...inspector} viewer />
+          <FlowInspector {...inspector} active={panelVisible && !filtersVisible} viewer />
         </div>
         <div className={filtersVisible ? "pane" : "pane hidden"}>
           <FiltersPanel {...filters} />
@@ -491,6 +510,9 @@ function RightPanel({
   auto,
   filters,
   viewer,
+  panelVisible,
+  ruleFlushRef,
+  scriptsFlushRef,
 }: {
   rightTab: RightTab;
   setRightTab: (tab: RightTab) => void;
@@ -500,6 +522,9 @@ function RightPanel({
   auto: AutoresponderPanelProps;
   filters: FiltersPanelProps;
   viewer: boolean;
+  panelVisible: boolean;
+  ruleFlushRef: RefObject<() => Promise<void>>;
+  scriptsFlushRef: RefObject<() => Promise<void>>;
 }) {
   if (viewer) {
     return (
@@ -507,6 +532,7 @@ function RightPanel({
         rightTab={rightTab}
         setRightTab={setRightTab}
         onCollapse={onCollapse}
+        panelVisible={panelVisible}
         inspector={inspector}
         filters={filters}
       />
@@ -528,16 +554,16 @@ function RightPanel({
 
       <div className="right-content">
         <div className={panes.inspector ? "pane" : "pane hidden"}>
-          <FlowInspector {...inspector} viewer={false} />
+          <FlowInspector {...inspector} active={panelVisible && panes.inspector} viewer={false} />
         </div>
         <div className={panes.auto ? "pane" : "pane hidden"}>
-          <AutoresponderPanel {...auto} />
+          <AutoresponderPanel {...auto} flushRef={ruleFlushRef} />
         </div>
         <div className={panes.filters ? "pane" : "pane hidden"}>
           <FiltersPanel {...filters} />
         </div>
         <div className={panes.scripts ? "pane" : "pane hidden"}>
-          <ScriptsContainer onPopOut={openOrFocusScriptsWindow} />
+          <ScriptsContainer onPopOut={openOrFocusScriptsWindow} flushRef={scriptsFlushRef} />
         </div>
       </div>
     </div>
@@ -569,18 +595,20 @@ function AppDialogs({
   caInfo,
   onCaClose,
   settingsOpen,
+  settingsReady,
   settingsProps,
 }: {
   caOpen: boolean;
   caInfo: CaInfo | null;
   onCaClose: () => void;
   settingsOpen: boolean;
+  settingsReady: boolean;
   settingsProps: SettingsDialogProps;
 }) {
   return (
     <>
       {caOpen && caInfo && <CaDialog info={caInfo} onClose={onCaClose} />}
-      {settingsOpen && <SettingsDialog {...settingsProps} />}
+      {settingsOpen && settingsReady && <SettingsDialog {...settingsProps} />}
     </>
   );
 }
@@ -632,10 +660,97 @@ function SessionDialogs({ s }: { s: AppStateValue }) {
   );
 }
 
+function useSafeAppClose(
+  s: AppStateValue,
+  ruleFlushRef: RefObject<() => Promise<void>>,
+  scriptsFlushRef: RefObject<() => Promise<void>>,
+) {
+  const [closing, setClosing] = useState(false);
+  const closingRef = useRef(false);
+  const flushSettings = s.flushSettings;
+  const flushRuleMutations = s.ar.flushMutations;
+  const flushHistory = s.history.flush;
+  const notify = s.notify;
+
+  useEffect(() => {
+    const appWindow = getCurrentWindow();
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    void appWindow
+      .onCloseRequested((event) => {
+        event.preventDefault();
+        if (closingRef.current) return;
+        closingRef.current = true;
+        setClosing(true);
+        void closeMainWindowWithEditors(
+          () => flushDetachedScriptsWindow(5_000, true),
+          () => flushDetachedRuleWindows(5_000, true),
+          async () => {
+            await ruleFlushRef.current();
+            await flushRuleMutations();
+            await flushHistory();
+          },
+          flushSettings,
+          () => scriptsFlushRef.current(),
+          () => appWindow.destroy(),
+        ).catch((error: unknown) => {
+          closingRef.current = false;
+          setClosing(false);
+          notify("error", `Could not close safely: ${String(error)}`);
+        });
+      })
+      .then((fn) => {
+        if (alive) unlisten = fn;
+        else fn();
+      })
+      .catch((error) => notify("error", `Could not install the safe-close handler: ${error}`));
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, [flushHistory, flushRuleMutations, flushSettings, notify, ruleFlushRef, scriptsFlushRef]);
+
+  return { closing, closingRef };
+}
+
+function useAppKeyboardShortcuts(
+  s: AppStateValue,
+  reverse: Map<Accel, CommandId>,
+  actions: Record<CommandId, () => void>,
+  setCheatOpen: Dispatch<SetStateAction<boolean>>,
+  ruleFlushRef: RefObject<() => Promise<void>>,
+  closingRef: RefObject<boolean>,
+): void {
+  const keyRef = useRef<(event: KeyboardEvent) => void>(() => {});
+  const runHistory = (redo: boolean) => {
+    // Commit a pending inline debounce before the backend history cursor moves.
+    // Detached editors are flushed inside useHistory; a failed save cancels the
+    // requested undo/redo instead of discarding unsaved text.
+    void ruleFlushRef
+      .current()
+      .then(() => (redo ? s.history.redo() : s.history.undo()))
+      .catch((error: unknown) => s.notify("error", `Could not save before undo: ${error}`));
+  };
+  keyRef.current = (event: KeyboardEvent) => {
+    if (!closingRef.current) {
+      handleShortcut(event, s, reverse, actions, setCheatOpen, runHistory);
+    }
+  };
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => keyRef.current(event);
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+}
+
 export function App() {
-  const s = useAppState();
+  const ruleFlushRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const scriptsFlushRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const s = useAppState(() => ruleFlushRef.current());
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [cheatOpen, setCheatOpen] = useState(false);
+  const { closing, closingRef } = useSafeAppClose(s, ruleFlushRef, scriptsFlushRef);
 
   const actions = useMemo(() => buildActions(s), [s]);
   const reverse = useMemo(() => reverseLookup(s.shortcuts), [s.shortcuts]);
@@ -646,18 +761,11 @@ export function App() {
     onReject: (reason) => s.notify("info", reason),
   });
 
-  const keyRef = useRef<(e: KeyboardEvent) => void>(() => {});
-  keyRef.current = (e: KeyboardEvent) => handleShortcut(e, s, reverse, cmdActions, setCheatOpen);
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => keyRef.current(e);
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, []);
+  useAppKeyboardShortcuts(s, reverse, cmdActions, setCheatOpen, ruleFlushRef, closingRef);
 
   return (
     <ToastProvider value={s.notify}>
-      <div className="app">
+      <div className="app" inert={closing} aria-busy={closing}>
         <Toolbar
           running={s.proxy.running}
           busy={s.proxy.busy}
@@ -669,6 +777,7 @@ export function App() {
           onInstallCa={() => s.setCaOpen(true)}
           decode={s.decode}
           onToggleDecode={() => s.setDecode((d) => !d)}
+          settingsReady={s.settingsReady}
           onOpenSettings={() => s.settings.setSettingsOpen(true)}
           onOpen={s.requestOpenCapture}
           onSaveSession={s.requestSaveSession}
@@ -749,19 +858,21 @@ export function App() {
             title="Drag to resize"
           />
 
-          {s.rightCollapsed ? (
+          <div className={s.rightCollapsed ? "panel-slot collapsed" : "panel-slot"}>
             <PanelRail
               activeScenario={s.activeScenario}
               onExpand={() => s.setRightCollapsed(false)}
               viewer={s.viewer}
             />
-          ) : (
             <RightPanel
               rightTab={s.rightTab}
               setRightTab={s.setRightTab}
               activeScenario={s.activeScenario}
               onCollapse={() => s.setRightCollapsed(true)}
               viewer={s.viewer}
+              panelVisible={!s.rightCollapsed}
+              ruleFlushRef={ruleFlushRef}
+              scriptsFlushRef={scriptsFlushRef}
               filters={{
                 filters: s.savedFilters.filters,
                 soloId: s.savedFilters.soloId,
@@ -778,6 +889,7 @@ export function App() {
                 loading: s.inspector.loading,
                 decode: s.decode,
                 onMock: (d) => void s.ar.mockFlows([d.id], s.ar.autoresponder.activeScenarioId),
+                onCopyCurl: s.copyFlowAsCurl,
                 onLoadFull: () => s.setFullBody(true),
                 selectedSummaries: s.selectedSummaries,
                 onSelectOne: (id) => s.handleKeySelect(id, false),
@@ -791,39 +903,45 @@ export function App() {
                 inspectorFindRef: s.inspectorFindRef,
               }}
               auto={{
-                ar: s.ar.autoresponder,
-                scenarioActions: {
-                  activate: s.ar.activateScenario,
-                  setGeneralActive: s.ar.setGeneralActive,
-                  create: s.ar.createScenario,
-                  rename: s.ar.renameScenario,
-                  delete: s.ar.deleteScenario,
-                  resetState: s.ar.resetRuleState,
+                data: {
+                  ar: s.ar.autoresponder,
+                  ruleHits: s.ar.ruleHits,
+                  bulkMockProgress: s.ar.bulkMockProgress,
                 },
-                ruleActions: {
-                  create: s.ar.createRule,
-                  load: s.ar.loadRule,
-                  update: s.ar.updateRule,
-                  delete: s.ar.deleteRule,
-                  deleteMany: s.ar.deleteRules,
-                  duplicate: s.ar.duplicateRule,
-                  reorder: s.ar.reorderRule,
+                actions: {
+                  scenarioActions: {
+                    activate: s.ar.activateScenario,
+                    setGeneralActive: s.ar.setGeneralActive,
+                    create: s.ar.createScenario,
+                    rename: s.ar.renameScenario,
+                    delete: s.ar.deleteScenario,
+                    resetState: s.ar.resetRuleState,
+                  },
+                  ruleActions: {
+                    create: s.ar.createRule,
+                    load: s.ar.loadRule,
+                    update: s.ar.updateRule,
+                    delete: s.ar.deleteRule,
+                    deleteMany: s.ar.deleteRules,
+                    duplicate: s.ar.duplicateRule,
+                    reorder: s.ar.reorderRule,
+                  },
+                  transferActions: {
+                    exportRules: s.ar.exportRules,
+                    importRules: s.ar.importRules,
+                    dropMock: s.dropMockFlows,
+                  },
                 },
-                transferActions: {
-                  exportRules: s.ar.exportRules,
-                  importRules: s.ar.importRules,
-                  dropMock: s.dropMockFlows,
+                editor: {
+                  seed: { ruleSeed: s.ar.ruleSeed, onRuleSeedConsumed: s.ar.consumeRuleSeed },
+                  reloadToken: s.history.version,
+                  layout: s.autoLayout,
+                  openWindowRuleIds: s.openRuleWindows,
+                  onOpenRuleWindow: s.openRuleWindow,
                 },
-                seed: { ruleSeed: s.ar.ruleSeed, onRuleSeedConsumed: s.ar.consumeRuleSeed },
-                ruleHits: s.ar.ruleHits,
-                bulkMockProgress: s.ar.bulkMockProgress,
-                reloadToken: s.history.version,
-                layout: s.autoLayout,
-                openWindowRuleIds: s.openRuleWindows,
-                onOpenRuleWindow: s.openRuleWindow,
               }}
             />
-          )}
+          </div>
         </main>
 
         <StatusBar
@@ -844,6 +962,7 @@ export function App() {
           caInfo={s.caInfo}
           onCaClose={() => s.setCaOpen(false)}
           settingsOpen={s.settings.settingsOpen}
+          settingsReady={s.settingsReady}
           settingsProps={{
             settings: s.settings.settings,
             onChange: s.saveSettings,

@@ -19,6 +19,7 @@ const base = {
   onInstallCa: noop,
   decode: true,
   onToggleDecode: noop,
+  settingsReady: true,
   onOpenSettings: noop,
   onOpen: noop,
   onSaveSession: noop,
@@ -30,6 +31,11 @@ const base = {
 } as const;
 
 describe("Toolbar", () => {
+  it("keeps Settings disabled until the durable startup snapshot is loaded", async () => {
+    const screen = await render(<Toolbar {...base} settingsReady={false} />);
+    await expect.element(screen.getByRole("button", { name: "Settings" })).toBeDisabled();
+  });
+
   it("shows the proxy controls (and a New viewer button) in normal mode", async () => {
     const screen = await render(<Toolbar {...base} />);
     await expect.element(screen.getByRole("button", { name: "Start" })).toBeVisible();

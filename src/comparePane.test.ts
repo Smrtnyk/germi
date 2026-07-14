@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  appendPaneFlows,
   copyPaneFilter,
   emptyPaneQuery,
   extractFlows,
@@ -8,6 +9,7 @@ import {
   linkSourceSide,
   movePaneFlows,
   paneData,
+  retainVisibleSelection,
   selectAll,
   selectMany,
   selectOnly,
@@ -160,6 +162,21 @@ describe("pane selection", () => {
     const before = selectOnly("b");
     expect(selectAll(before, [])).toBe(before);
   });
+
+  it("moves focus to a visible selected row when a filter hides the focused row", () => {
+    const retained = retainVisibleSelection(
+      { selectedIds: new Set(["a", "c"]), focusedId: "c", anchorId: "a" },
+      ["a", "b"],
+    );
+    expect([...retained.selectedIds]).toEqual(["a"]);
+    expect(retained.focusedId).toBe("a");
+    expect(retained.anchorId).toBe("a");
+  });
+
+  it("selects the first visible row or clears when no filtered rows remain", () => {
+    expect(retainVisibleSelection(selectOnly("c"), ["a", "b"])).toEqual(selectOnly("a"));
+    expect(retainVisibleSelection(selectOnly("c"), [])).toEqual(selectOnly(null));
+  });
 });
 
 describe("moving rows across panes", () => {
@@ -189,5 +206,37 @@ describe("moving rows across panes", () => {
     const moved = movePaneFlows(from, paneData([]), ["a", "b"], null);
     expect(moved?.to.flows.map((f) => f.id)).toEqual(["a"]);
     expect(moved?.from.flows.map((f) => f.id)).toEqual(["b", "c"]);
+  });
+
+  it("focuses the next visible row after a move instead of a filtered-out neighbor", () => {
+    const from = paneData(FLOWS);
+    const moved = movePaneFlows(from, paneData([]), ["a", "c"], null);
+
+    expect(moved?.to.flows.map((f) => f.id)).toEqual(["a"]);
+    expect(moved?.from.sel).toEqual(selectOnly("c"));
+  });
+
+  it("does not select arrivals hidden by the destination filter", () => {
+    const to = {
+      ...paneData([FLOWS[0]]),
+      query: query({ filter: "host:api.test" }),
+    };
+    const moved = movePaneFlows(paneData([FLOWS[1]]), to, ["b"], null);
+
+    expect(moved?.to.flows.map((flow) => flow.id)).toEqual(["a", "b"]);
+    expect(moved?.to.sel).toEqual(selectOnly("a"));
+  });
+});
+
+describe("appending rows", () => {
+  it("leaves a filtered-empty pane unfocused when imported rows stay hidden", () => {
+    const pane = {
+      ...paneData([]),
+      query: query({ filter: "host:api.test" }),
+    };
+
+    const appended = appendPaneFlows(pane, [FLOWS[1]], null);
+    expect(appended.flows.map((flow) => flow.id)).toEqual(["b"]);
+    expect(appended.sel).toEqual(selectOnly(null));
   });
 });

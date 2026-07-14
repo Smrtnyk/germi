@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { api } from "../ipc";
 import type { SequenceStep, TestInput, TestResult } from "../types";
@@ -11,6 +11,9 @@ interface Props {
   seedMethod?: string;
   seedUrl?: string;
 }
+
+const DEFAULT_METHOD = "GET";
+const DEFAULT_URL = "https://api.example.com/health";
 
 const OUTCOME: Record<TestResult["outcome"], { label: string; cls: string }> = {
   respond: { label: "Auto-responded (short-circuit)", cls: "respond" },
@@ -44,24 +47,30 @@ function SequenceStrip({ sequence, loops }: { sequence: SequenceStep[]; loops: b
 }
 
 export function RuleTester({ scenarioId, seedMethod, seedUrl }: Props) {
-  const [method, setMethod] = useState(seedMethod ?? "GET");
-  const [url, setUrl] = useState(seedUrl ?? "https://api.example.com/health");
+  const [method, setMethod] = useState(seedMethod ?? DEFAULT_METHOD);
+  const [url, setUrl] = useState(seedUrl ?? DEFAULT_URL);
   const [reqBody, setReqBody] = useState("");
   const [respStatus, setRespStatus] = useState(200);
   const [respBody, setRespBody] = useState('{ "upstream": true }');
   const [result, setResult] = useState<TestResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const runGeneration = useRef(0);
 
   // Re-seed from the selected rule when it changes, and drop the previous
   // result so a stale preview from another rule isn't shown as this rule's.
   useEffect(() => {
-    if (seedUrl) setUrl(seedUrl);
-    if (seedMethod) setMethod(seedMethod);
+    runGeneration.current += 1;
+    // `undefined` is meaningful here: it is how an any-method matcher or an
+    // empty URL is passed in. Reset to the tester defaults instead of retaining
+    // the previous selected rule's method/URL.
+    setUrl(seedUrl ?? DEFAULT_URL);
+    setMethod(seedMethod ?? DEFAULT_METHOD);
     setResult(null);
     setError(null);
-  }, [seedUrl, seedMethod]);
+  }, [scenarioId, seedUrl, seedMethod]);
 
   async function run() {
+    const generation = ++runGeneration.current;
     setError(null);
     const input: TestInput = {
       method,
@@ -73,9 +82,10 @@ export function RuleTester({ scenarioId, seedMethod, seedUrl }: Props) {
       respBody,
     };
     try {
-      setResult(await api.testScenario(scenarioId, input));
+      const next = await api.testScenario(scenarioId, input);
+      if (generation === runGeneration.current) setResult(next);
     } catch (e) {
-      setError(String(e));
+      if (generation === runGeneration.current) setError(String(e));
     }
   }
 

@@ -32,6 +32,7 @@ anyhow = "=1.0.102"
 tracing = "=0.1.44"
 mime_guess = "=2.0.5"
 base64 = "=0.22.1"
+url = "=2.5.8"
 
 # Sandboxed, pure-Rust scripting for user-authored request/response hooks. The
 # "sync" feature makes Engine/AST Send+Sync so a compiled script can be shared
@@ -43,6 +44,8 @@ zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 httparse = "=1.10.1"
 flate2 = "=1.1.9"
 brotli = "=8.0.4"
+tempfile = "=3.27.0"
+x509-parser = "=0.18.1"
 
 [dev-dependencies]
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }

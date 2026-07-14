@@ -13,8 +13,10 @@
 //! `handle_response`.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::sync::{LazyLock, Mutex};
 
+use hudsucker::hyper::header::{HeaderName, HeaderValue};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -97,7 +99,11 @@ impl Matcher {
 
 /// What a rule does when it matches.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Action {
     // --- request-phase, short-circuiting ---
     /// Synthesize a full response and return it without hitting the network.
@@ -107,6 +113,11 @@ pub enum Action {
         headers: Vec<(String, String)>,
         #[serde(default)]
         body: String,
+        /// Exact response bytes for bodies that cannot be represented as UTF-8.
+        /// When present this takes precedence over `body`; the text remains a
+        /// best-effort editor preview for older frontends.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body_base64: Option<String>,
         #[serde(default)]
         content_type: Option<String>,
         /// Optional `Content-Encoding` to apply to the served body (e.g.
@@ -275,7 +286,11 @@ pub struct RuleSummary {
 }
 
 #[derive(Serialize, Clone, Debug)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ActionSummary {
     Respond {
         status: u16,
@@ -396,9 +411,14 @@ pub enum RequestOutcome {
         rule: String,
         rule_id: String,
         response: SyntheticResponse,
+        set_headers: Vec<(String, String)>,
     },
     /// Drop the request. Carries the rule's URL label + id.
-    Block { rule: String, rule_id: String },
+    Block {
+        rule: String,
+        rule_id: String,
+        set_headers: Vec<(String, String)>,
+    },
     /// Forward the request to `url` instead of the original target (Map
     /// Remote). Ends rule evaluation like a short-circuit, but the request
     /// still goes on the wire, so header edits accumulated up to the mapping
@@ -453,7 +473,8 @@ impl RuleCursors {
     }
 
     fn record_fire(&mut self, rule: &Rule) {
-        *self.hits.entry(rule.id.clone()).or_insert(0) += 1;
+        let hits = self.hits.entry(rule.id.clone()).or_insert(0);
+        *hits = hits.saturating_add(1);
     }
 
     pub fn reset(&mut self) {
@@ -471,6 +492,10 @@ impl RuleCursors {
     pub fn snapshot(&self) -> HashMap<String, u32> {
         self.hits.clone()
     }
+
+    pub fn restore(&mut self, hits: HashMap<String, u32>) {
+        self.hits = hits;
+    }
 }
 
 /// Upper bound on a `MapLocal` file served as a synthetic response body, mirroring
@@ -481,11 +506,22 @@ const MAP_LOCAL_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// Read a `MapLocal` file, returning `None` (skip the rule) for a missing,
 /// unreadable, or over-cap file instead of breaking the flow or blowing up memory.
 fn read_map_local(path: &str) -> Option<Vec<u8>> {
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > MAP_LOCAL_MAX_BYTES {
+    read_map_local_capped(path, MAP_LOCAL_MAX_BYTES)
+}
+
+fn read_map_local_capped(path: &str, cap: u64) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > cap {
         return None;
     }
-    std::fs::read(path).ok()
+    // Re-check while reading: a regular file can grow after metadata() and the
+    // request path must still never allocate beyond the configured ceiling.
+    let mut body = Vec::new();
+    file.take(cap.saturating_add(1))
+        .read_to_end(&mut body)
+        .ok()?;
+    ((body.len() as u64) <= cap).then_some(body)
 }
 
 /// Rewrite unbraced numeric capture references (`$1`) to their braced form
@@ -532,9 +568,7 @@ fn brace_numeric_refs(template: &str) -> String {
 /// an absolute `http(s)://` URL with a host.
 fn is_forwardable_url(target: &str) -> bool {
     match target.parse::<hudsucker::hyper::Uri>() {
-        Ok(uri) => {
-            matches!(uri.scheme_str(), Some("http" | "https")) && uri.host().is_some()
-        }
+        Ok(uri) => matches!(uri.scheme_str(), Some("http" | "https")) && uri.host().is_some(),
         Err(_) => false,
     }
 }
@@ -578,9 +612,18 @@ fn preflight_response(req: &CapturedRequest) -> Option<SyntheticResponse> {
     let origin = header(&req.headers, "origin")?;
     let method = header(&req.headers, "access-control-request-method")?;
     let mut headers = vec![
-        ("access-control-allow-origin".to_string(), origin.to_string()),
-        ("access-control-allow-methods".to_string(), method.to_string()),
-        ("access-control-allow-credentials".to_string(), "true".to_string()),
+        (
+            "access-control-allow-origin".to_string(),
+            origin.to_string(),
+        ),
+        (
+            "access-control-allow-methods".to_string(),
+            method.to_string(),
+        ),
+        (
+            "access-control-allow-credentials".to_string(),
+            "true".to_string(),
+        ),
         ("access-control-max-age".to_string(), "600".to_string()),
         (
             "vary".to_string(),
@@ -592,7 +635,10 @@ fn preflight_response(req: &CapturedRequest) -> Option<SyntheticResponse> {
     {
         headers.insert(
             2,
-            ("access-control-allow-headers".to_string(), requested.to_string()),
+            (
+                "access-control-allow-headers".to_string(),
+                requested.to_string(),
+            ),
         );
     }
     Some(SyntheticResponse {
@@ -621,7 +667,6 @@ fn is_expose_excluded(name: &str) -> bool {
                 | "set-cookie"
                 | "set-cookie2"
                 | "vary"
-                | "content-encoding"
                 | "transfer-encoding"
                 | "connection"
                 | "keep-alive"
@@ -635,7 +680,10 @@ fn is_expose_excluded(name: &str) -> bool {
 /// never serve one origin's Allow-Origin echo to another. `Vary: *` already
 /// covers everything and is left alone.
 fn add_vary_origin(headers: &mut Vec<(String, String)>) {
-    match headers.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case("vary")) {
+    match headers
+        .iter_mut()
+        .find(|(k, _)| k.eq_ignore_ascii_case("vary"))
+    {
         Some((_, value)) => {
             let covered = value
                 .split(',')
@@ -663,13 +711,20 @@ fn inject_cors(req: &CapturedRequest, resp: &mut CapturedResponse) -> bool {
     };
     let origin = origin.to_string();
     let mut seen: Vec<String> = Vec::new();
-    let expose: Vec<String> = resp
+    // Preserve names the upstream explicitly exposed even when they are
+    // virtual (not present in this particular response), then add every actual
+    // non-safelisted response header. Replacing the upstream list would silently
+    // make those virtual headers unreadable to page JavaScript.
+    let mut expose: Vec<String> = resp
         .headers
         .iter()
-        .map(|(k, _)| k.clone())
-        .filter(|k| !is_expose_excluded(k))
-        .filter(|k| {
-            let lower = k.to_ascii_lowercase();
+        .filter(|(k, _)| k.eq_ignore_ascii_case("access-control-expose-headers"))
+        .flat_map(|(_, value)| value.split(','))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
             if seen.contains(&lower) {
                 false
             } else {
@@ -678,60 +733,65 @@ fn inject_cors(req: &CapturedRequest, resp: &mut CapturedResponse) -> bool {
             }
         })
         .collect();
+    expose.extend(
+        resp.headers
+            .iter()
+            .map(|(k, _)| k.clone())
+            .filter(|k| !is_expose_excluded(k))
+            .filter(|k| {
+                let lower = k.to_ascii_lowercase();
+                if seen.contains(&lower) {
+                    false
+                } else {
+                    seen.push(lower);
+                    true
+                }
+            }),
+    );
     if !expose.is_empty() {
-        set_header(&mut resp.headers, "access-control-expose-headers", &expose.join(", "));
+        set_header(
+            &mut resp.headers,
+            "access-control-expose-headers",
+            &expose.join(", "),
+        );
     }
     set_header(&mut resp.headers, "access-control-allow-origin", &origin);
-    set_header(&mut resp.headers, "access-control-allow-credentials", "true");
+    set_header(
+        &mut resp.headers,
+        "access-control-allow-credentials",
+        "true",
+    );
     add_vary_origin(&mut resp.headers);
     true
 }
 
-fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors) -> RequestOutcome {
+fn first_match(
+    rules: &[Rule],
+    req: &CapturedRequest,
+    cursors: &mut RuleCursors,
+) -> (RequestOutcome, bool) {
     let mut set_headers = Vec::new();
-    for rule in rules.iter().filter(|r| r.enabled && cursors.allows_fire(r)) {
+    let mut fired_any = false;
+    for rule in rules.iter().filter(|r| r.enabled) {
+        if !cursors.allows_fire(rule) {
+            continue;
+        }
         if !rule.matcher.matches(req) {
             continue;
         }
         match &rule.action {
-            Action::Respond {
-                status,
-                headers,
-                body,
-                content_type,
-                content_encoding,
-            } => {
-                let mut hs = headers.clone();
-                if let Some(ct) = content_type {
-                    if !ct.is_empty() {
-                        hs.push(("content-type".to_string(), ct.clone()));
-                    }
-                }
-                // When the rule opts into a Content-Encoding, compress the
-                // stored (decoded) body for the wire and stamp the header. A
-                // normalized-but-unsupported value falls back to identity so a
-                // typo in the toggle never produces a corrupt response. Identity
-                // is sent as raw bytes with no header, exactly like before.
-                let body_bytes = match normalize_encoding(content_encoding.as_deref()) {
-                    Some(enc) => match crate::body::compress_body(&enc, body.as_bytes()) {
-                        Some(compressed) => {
-                            hs.push(("content-encoding".to_string(), enc));
-                            compressed
-                        }
-                        None => body.clone().into_bytes(),
-                    },
-                    None => body.clone().into_bytes(),
-                };
+            Action::Respond { .. } => {
+                let response = configured_response(&rule.action);
                 cursors.record_fire(rule);
-                return RequestOutcome::Respond {
-                    rule: rule.label(),
-                    rule_id: rule.id.clone(),
-                    response: SyntheticResponse {
-                        status: *status,
-                        headers: hs,
-                        body: body_bytes.into(),
+                return (
+                    RequestOutcome::Respond {
+                        rule: rule.label(),
+                        rule_id: rule.id.clone(),
+                        response,
+                        set_headers,
                     },
-                };
+                    true,
+                );
             }
             // Missing (or too-large) file: skip this rule rather than break the
             // flow. The size cap keeps a huge/hostile mapping from being slurped
@@ -743,15 +803,19 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
                         .unwrap_or("application/octet-stream")
                         .to_string();
                     cursors.record_fire(rule);
-                    return RequestOutcome::Respond {
-                        rule: rule.label(),
-                        rule_id: rule.id.clone(),
-                        response: SyntheticResponse {
-                            status: *status,
-                            headers: vec![("content-type".to_string(), ct)],
-                            body: bytes.into(),
+                    return (
+                        RequestOutcome::Respond {
+                            rule: rule.label(),
+                            rule_id: rule.id.clone(),
+                            response: SyntheticResponse {
+                                status: *status,
+                                headers: vec![("content-type".to_string(), ct)],
+                                body: bytes.into(),
+                            },
+                            set_headers,
                         },
-                    };
+                        true,
+                    );
                 }
             }
             // A target that doesn't expand/parse skips the rule rather than
@@ -759,23 +823,34 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
             Action::MapRemote { url } => {
                 if let Some(target) = map_remote_target(&rule.matcher, req, url) {
                     cursors.record_fire(rule);
-                    return RequestOutcome::MapRemote {
-                        rule: rule.label(),
-                        rule_id: rule.id.clone(),
-                        url: target,
-                        set_headers,
-                    };
+                    return (
+                        RequestOutcome::MapRemote {
+                            rule: rule.label(),
+                            rule_id: rule.id.clone(),
+                            url: target,
+                            set_headers,
+                        },
+                        true,
+                    );
                 }
             }
             Action::Block => {
                 cursors.record_fire(rule);
-                return RequestOutcome::Block {
-                    rule: rule.label(),
-                    rule_id: rule.id.clone(),
-                };
+                return (
+                    RequestOutcome::Block {
+                        rule: rule.label(),
+                        rule_id: rule.id.clone(),
+                        set_headers,
+                    },
+                    true,
+                );
             }
             Action::SetRequestHeader { name, value } => {
-                set_headers.push((name.clone(), value.clone()));
+                if valid_header(name, value) {
+                    set_headers.push((name.clone(), value.clone()));
+                    cursors.record_fire(rule);
+                    fired_any = true;
+                }
             }
             // Preflights are answered here so they neither hit a (possibly
             // dead) upstream nor fall through to a mock rule below and burn
@@ -783,11 +858,15 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
             Action::Cors => {
                 if let Some(response) = preflight_response(req) {
                     cursors.record_fire(rule);
-                    return RequestOutcome::Respond {
-                        rule: rule.label(),
-                        rule_id: rule.id.clone(),
-                        response,
-                    };
+                    return (
+                        RequestOutcome::Respond {
+                            rule: rule.label(),
+                            rule_id: rule.id.clone(),
+                            response,
+                            set_headers,
+                        },
+                        true,
+                    );
                 }
             }
             // Response-phase actions are ignored here.
@@ -796,7 +875,52 @@ fn first_match(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors)
             | Action::RewriteResponseBody { .. } => {}
         }
     }
-    RequestOutcome::Continue { set_headers }
+    (RequestOutcome::Continue { set_headers }, fired_any)
+}
+
+fn configured_response(action: &Action) -> SyntheticResponse {
+    let Action::Respond {
+        status,
+        headers,
+        body,
+        body_base64,
+        content_type,
+        content_encoding,
+    } = action
+    else {
+        unreachable!("configured_response is only called for Respond actions");
+    };
+    let mut headers = headers.clone();
+    // These have dedicated editor fields and must describe the body we build,
+    // so stale/duplicate copies in the free-form header table cannot override
+    // them or leave identity bytes mislabeled as compressed.
+    headers.retain(|(name, _)| {
+        !name.eq_ignore_ascii_case("content-type") && !name.eq_ignore_ascii_case("content-encoding")
+    });
+    if let Some(content_type) = content_type.as_deref().filter(|value| !value.is_empty()) {
+        set_header(&mut headers, "content-type", content_type);
+    }
+    // The stored body is decoded. Compress it only when a supported encoding
+    // was selected; an invalid value safely falls back to identity.
+    let identity_body = body_base64
+        .as_deref()
+        .and_then(crate::body::base64_lenient)
+        .unwrap_or_else(|| body.as_bytes().to_vec());
+    let body = match normalize_encoding(content_encoding.as_deref()) {
+        Some(encoding) => match crate::body::compress_body(&encoding, &identity_body) {
+            Some(compressed) => {
+                set_header(&mut headers, "content-encoding", &encoding);
+                compressed
+            }
+            None => identity_body,
+        },
+        None => identity_body,
+    };
+    SyntheticResponse {
+        status: *status,
+        headers,
+        body: body.into(),
+    }
 }
 
 /// Whether a request-phase repeat group on this URL has run dry and should loop.
@@ -807,7 +931,76 @@ fn is_repeat_loop(rule: &Rule, req: &CapturedRequest, cursors: &RuleCursors) -> 
         && is_request_phase(&rule.action)
         && matches!(rule.fire_limit, Some(limit) if limit > 0)
         && rule.matcher.matches(req)
+        && request_action_can_fire(rule, req)
         && cursors.is_exhausted(rule)
+}
+
+/// Whether a matching request-phase rule is currently capable of consuming a
+/// fire. Repeat-cycle bookkeeping must ignore rules that `first_match` would
+/// skip (for example a missing `MapLocal` file); otherwise that permanently
+/// unspent sibling can prevent the rest of the repeat group from looping.
+fn request_action_can_fire(rule: &Rule, req: &CapturedRequest) -> bool {
+    match &rule.action {
+        Action::Respond { .. } | Action::Block => true,
+        Action::MapLocal { path, .. } => std::fs::File::open(path)
+            .and_then(|file| file.metadata())
+            .is_ok_and(|meta| meta.is_file() && meta.len() <= MAP_LOCAL_MAX_BYTES),
+        Action::MapRemote { url } => map_remote_target(&rule.matcher, req, url).is_some(),
+        Action::SetRequestHeader { name, value } => valid_header(name, value),
+        Action::Cors => is_preflight(req),
+        Action::SetResponseHeader { .. }
+        | Action::SetStatus { .. }
+        | Action::RewriteResponseBody { .. } => false,
+    }
+}
+
+/// Whether this request has a real finite request-phase repeat member that can
+/// revive. Shared with the offline tester so a transient Continue inside a
+/// repeat cycle is not mistaken for its permanent steady state.
+pub(crate) fn has_request_repeat_cycle(rules: &[Rule], req: &CapturedRequest) -> bool {
+    rules.iter().any(|rule| {
+        rule.enabled
+            && rule.repeat
+            && is_request_phase(&rule.action)
+            && matches!(rule.fire_limit, Some(limit) if limit > 0)
+            && rule.matcher.matches(req)
+            && request_action_can_fire(rule, req)
+    })
+}
+
+/// A repeat cycle whose finite members are all spent can be revived before the
+/// next request is evaluated. Doing this up front avoids a pass-through rule
+/// (for example an unlimited request-header edit) masking the exhausted group
+/// and starving it forever.
+fn repeat_cycle_is_spent(rules: &[Rule], req: &CapturedRequest, cursors: &RuleCursors) -> bool {
+    let mut found = false;
+    let all_spent = rules
+        .iter()
+        .filter(|rule| {
+            rule.enabled
+                && rule.repeat
+                && is_request_phase(&rule.action)
+                && matches!(rule.fire_limit, Some(limit) if limit > 0)
+                && rule.matcher.matches(req)
+                && request_action_can_fire(rule, req)
+        })
+        .all(|rule| {
+            found = true;
+            cursors.is_exhausted(rule)
+        });
+    found && all_spent
+}
+
+fn reset_request_repeat_rules(rules: &[Rule], req: &CapturedRequest, cursors: &mut RuleCursors) {
+    for rule in rules.iter().filter(|r| {
+        r.enabled
+            && r.repeat
+            && matches!(r.fire_limit, Some(limit) if limit > 0)
+            && is_request_phase(&r.action)
+            && r.matcher.matches(req)
+    }) {
+        cursors.reset_rule(&rule.id);
+    }
 }
 
 pub fn evaluate_request_rules_stateful(
@@ -815,8 +1008,16 @@ pub fn evaluate_request_rules_stateful(
     req: &CapturedRequest,
     cursors: &mut RuleCursors,
 ) -> RequestOutcome {
-    let outcome = first_match(rules, req, cursors);
+    if repeat_cycle_is_spent(rules, req, cursors) {
+        reset_request_repeat_rules(rules, req, cursors);
+    }
+    let (outcome, fired_any) = first_match(rules, req, cursors);
     if !matches!(outcome, RequestOutcome::Continue { .. }) {
+        return outcome;
+    }
+    // A pass-through rule fired on this request. Do not immediately revive an
+    // exhausted repeat group and apply it twice to the same request.
+    if fired_any {
         return outcome;
     }
     if !rules.iter().any(|r| is_repeat_loop(r, req, cursors)) {
@@ -825,13 +1026,8 @@ pub fn evaluate_request_rules_stateful(
     // Only revive the looping (enabled, repeat) request-phase rules — never a
     // finite one-shot or a disabled sibling sharing the URL, whose cursors must
     // stay exhausted.
-    for rule in rules
-        .iter()
-        .filter(|r| r.enabled && r.repeat && is_request_phase(&r.action) && r.matcher.matches(req))
-    {
-        cursors.reset_rule(&rule.id);
-    }
-    first_match(rules, req, cursors)
+    reset_request_repeat_rules(rules, req, cursors);
+    first_match(rules, req, cursors).0
 }
 
 /// Evaluate request-phase rules in order (shared by `RuleSet`, Scenario, tester).
@@ -847,6 +1043,19 @@ pub fn apply_response_rules_stateful(
     req: &CapturedRequest,
     resp: &mut CapturedResponse,
     cursors: &mut RuleCursors,
+) -> Option<String> {
+    apply_response_rules_stateful_mode(rules, req, resp, cursors, true)
+}
+
+/// Response-rule evaluation for a streaming/incomplete body. Metadata actions
+/// still apply, while a body rewrite is skipped without spending its fire
+/// budget because the handler cannot safely replace bytes it did not buffer.
+pub(crate) fn apply_response_rules_stateful_mode(
+    rules: &[Rule],
+    req: &CapturedRequest,
+    resp: &mut CapturedResponse,
+    cursors: &mut RuleCursors,
+    allow_body_rewrite: bool,
 ) -> Option<String> {
     let mut matched = None;
     for rule in rules
@@ -866,7 +1075,7 @@ pub fn apply_response_rules_stateful(
             }
         }
         let fired = match &rule.action {
-            Action::SetResponseHeader { name, value } => {
+            Action::SetResponseHeader { name, value } if valid_header(name, value) => {
                 set_header(&mut resp.headers, name, value);
                 true
             }
@@ -878,7 +1087,7 @@ pub fn apply_response_rules_stateful(
                 find,
                 replace,
                 regex,
-            } => rewrite_response_body(resp, find, replace, *regex),
+            } => allow_body_rewrite && rewrite_response_body(resp, find, replace, *regex),
             Action::Cors => inject_cors(req, resp),
             _ => false,
         };
@@ -905,7 +1114,12 @@ pub fn apply_response_rules(
 /// the rewrite operates on real text. Returns whether the body was changed.
 /// A body that exceeded the decompression cap is left untouched — rewriting +
 /// forwarding a truncated identity body would corrupt the response on the wire.
-fn rewrite_response_body(resp: &mut CapturedResponse, find: &str, replace: &str, regex: bool) -> bool {
+fn rewrite_response_body(
+    resp: &mut CapturedResponse,
+    find: &str,
+    replace: &str,
+    regex: bool,
+) -> bool {
     let had_encoding = !crate::body::content_encodings_of(&resp.headers).is_empty();
     let (decoded, truncated) = match crate::body::decode_body(&resp.headers, &resp.body) {
         Some((d, t)) => (d, t),
@@ -917,13 +1131,14 @@ fn rewrite_response_body(resp: &mut CapturedResponse, find: &str, replace: &str,
     let Ok(text) = String::from_utf8(decoded) else {
         return false;
     };
-    let new = if regex {
-        match cached_regex(find) {
-            Some(re) => re.replace_all(&text, replace).into_owned(),
-            None => return false,
-        }
-    } else {
-        text.replace(find, replace)
+    let Some(new) = rewrite_text_capped(
+        &text,
+        find,
+        replace,
+        regex,
+        crate::body::MAX_DECOMPRESSED_BYTES,
+    ) else {
+        return false;
     };
     // No match ⇒ nothing changed: report no-op so the caller doesn't burn the
     // fire budget, stamp "Mocked-by", or strip Content-Encoding on an untouched
@@ -931,14 +1146,124 @@ fn rewrite_response_body(resp: &mut CapturedResponse, find: &str, replace: &str,
     if new == text {
         return false;
     }
-    resp.body = new.into();
-    // The body is now identity bytes, so drop the stale Content-Encoding
-    // (Content-Length is recomputed downstream in build_parts).
-    if had_encoding {
-        resp.headers
-            .retain(|(k, _)| !k.eq_ignore_ascii_case("content-encoding"));
+    // A byte-range response describes offsets in the selected representation.
+    // A length change makes those offsets false. Decoding an encoded range and
+    // serving it as identity changes the selected representation regardless of
+    // decoded length, so that is unsafe too.
+    let has_content_range = resp
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-range"));
+    if has_content_range && (had_encoding || new.len() != text.len()) {
+        return false;
     }
+    resp.body = new.into();
+    // The body is now a different identity representation. Framing is rebuilt
+    // downstream, but validators, digests, ranges, and message signatures also
+    // describe the old bytes and must not be forwarded as if still valid.
+    resp.headers.retain(|(name, _)| {
+        !(is_stale_after_body_rewrite(name)
+            || had_encoding && name.eq_ignore_ascii_case("content-encoding"))
+    });
     true
+}
+
+fn is_stale_after_body_rewrite(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "etag"
+            | "last-modified"
+            | "content-md5"
+            | "digest"
+            | "content-digest"
+            | "repr-digest"
+            | "signature"
+            | "signature-input"
+    )
+}
+
+/// Apply a literal or regex replacement without letting a compact captured body
+/// amplify beyond the proxy's body ceiling. `None` means invalid regex or an
+/// over-cap result; callers leave the original response and cursor untouched.
+fn rewrite_text_capped(
+    text: &str,
+    find: &str,
+    replace: &str,
+    regex: bool,
+    cap: usize,
+) -> Option<String> {
+    if !regex {
+        let matches = text.match_indices(find).count();
+        let removed = matches.checked_mul(find.len())?;
+        let added = matches.checked_mul(replace.len())?;
+        let size = text.len().checked_sub(removed)?.checked_add(added)?;
+        return (size <= cap).then(|| text.replace(find, replace));
+    }
+
+    let re = cached_regex(find)?;
+    let mut out = String::with_capacity(text.len().min(cap));
+    let mut last = 0;
+    for captures in re.captures_iter(text) {
+        let matched = captures.get(0)?;
+        push_rewrite_piece(&mut out, &text[last..matched.start()], cap)?;
+        let expanded_len = expanded_replacement_len(&captures, replace)?;
+        (out.len().checked_add(expanded_len)? <= cap).then_some(())?;
+        let before = out.len();
+        captures.expand(replace, &mut out);
+        debug_assert_eq!(out.len() - before, expanded_len);
+        last = matched.end();
+    }
+    push_rewrite_piece(&mut out, &text[last..], cap)?;
+    Some(out)
+}
+
+/// Exact byte length that `regex::Captures::expand` will append. Measuring the
+/// replacement before expansion prevents a `$0$0...` template from allocating
+/// a many-times-over-cap temporary only to be rejected afterward.
+fn expanded_replacement_len(captures: &regex::Captures<'_>, replacement: &str) -> Option<usize> {
+    let mut rest = replacement;
+    let mut len = 0usize;
+    while let Some(dollar) = rest.find('$') {
+        len = len.checked_add(dollar)?;
+        rest = &rest[dollar..];
+        if rest.as_bytes().get(1) == Some(&b'$') {
+            len = len.checked_add(1)?;
+            rest = &rest[2..];
+            continue;
+        }
+
+        let after_dollar = &rest[1..];
+        let capture = if let Some(braced) = after_dollar.strip_prefix('{') {
+            braced
+                .find('}')
+                .map(|end| (&braced[..end], 1 + 1 + end + 1))
+        } else {
+            let end = after_dollar
+                .bytes()
+                .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                .count();
+            (end > 0).then(|| (&after_dollar[..end], 1 + end))
+        };
+        let Some((reference, consumed)) = capture else {
+            // A '$' that doesn't begin a valid reference is literal.
+            len = len.checked_add(1)?;
+            rest = after_dollar;
+            continue;
+        };
+        let captured_len = reference
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| captures.get(index))
+            .or_else(|| captures.name(reference))
+            .map_or(0, |matched| matched.as_str().len());
+        len = len.checked_add(captured_len)?;
+        rest = &rest[consumed..];
+    }
+    len.checked_add(rest.len())
+}
+
+fn push_rewrite_piece(out: &mut String, piece: &str, cap: usize) -> Option<()> {
+    (out.len().checked_add(piece.len())? <= cap).then(|| out.push_str(piece))
 }
 
 impl RuleSet {
@@ -971,6 +1296,7 @@ impl RuleSet {
                     status: 200,
                     headers: vec![],
                     body: "{\"status\":\"ok\",\"mocked\":\"by germi\"}".to_string(),
+                    body_base64: None,
                     content_type: Some("application/json".to_string()),
                     content_encoding: None,
                 },
@@ -1020,8 +1346,9 @@ impl AutoResponder {
             .collect()
     }
 
-    /// Guarantee the built-in General scenario exists and sits first in the
-    /// list, and that the switchable active pointer never aliases it.
+    /// Guarantee the built-in General scenario exists with its canonical name
+    /// and sits first in the list. Also normalize an invalid switchable active
+    /// pointer to Off (including one that aliases General).
     pub fn ensure_general(&mut self) {
         match self
             .scenarios
@@ -1042,7 +1369,19 @@ impl AutoResponder {
                 },
             ),
         }
-        if self.active_scenario_id.as_deref() == Some(GENERAL_SCENARIO_ID) {
+
+        // The id is the durable identity of this built-in layer. An old or
+        // hand-edited database may still carry a different display name even
+        // though every mutation path correctly rejects renaming General.
+        self.scenarios[0].name = GENERAL_SCENARIO_NAME.to_string();
+
+        if self.active_scenario_id.as_deref().is_some_and(|active_id| {
+            active_id == GENERAL_SCENARIO_ID
+                || !self
+                    .scenarios
+                    .iter()
+                    .any(|scenario| scenario.id == active_id)
+        }) {
             self.active_scenario_id = None;
         }
     }
@@ -1088,7 +1427,32 @@ impl AutoResponder {
                     set_headers: merged,
                 }
             }
-            short_circuit => short_circuit,
+            RequestOutcome::Respond {
+                rule,
+                rule_id,
+                response,
+                set_headers,
+            } => {
+                merged.extend(set_headers);
+                RequestOutcome::Respond {
+                    rule,
+                    rule_id,
+                    response,
+                    set_headers: merged,
+                }
+            }
+            RequestOutcome::Block {
+                rule,
+                rule_id,
+                set_headers,
+            } => {
+                merged.extend(set_headers);
+                RequestOutcome::Block {
+                    rule,
+                    rule_id,
+                    set_headers: merged,
+                }
+            }
         }
     }
 
@@ -1110,8 +1474,30 @@ impl AutoResponder {
         resp: &mut CapturedResponse,
         cursors: &mut RuleCursors,
     ) -> Option<String> {
-        let general = apply_response_rules_stateful(self.general_rules(), req, resp, cursors);
-        let scenario = apply_response_rules_stateful(self.active_rules(), req, resp, cursors);
+        self.apply_response_stateful_mode(req, resp, cursors, true)
+    }
+
+    pub(crate) fn apply_response_stateful_mode(
+        &self,
+        req: &CapturedRequest,
+        resp: &mut CapturedResponse,
+        cursors: &mut RuleCursors,
+        allow_body_rewrite: bool,
+    ) -> Option<String> {
+        let general = apply_response_rules_stateful_mode(
+            self.general_rules(),
+            req,
+            resp,
+            cursors,
+            allow_body_rewrite,
+        );
+        let scenario = apply_response_rules_stateful_mode(
+            self.active_rules(),
+            req,
+            resp,
+            cursors,
+            allow_body_rewrite,
+        );
         scenario.or(general)
     }
 
@@ -1153,6 +1539,7 @@ pub fn blank_rule(id: String) -> Rule {
             status: 200,
             headers: Vec::new(),
             body: "{\n  \"mocked\": true\n}".to_string(),
+            body_base64: None,
             content_type: Some("application/json".to_string()),
             content_encoding: None,
         },
@@ -1171,28 +1558,34 @@ pub fn blank_rule(id: String) -> Rule {
 /// raw bytes with no encoding — the user gets *something* to look at rather than
 /// a destroyed gzip stream mislabeled as `application/json`.
 pub fn respond_rule_from_flow(flow: &Flow, id: String) -> Rule {
-    let (status, body, content_type, headers, content_encoding) = match &flow.response {
+    let (status, body, body_base64, content_type, headers, content_encoding) = match &flow.response
+    {
         Some(r) => {
             let ct = r
                 .headers
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                 .map(|(_, v)| v.clone());
-            // The original Content-Encoding token (single-token; a chain is
-            // dropped since the rule's toggle is single-token). Used to set the
-            // rule's `content_encoding` so the engine re-compresses on serve.
-            let original_encoding = crate::body::content_encoding_of(&r.headers);
+            // Preserve only one supported Content-Encoding token. A chain must
+            // be dropped because the rule editor/serving path has one toggle;
+            // keeping just its first token after decoding the full chain would
+            // serve different bytes under a misleading partial encoding.
+            let original_encodings = crate::body::content_encodings_of(&r.headers);
+            let original_encoding = match original_encodings.as_slice() {
+                [encoding] => normalize_encoding(Some(encoding)),
+                _ => None,
+            };
             // Get the body into identity (decoded) form for the editor, and
             // decide whether to keep the encoding toggle.
             //
             // Three cases:
             // 1. decode_body succeeds → the body was raw compressed (a live
             //    capture). Use the decoded text + keep the encoding toggle.
-            // 2. decode_body fails but the body is already textual → the body
-            //    was pre-decoded by an importer (HAR/SAZ both decompress on
-            //    import but keep the Content-Encoding header). Use the body
+            // 2. decode_body fails but the body is already textual → tolerate a
+            //    legacy import (older Germi builds retained Content-Encoding
+            //    beside decoded bytes) or a stale upstream header. Use the body
             //    as-is + KEEP the encoding toggle so the engine re-compresses
-            //    on serve (the wire should match the original).
+            //    on serve (the client still receives the same decoded payload).
             // 3. decode_body fails and the body is NOT textual → genuinely
             //    undecodable binary. Fall back to raw bytes with NO encoding
             //    toggle — serving a truncated/undecodable body labeled gzip
@@ -1202,23 +1595,32 @@ pub fn respond_rule_from_flow(flow: &Flow, id: String) -> Rule {
                 _ if crate::body::looks_textual(&r.body) => (r.body.to_vec(), original_encoding),
                 _ => (r.body.to_vec(), None),
             };
-            // Seed the real response headers — minus content-type (its own field)
-            // and length/encoding/hop-by-hop headers the engine recomputes.
+            // Seed only metadata that remains true for the configured mock.
+            // Body/framing fields are recomputed, while validators, digests,
+            // ranges, and message signatures describe the captured bytes and
+            // become false as soon as Germi decodes, recompresses, or edits them.
             let headers: Vec<(String, String)> = r
                 .headers
                 .iter()
                 .filter(|(k, _)| !is_seed_excluded(k))
                 .cloned()
                 .collect();
+            let body_base64 = (std::str::from_utf8(&decoded).is_err()
+                || !crate::body::looks_textual(&decoded))
+            .then(|| {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.encode(&decoded)
+            });
             (
                 r.status,
                 String::from_utf8_lossy(&decoded).into_owned(),
+                body_base64,
                 ct,
                 headers,
                 encoding,
             )
         }
-        None => (200, String::new(), None, Vec::new(), None),
+        None => (200, String::new(), None, None, Vec::new(), None),
     };
 
     // One rule per request, host-specific: the matcher targets the flow's full
@@ -1244,15 +1646,16 @@ pub fn respond_rule_from_flow(flow: &Flow, id: String) -> Rule {
             status,
             headers,
             body,
+            body_base64,
             content_type,
             content_encoding,
         },
     }
 }
 
-/// Headers that should NOT be copied into a seeded mock — either they have a
-/// dedicated field (content-type) or they're length/encoding/hop-by-hop headers
-/// the engine recomputes.
+/// Headers that should NOT be copied into a seeded mock: dedicated body fields,
+/// hop-by-hop/framing metadata, and integrity/range metadata that describes the
+/// captured bytes rather than the independently configured mock body.
 fn is_seed_excluded(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -1267,31 +1670,63 @@ fn is_seed_excluded(name: &str) -> bool {
             | "te"
             | "trailer"
             | "upgrade"
+            | "etag"
+            | "last-modified"
+            | "content-md5"
+            | "digest"
+            | "content-digest"
+            | "repr-digest"
+            | "content-range"
+            | "signature"
+            | "signature-input"
     )
 }
 
 /// Normalize a `Content-Encoding` toggle value: trim/lowercase, drop empty and
 /// `identity` (both mean "no encoding"). Returns the canonical single token to
 /// stamp as the header value and pass to `compress_body`, or `None` when the
-/// response should be served as identity bytes. Does NOT validate that the
-/// token is a supported encoding — `compress_body` returns `None` for unknown
-/// ones and the caller falls back to identity.
+/// response should be served as identity bytes. Only supported single tokens
+/// are returned. Rejecting a comma-separated chain
+/// matters: compressing once while stamping `gzip, br` would make the client try
+/// to undo two encodings and fail.
 fn normalize_encoding(encoding: Option<&str>) -> Option<String> {
     let enc = encoding?.trim().to_ascii_lowercase();
-    if enc.is_empty() || enc == "identity" {
-        None
-    } else {
-        Some(enc)
+    match enc.as_str() {
+        "gzip" | "x-gzip" => Some("gzip".to_string()),
+        "deflate" | "x-deflate" => Some("deflate".to_string()),
+        "br" => Some(enc),
+        _ => None,
     }
 }
 
 /// Insert or replace a header (case-insensitive on the name).
 fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
-    if let Some(slot) = headers.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
-        slot.1 = value.to_string();
+    let first = headers
+        .iter()
+        .position(|(k, _)| k.eq_ignore_ascii_case(name));
+    headers.retain(|(k, _)| !k.eq_ignore_ascii_case(name));
+    let replacement = (name.to_string(), value.to_string());
+    if let Some(index) = first {
+        headers.insert(index.min(headers.len()), replacement);
     } else {
-        headers.push((name.to_string(), value.to_string()));
+        headers.push(replacement);
     }
+}
+
+/// Apply request-header rules with the same case-insensitive replacement
+/// semantics used by response-header rules and the live wire request.
+pub(crate) fn apply_request_header_edits(
+    headers: &mut Vec<(String, String)>,
+    edits: &[(String, String)],
+) {
+    for (name, value) in edits {
+        set_header(headers, name, value);
+    }
+}
+
+pub(crate) fn valid_header(name: &str, value: &str) -> bool {
+    HeaderName::from_bytes(name.as_bytes()).is_ok()
+        && HeaderValue::from_bytes(value.as_bytes()).is_ok()
 }
 
 /// The status text a rule's action contributes to a `Status`-scope search.
@@ -1338,8 +1773,9 @@ fn action_header_text(action: &Action) -> String {
                 lines.push(format!("content-type: {ct}"));
             }
         }
-        Action::SetRequestHeader { name, value }
-        | Action::SetResponseHeader { name, value } => lines.push(format!("{name}: {value}")),
+        Action::SetRequestHeader { name, value } | Action::SetResponseHeader { name, value } => {
+            lines.push(format!("{name}: {value}"));
+        }
         _ => {}
     }
     lines.join("\n")
@@ -1411,6 +1847,7 @@ mod tests {
                 status: 200,
                 headers: vec![],
                 body: name.to_string(),
+                body_base64: None,
                 content_type: Some("text/plain".to_string()),
                 content_encoding: None,
             },
@@ -1519,8 +1956,7 @@ mod tests {
         use std::io::Write;
         // A gzip-encoded response body: the rewrite must decode it, replace, and
         // strip Content-Encoding so the forwarded identity body is consistent.
-        let mut enc =
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(b"the secret token").unwrap();
         let gz = enc.finish().unwrap();
 
@@ -1558,13 +1994,131 @@ mod tests {
     }
 
     #[test]
+    fn response_body_rewrite_drops_stale_validators_digests_and_signatures() {
+        let rs = RuleSet {
+            rules: vec![Rule {
+                id: "1".into(),
+                enabled: true,
+                fire_limit: None,
+                repeat: false,
+                matcher: Matcher::default(),
+                action: Action::RewriteResponseBody {
+                    find: "old".into(),
+                    replace: "new body".into(),
+                    regex: false,
+                },
+            }],
+        };
+        let mut resp = CapturedResponse {
+            status: 200,
+            version: "HTTP/1.1".into(),
+            headers: vec![
+                ("ETag".into(), "\"old\"".into()),
+                ("Last-Modified".into(), "yesterday".into()),
+                ("Content-Digest".into(), "sha-256=:old:".into()),
+                ("Signature".into(), "sig1=:old:".into()),
+                ("X-Keep".into(), "yes".into()),
+            ],
+            body: b"old".to_vec().into(),
+            timestamp_ms: 0,
+        };
+
+        assert!(rs
+            .apply_response(&req("GET", "https", "x", "/"), &mut resp)
+            .is_some());
+        assert_eq!(resp.body, b"new body".as_slice());
+        assert_eq!(resp.headers, vec![("X-Keep".into(), "yes".into())]);
+    }
+
+    #[test]
+    fn response_body_rewrite_skips_length_changing_partial_content() {
+        let rs = RuleSet {
+            rules: vec![Rule {
+                id: "1".into(),
+                enabled: true,
+                fire_limit: Some(1),
+                repeat: false,
+                matcher: Matcher::default(),
+                action: Action::RewriteResponseBody {
+                    find: "old".into(),
+                    replace: "longer".into(),
+                    regex: false,
+                },
+            }],
+        };
+        let original_headers = vec![("Content-Range".into(), "bytes 0-2/100".into())];
+        let mut resp = CapturedResponse {
+            status: 206,
+            version: "HTTP/1.1".into(),
+            headers: original_headers.clone(),
+            body: b"old".to_vec().into(),
+            timestamp_ms: 0,
+        };
+
+        assert_eq!(
+            rs.apply_response(&req("GET", "https", "x", "/"), &mut resp),
+            None
+        );
+        assert_eq!(resp.body, b"old".as_slice());
+        assert_eq!(resp.headers, original_headers);
+    }
+
+    #[test]
+    fn response_body_rewrite_skips_encoded_partial_content_even_at_equal_decoded_length() {
+        use std::io::Write;
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(b"old").unwrap();
+        let gzip_body = encoder.finish().unwrap();
+        let original_headers = vec![
+            (
+                "Content-Range".into(),
+                format!("bytes 0-{}/{}", gzip_body.len() - 1, gzip_body.len()),
+            ),
+            ("Content-Encoding".into(), "gzip".into()),
+        ];
+        let rules = vec![Rule {
+            id: "1".into(),
+            enabled: true,
+            fire_limit: Some(1),
+            repeat: false,
+            matcher: Matcher::default(),
+            action: Action::RewriteResponseBody {
+                find: "old".into(),
+                replace: "new".into(),
+                regex: false,
+            },
+        }];
+        let mut resp = CapturedResponse {
+            status: 206,
+            version: "HTTP/1.1".into(),
+            headers: original_headers.clone(),
+            body: gzip_body.clone().into(),
+            timestamp_ms: 0,
+        };
+        let mut cursors = RuleCursors::default();
+
+        assert_eq!(
+            apply_response_rules_stateful(
+                &rules,
+                &req("GET", "https", "x", "/"),
+                &mut resp,
+                &mut cursors,
+            ),
+            None
+        );
+        assert_eq!(resp.body, gzip_body);
+        assert_eq!(resp.headers, original_headers);
+        assert!(cursors.allows_fire(&rules[0]));
+    }
+
+    #[test]
     fn response_body_rewrite_noop_when_find_absent() {
         use std::io::Write;
         // The find string never occurs, so the rewrite must be a true no-op: no
         // match reported, body + Content-Encoding untouched, and the one-shot fire
         // budget intact (the bug reported a fire and stripped the encoding anyway).
-        let mut enc =
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(b"nothing to redact here").unwrap();
         let gz = enc.finish().unwrap();
 
@@ -1606,6 +2160,49 @@ mod tests {
             cursors.allows_fire(&rules[0]),
             "a no-op rewrite must not burn the one-shot fire limit"
         );
+    }
+
+    #[test]
+    fn response_body_rewrite_refuses_literal_amplification_past_cap() {
+        assert_eq!(
+            rewrite_text_capped("abcd", "", "xx", false, 12),
+            None,
+            "five empty matches would expand the four-byte input to fourteen bytes"
+        );
+        assert_eq!(
+            rewrite_text_capped("aaaa", "a", "bb", false, 8).as_deref(),
+            Some("bbbbbbbb")
+        );
+    }
+
+    #[test]
+    fn response_body_rewrite_refuses_regex_amplification_past_cap() {
+        assert_eq!(rewrite_text_capped("aaaa", "a", "bbb", true, 11), None);
+        assert_eq!(
+            rewrite_text_capped("ab12", r"(\d+)", "[$1]", true, 6).as_deref(),
+            Some("ab[12]")
+        );
+    }
+
+    #[test]
+    fn replacement_length_matches_regex_expansion_syntax() {
+        let re = Regex::new(r"(?P<word>[a-z]+)-(\d+)").unwrap();
+        let captures = re.captures("abc-42").unwrap();
+        for replacement in [
+            "$0/$word/$2",
+            "${word}-$$-${99}",
+            "$missing!",
+            "trailing $",
+            "${word",
+        ] {
+            let mut expanded = String::new();
+            captures.expand(replacement, &mut expanded);
+            assert_eq!(
+                expanded_replacement_len(&captures, replacement),
+                Some(expanded.len()),
+                "{replacement}"
+            );
+        }
     }
 
     #[test]
@@ -1668,7 +2265,13 @@ mod tests {
             response: Some(CapturedResponse {
                 status: 201,
                 version: "HTTP/1.1".into(),
-                headers: vec![("Content-Type".into(), "application/json".into())],
+                headers: vec![
+                    ("Content-Type".into(), "application/json".into()),
+                    ("ETag".into(), "\"captured\"".into()),
+                    ("Content-Digest".into(), "sha-256=:stale:".into()),
+                    ("Content-Range".into(), "bytes 0-6/100".into()),
+                    ("X-Keep".into(), "yes".into()),
+                ],
                 body: b"{\"a\":1}".to_vec().into(),
                 timestamp_ms: 0,
             }),
@@ -1688,11 +2291,13 @@ mod tests {
                 status,
                 body,
                 content_type,
+                headers,
                 ..
             } => {
                 assert_eq!(status, 201);
                 assert_eq!(body, "{\"a\":1}");
                 assert_eq!(content_type.as_deref(), Some("application/json"));
+                assert_eq!(headers, vec![("X-Keep".into(), "yes".into())]);
             }
             other => panic!("expected Respond, got {other:?}"),
         }
@@ -1745,8 +2350,12 @@ mod tests {
         // is Contains — Exact with an empty URL would silently match nothing.
         let rule = blank_rule("id".into());
         assert_eq!(rule.matcher.url_match, MatchKind::Contains);
-        assert!(rule.matcher.matches(&req("GET", "https", "api.example.com", "/users?page=1")));
-        assert!(rule.matcher.matches(&req("POST", "http", "other.test", "/")));
+        assert!(rule
+            .matcher
+            .matches(&req("GET", "https", "api.example.com", "/users?page=1")));
+        assert!(rule
+            .matcher
+            .matches(&req("POST", "http", "other.test", "/")));
     }
 
     #[test]
@@ -1770,7 +2379,11 @@ mod tests {
         };
         assert_eq!(ar.scenarios[0].rules.len(), 2);
         let outcome = ar.evaluate_request(&req("GET", "https", "x", "/api"));
-        assert_eq!(responded_rule_id(&outcome), Some("a"), "first matching rule wins");
+        assert_eq!(
+            responded_rule_id(&outcome),
+            Some("a"),
+            "first matching rule wins"
+        );
     }
 
     #[test]
@@ -1820,8 +2433,16 @@ mod tests {
 
         let rule = respond_rule_from_flow(&flow, "r".into());
         match &rule.action {
-            Action::Respond { body, content_encoding, .. } => {
-                assert_eq!(body.as_bytes(), original, "seeded body must be the decoded text");
+            Action::Respond {
+                body,
+                content_encoding,
+                ..
+            } => {
+                assert_eq!(
+                    body.as_bytes(),
+                    original,
+                    "seeded body must be the decoded text"
+                );
                 assert_eq!(
                     content_encoding.as_deref(),
                     Some("gzip"),
@@ -1845,7 +2466,11 @@ mod tests {
                 assert!(has_enc, "served response must carry content-encoding: gzip");
                 let decoded = crate::body::try_decompress("gzip", &response.body)
                     .expect("served body must be a valid gzip stream");
-                assert_eq!(decoded, original.to_vec(), "wire body decodes to the original");
+                assert_eq!(
+                    decoded,
+                    original.to_vec(),
+                    "wire body decodes to the original"
+                );
             }
             other => panic!("expected Respond, got {other:?}"),
         }
@@ -1891,13 +2516,63 @@ mod tests {
         };
         let rule = respond_rule_from_flow(&flow, "r".into());
         match rule.action {
-            Action::Respond { body, content_encoding, .. } => {
+            Action::Respond {
+                body,
+                content_encoding,
+                ..
+            } => {
                 assert_eq!(body, "{\"ok\":true}");
                 assert_eq!(
                     content_encoding.as_deref(),
                     Some("gzip"),
                     "a pre-decoded textual body must keep the encoding toggle so the engine re-compresses on serve",
                 );
+            }
+            other => panic!("expected Respond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rule_from_flow_drops_a_chained_encoding_the_single_toggle_cannot_reproduce() {
+        use std::io::Write;
+
+        let original = b"chained response";
+        let mut deflate =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        deflate.write_all(original).unwrap();
+        let deflated = deflate.finish().unwrap();
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(&deflated).unwrap();
+        let encoded = gzip.finish().unwrap();
+
+        let flow = Flow {
+            id: "f".into(),
+            seq: 0,
+            request: req("GET", "https", "x", "/api"),
+            response: Some(CapturedResponse {
+                status: 200,
+                version: "HTTP/1.1".into(),
+                headers: vec![("Content-Encoding".into(), "deflate, gzip".into())],
+                body: encoded.into(),
+                timestamp_ms: 0,
+            }),
+            matched_rule: None,
+            duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
+            availability: None,
+            imported: false,
+        };
+
+        let rule = respond_rule_from_flow(&flow, "r".into());
+        match rule.action {
+            Action::Respond {
+                body,
+                content_encoding,
+                ..
+            } => {
+                assert_eq!(body.as_bytes(), original);
+                assert_eq!(content_encoding, None);
             }
             other => panic!("expected Respond, got {other:?}"),
         }
@@ -1944,7 +2619,9 @@ mod tests {
         };
         let rule = respond_rule_from_flow(&flow, "r".into());
         match rule.action {
-            Action::Respond { content_encoding, .. } => {
+            Action::Respond {
+                content_encoding, ..
+            } => {
                 assert_eq!(
                     content_encoding, None,
                     "an undecodable binary body must not keep the encoding toggle",
@@ -1973,6 +2650,7 @@ mod tests {
                 status: 200,
                 headers: vec![],
                 body: "{\"mocked\":true}".to_string(),
+                body_base64: None,
                 content_type: Some("application/json".to_string()),
                 content_encoding: Some("gzip".to_string()),
             },
@@ -1991,6 +2669,7 @@ mod tests {
                 status: 200,
                 headers: vec![],
                 body: "{\"mocked\":true}".to_string(),
+                body_base64: None,
                 content_type: Some("application/json".to_string()),
                 content_encoding: None,
             },
@@ -2001,12 +2680,15 @@ mod tests {
         match gz_outcome {
             RequestOutcome::Respond { response, .. } => {
                 assert!(
-                    response.headers.iter().any(|(k, v)|
-                        k.eq_ignore_ascii_case("content-encoding") && v == "gzip"),
+                    response
+                        .headers
+                        .iter()
+                        .any(|(k, v)| k.eq_ignore_ascii_case("content-encoding") && v == "gzip"),
                     "gzip toggle must stamp content-encoding: gzip",
                 );
                 assert_ne!(
-                    response.body, b"{\"mocked\":true}".as_slice(),
+                    response.body,
+                    b"{\"mocked\":true}".as_slice(),
                     "wire body must be compressed, not the raw text",
                 );
                 let decoded = crate::body::try_decompress("gzip", &response.body)
@@ -2021,7 +2703,10 @@ mod tests {
         match id_outcome {
             RequestOutcome::Respond { response, .. } => {
                 assert!(
-                    !response.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-encoding")),
+                    !response
+                        .headers
+                        .iter()
+                        .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding")),
                     "identity toggle must not stamp content-encoding",
                 );
                 assert_eq!(response.body, b"{\"mocked\":true}".as_slice());
@@ -2047,8 +2732,12 @@ mod tests {
             },
             action: Action::Respond {
                 status: 200,
-                headers: vec![],
+                headers: vec![
+                    ("Content-Encoding".into(), "gzip".into()),
+                    ("Content-Type".into(), "application/stale".into()),
+                ],
                 body: "hello".to_string(),
+                body_base64: None,
                 content_type: Some("text/plain".to_string()),
                 content_encoding: Some("snappy".to_string()),
             },
@@ -2062,10 +2751,27 @@ mod tests {
                         .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding")),
                     "unsupported encoding must not stamp a content-encoding header",
                 );
-                assert_eq!(response.body, b"hello".as_slice(), "body is sent as identity bytes");
+                assert_eq!(
+                    response.body,
+                    b"hello".as_slice(),
+                    "body is sent as identity bytes"
+                );
+                assert_eq!(
+                    response
+                        .headers
+                        .iter()
+                        .filter(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                        .map(|(_, value)| value.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["text/plain"],
+                    "the dedicated content type replaces free-form stale copies"
+                );
             }
             other => panic!("expected Respond, got {other:?}"),
         }
+        assert_eq!(normalize_encoding(Some("gzip, br")), None);
+        assert_eq!(normalize_encoding(Some("notgzip")), None);
+        assert_eq!(normalize_encoding(Some("x-gzip")), Some("gzip".into()));
     }
 
     #[test]
@@ -2117,9 +2823,15 @@ mod tests {
         let rule = respond_rule_from_flow(&flow, "r".into());
 
         assert_eq!(rule.matcher.url_match, MatchKind::Exact);
-        assert!(rule.matcher.matches(&req("GET", "https", "google.com", "/")));
-        assert!(!rule.matcher.matches(&req("GET", "https", "google.com", "/api/data")));
-        assert!(!rule.matcher.matches(&req("GET", "https", "google.com", "/index.html")));
+        assert!(rule
+            .matcher
+            .matches(&req("GET", "https", "google.com", "/")));
+        assert!(!rule
+            .matcher
+            .matches(&req("GET", "https", "google.com", "/api/data")));
+        assert!(!rule
+            .matcher
+            .matches(&req("GET", "https", "google.com", "/index.html")));
     }
 
     #[test]
@@ -2219,6 +2931,7 @@ mod tests {
                 status,
                 headers: vec![],
                 body: String::new(),
+                body_base64: None,
                 content_type: None,
                 content_encoding: None,
             },
@@ -2346,7 +3059,12 @@ mod tests {
             "a never-firing rule records no hits"
         );
 
-        let repeat_zero = vec![respond_rule_limited("never-loop", "/zeroloop", Some(0), true)];
+        let repeat_zero = vec![respond_rule_limited(
+            "never-loop",
+            "/zeroloop",
+            Some(0),
+            true,
+        )];
         let mut repeat_cursors = RuleCursors::default();
         assert!(
             matches!(
@@ -2428,7 +3146,26 @@ mod tests {
     }
 
     #[test]
-    fn set_request_header_does_not_consume() {
+    fn maplocal_read_is_hard_capped_even_when_metadata_was_acceptable() {
+        let path = std::env::temp_dir().join(format!(
+            "germi-maplocal-cap-{}-{}",
+            std::process::id(),
+            crate::flow::now_ms()
+        ));
+        std::fs::write(&path, b"12345").expect("write fixture");
+        assert_eq!(
+            read_map_local_capped(path.to_str().expect("utf8 temp path"), 5),
+            Some(b"12345".to_vec())
+        );
+        assert_eq!(
+            read_map_local_capped(path.to_str().expect("utf8 temp path"), 4),
+            None
+        );
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn set_request_header_honors_one_shot_fire_limit() {
         let rules = vec![Rule {
             id: "hdr".into(),
             enabled: true,
@@ -2447,21 +3184,182 @@ mod tests {
         let mut cursors = RuleCursors::default();
         let r = || req("GET", "https", "h", "/h");
 
-        for _ in 0..3 {
-            match evaluate_request_rules_stateful(&rules, &r(), &mut cursors) {
-                RequestOutcome::Continue { set_headers } => assert_eq!(
-                    set_headers,
-                    vec![("x-germi".to_string(), "1".to_string())],
-                    "the header edit must keep applying every request"
-                ),
-                other => panic!("expected Continue with header, got {other:?}"),
+        match evaluate_request_rules_stateful(&rules, &r(), &mut cursors) {
+            RequestOutcome::Continue { set_headers } => {
+                assert_eq!(set_headers, vec![("x-germi".to_string(), "1".to_string())]);
             }
+            other => panic!("expected Continue with header, got {other:?}"),
         }
+        assert!(matches!(
+            evaluate_request_rules_stateful(&rules, &r(), &mut cursors),
+            RequestOutcome::Continue { set_headers } if set_headers.is_empty()
+        ));
         assert_eq!(
             cursors.snapshot().get("hdr").copied().unwrap_or(0),
-            0,
-            "a non-short-circuiting header edit never consumes a fire"
+            1,
+            "a pass-through request edit spends its configured fire budget"
         );
+    }
+
+    #[test]
+    fn invalid_request_header_rule_is_a_noop_and_does_not_spend_its_limit() {
+        let mut rule = respond_rule_limited("hdr", "/h", Some(1), false);
+        rule.action = Action::SetRequestHeader {
+            name: "bad header".into(),
+            value: "value".into(),
+        };
+        let mut cursors = RuleCursors::default();
+
+        assert!(matches!(
+            evaluate_request_rules_stateful(
+                std::slice::from_ref(&rule),
+                &req("GET", "https", "h", "/h"),
+                &mut cursors,
+            ),
+            RequestOutcome::Continue { set_headers } if set_headers.is_empty()
+        ));
+        assert!(cursors.snapshot().is_empty());
+    }
+
+    #[test]
+    fn repeating_request_header_fires_once_per_request() {
+        let mut rule = respond_rule_limited("hdr", "/h", Some(1), true);
+        rule.action = Action::SetRequestHeader {
+            name: "x-germi".into(),
+            value: "1".into(),
+        };
+        let mut cursors = RuleCursors::default();
+        for _ in 0..3 {
+            assert!(matches!(
+                evaluate_request_rules_stateful(
+                    std::slice::from_ref(&rule),
+                    &req("GET", "https", "h", "/h"),
+                    &mut cursors,
+                ),
+                RequestOutcome::Continue { set_headers }
+                    if set_headers == vec![("x-germi".to_string(), "1".to_string())]
+            ));
+        }
+    }
+
+    #[test]
+    fn unrelated_request_header_does_not_starve_repeating_mock() {
+        let mut header = respond_rule_limited("header", "/h", None, false);
+        header.action = Action::SetRequestHeader {
+            name: "x-germi".into(),
+            value: "1".into(),
+        };
+        let mock = respond_rule_limited("mock", "/h", Some(1), true);
+        let rules = vec![header, mock];
+        let mut cursors = RuleCursors::default();
+
+        for request_number in 1..=3 {
+            assert_eq!(
+                responded_rule_id(&evaluate_request_rules_stateful(
+                    &rules,
+                    &req("GET", "https", "h", "/h"),
+                    &mut cursors,
+                )),
+                Some("mock"),
+                "request {request_number}: the unlimited header must not prevent the mock cycle from resetting"
+            );
+        }
+    }
+
+    #[test]
+    fn response_header_replacement_removes_case_insensitive_duplicates() {
+        let rules = vec![Rule {
+            id: "header".into(),
+            enabled: true,
+            fire_limit: None,
+            repeat: false,
+            matcher: Matcher::default(),
+            action: Action::SetResponseHeader {
+                name: "X-Test".into(),
+                value: "new".into(),
+            },
+        }];
+        let mut response = CapturedResponse {
+            status: 200,
+            version: "HTTP/1.1".into(),
+            headers: vec![
+                ("x-test".into(), "old-a".into()),
+                ("content-type".into(), "text/plain".into()),
+                ("X-TEST".into(), "old-b".into()),
+            ],
+            body: bytes::Bytes::new(),
+            timestamp_ms: 0,
+        };
+        apply_response_rules(&rules, &req("GET", "https", "h", "/"), &mut response);
+        let matching: Vec<_> = response
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("x-test"))
+            .collect();
+        assert_eq!(matching, vec![&("X-Test".to_string(), "new".to_string())]);
+    }
+
+    #[test]
+    fn invalid_response_header_rule_preserves_the_response_and_fire_limit() {
+        let mut rule = respond_rule_limited("header", "/", Some(1), false);
+        rule.action = Action::SetResponseHeader {
+            name: "x-test".into(),
+            value: "bad\nvalue".into(),
+        };
+        let mut response = CapturedResponse {
+            status: 200,
+            version: "HTTP/1.1".into(),
+            headers: vec![("x-test".into(), "original".into())],
+            body: bytes::Bytes::new(),
+            timestamp_ms: 0,
+        };
+        let mut cursors = RuleCursors::default();
+
+        let matched = apply_response_rules_stateful(
+            std::slice::from_ref(&rule),
+            &req("GET", "https", "h", "/"),
+            &mut response,
+            &mut cursors,
+        );
+        assert!(matched.is_none());
+        assert_eq!(response.headers, vec![("x-test".into(), "original".into())]);
+        assert!(cursors.snapshot().is_empty());
+    }
+
+    #[test]
+    fn binary_capture_mock_replays_exact_bytes() {
+        let binary = vec![0x00, 0xff, 0xfe, 0x80, 0x41, 0x00, 0x9c];
+        let flow = Flow {
+            id: "binary".into(),
+            seq: 1,
+            request: req("GET", "https", "example.test:8443", "/asset"),
+            response: Some(CapturedResponse {
+                status: 200,
+                version: "HTTP/1.1".into(),
+                headers: vec![("content-type".into(), "application/octet-stream".into())],
+                body: binary.clone().into(),
+                timestamp_ms: 0,
+            }),
+            matched_rule: None,
+            duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
+            availability: None,
+            imported: false,
+        };
+        let rule = respond_rule_from_flow(&flow, "mock".into());
+        assert_eq!(rule.matcher.url, "https://example.test:8443/asset");
+        assert!(matches!(
+            &rule.action,
+            Action::Respond {
+                body_base64: Some(_),
+                ..
+            }
+        ));
+        match evaluate_request_rules(&[rule], &flow.request) {
+            RequestOutcome::Respond { response, .. } => assert_eq!(response.body.as_ref(), binary),
+            other => panic!("expected binary Respond, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2612,6 +3510,15 @@ mod tests {
     }
 
     #[test]
+    fn rule_hit_counters_saturate_instead_of_wrapping_or_panicking() {
+        let rule = respond_rule("max", "/max");
+        let mut cursors = RuleCursors::default();
+        cursors.restore(HashMap::from([(rule.id.clone(), u32::MAX)]));
+        cursors.record_fire(&rule);
+        assert_eq!(cursors.snapshot().get(&rule.id), Some(&u32::MAX));
+    }
+
+    #[test]
     fn evaluate_request_stateful_off_is_continue_and_pure() {
         let ar = AutoResponder {
             scenarios: vec![Scenario {
@@ -2697,6 +3604,41 @@ mod tests {
                     RequestOutcome::Continue { .. }
                 ),
                 "a dead (limit 0) repeat sibling must not revive the spent one-shot"
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_repeat_sibling_does_not_starve_spent_mock() {
+        let mut header = respond_rule_limited("header", "/loop", None, false);
+        header.id = "header".into();
+        header.action = Action::SetRequestHeader {
+            name: "x-pass".into(),
+            value: "yes".into(),
+        };
+
+        let mut missing = respond_rule_limited("missing", "/loop", Some(1), true);
+        missing.id = "missing".into();
+        missing.action = Action::MapLocal {
+            path: "/path/that/does/not/exist/germi-repeat".into(),
+            status: 200,
+        };
+
+        let mut looping = respond_rule_limited("looping", "/loop", Some(1), true);
+        looping.id = "looping".into();
+        let rules = vec![header, missing, looping];
+        let mut cursors = RuleCursors::default();
+        let request = || req("GET", "https", "h", "/loop");
+
+        for _ in 0..4 {
+            assert_eq!(
+                responded_rule_id(&evaluate_request_rules_stateful(
+                    &rules,
+                    &request(),
+                    &mut cursors
+                )),
+                Some("looping"),
+                "a skipped repeat sibling must not block the usable mock from cycling"
             );
         }
     }
@@ -2814,7 +3756,10 @@ mod tests {
                 &[
                     ("origin", "http://localhost:3000"),
                     ("access-control-request-method", "POST"),
-                    ("access-control-request-headers", "authorization, content-type"),
+                    (
+                        "access-control-request-headers",
+                        "authorization, content-type",
+                    ),
                 ],
             ),
         );
@@ -2840,7 +3785,9 @@ mod tests {
             header(&response.headers, "access-control-allow-credentials"),
             Some("true")
         );
-        assert!(header(&response.headers, "vary").unwrap().contains("Origin"));
+        assert!(header(&response.headers, "vary")
+            .unwrap()
+            .contains("Origin"));
     }
 
     #[test]
@@ -2883,8 +3830,17 @@ mod tests {
         response.headers = vec![
             ("content-type".into(), "application/json".into()),
             ("x-total-count".into(), "42".into()),
+            ("content-encoding".into(), "gzip".into()),
             ("set-cookie".into(), "sid=1".into()),
+            (
+                "access-control-expose-headers".into(),
+                "X-Virtual, X-Total-Count".into(),
+            ),
             ("access-control-allow-origin".into(), "*".into()),
+            (
+                "Access-Control-Allow-Origin".into(),
+                "https://stale.example".into(),
+            ),
         ];
         assert!(apply_response_rules(&rules, &r, &mut response).is_some());
         assert_eq!(
@@ -2893,13 +3849,22 @@ mod tests {
             "the echo overwrites a stale value — `*` breaks credentialed requests"
         );
         assert_eq!(
+            response
+                .headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("access-control-allow-origin"))
+                .count(),
+            1,
+            "forcing CORS must remove duplicate singleton headers"
+        );
+        assert_eq!(
             header(&response.headers, "access-control-allow-credentials"),
             Some("true")
         );
         assert_eq!(
             header(&response.headers, "access-control-expose-headers"),
-            Some("x-total-count"),
-            "derived from the response's non-safelisted headers"
+            Some("X-Virtual, X-Total-Count, content-encoding"),
+            "preserves upstream names and derives actual non-safelisted headers"
         );
         assert_eq!(header(&response.headers, "vary"), Some("Origin"));
     }
@@ -2951,6 +3916,7 @@ mod tests {
                 status: 200,
                 headers: vec![],
                 body: "{}".into(),
+                body_base64: None,
                 content_type: None,
                 content_encoding: None,
             },
@@ -3055,7 +4021,11 @@ mod tests {
         }
     }
 
-    fn ar_with(general: Vec<Rule>, active: Option<(&str, Vec<Rule>)>, general_active: bool) -> AutoResponder {
+    fn ar_with(
+        general: Vec<Rule>,
+        active: Option<(&str, Vec<Rule>)>,
+        general_active: bool,
+    ) -> AutoResponder {
         let mut scenarios = vec![general_scenario(general)];
         let active_id = active.as_ref().map(|(id, _)| (*id).to_string());
         if let Some((id, rules)) = active {
@@ -3077,7 +4047,10 @@ mod tests {
         );
         match ar.evaluate_request(&req("GET", "https", "h", "/x")) {
             RequestOutcome::Respond { rule_id, .. } => {
-                assert_eq!(rule_id, "general-mock", "the General layer is evaluated first");
+                assert_eq!(
+                    rule_id, "general-mock",
+                    "the General layer is evaluated first"
+                );
             }
             other => panic!("expected a General respond, got {other:?}"),
         }
@@ -3107,10 +4080,37 @@ mod tests {
         );
         match ar.evaluate_request(&req("GET", "https", "h", "/x")) {
             RequestOutcome::Continue { set_headers } => {
-                assert!(set_headers.iter().any(|(k, v)| k == "x-general" && v == "1"));
+                assert!(set_headers
+                    .iter()
+                    .any(|(k, v)| k == "x-general" && v == "1"));
                 assert!(set_headers.iter().any(|(k, v)| k == "x-active" && v == "2"));
             }
             other => panic!("expected Continue with merged headers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn general_request_headers_survive_active_short_circuit() {
+        let ar = ar_with(
+            vec![req_header_rule("g", "/x", "x-general", "1")],
+            Some(("A", vec![respond_rule("active-mock", "/x")])),
+            true,
+        );
+
+        match ar.evaluate_request(&req("GET", "https", "h", "/x")) {
+            RequestOutcome::Respond {
+                rule_id,
+                set_headers,
+                ..
+            } => {
+                assert_eq!(rule_id, "active-mock");
+                assert_eq!(
+                    set_headers,
+                    vec![("x-general".to_string(), "1".to_string())],
+                    "a mock must retain request edits accumulated in General"
+                );
+            }
+            other => panic!("expected active Respond with General headers, got {other:?}"),
         }
     }
 
@@ -3124,13 +4124,23 @@ mod tests {
         let mut response = resp();
         let fired = ar.apply_response(&req("GET", "https", "h", "/x"), &mut response);
         assert!(fired.is_some(), "at least one layer changed the response");
-        assert!(response.headers.iter().any(|(k, v)| k == "x-general" && v == "1"));
-        assert!(response.headers.iter().any(|(k, v)| k == "x-active" && v == "2"));
+        assert!(response
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-general" && v == "1"));
+        assert!(response
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-active" && v == "2"));
     }
 
     #[test]
     fn general_applies_when_active_is_off() {
-        let ar = ar_with(vec![resp_header_rule("g", "/x", "x-general", "1")], None, true);
+        let ar = ar_with(
+            vec![resp_header_rule("g", "/x", "x-general", "1")],
+            None,
+            true,
+        );
         let mut response = resp();
         assert_eq!(
             ar.apply_response(&req("GET", "https", "h", "/x"), &mut response)
@@ -3138,7 +4148,10 @@ mod tests {
             Some("/x"),
             "General response rules apply even when the active scenario is Off"
         );
-        assert!(response.headers.iter().any(|(k, v)| k == "x-general" && v == "1"));
+        assert!(response
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-general" && v == "1"));
     }
 
     #[test]
@@ -3157,7 +4170,10 @@ mod tests {
             false,
         );
         let ids_off = off.evaluated_rule_ids();
-        assert!(!ids_off.contains("g1"), "General off ⇒ its ids are not live");
+        assert!(
+            !ids_off.contains("g1"),
+            "General off ⇒ its ids are not live"
+        );
         assert!(ids_off.contains("a1"));
     }
 
@@ -3168,29 +4184,45 @@ mod tests {
             active_scenario_id: Some(GENERAL_SCENARIO_ID.to_string()),
             general_active: true,
         };
-        assert!(ar.active().is_none(), "General can never be the active scenario");
+        assert!(
+            ar.active().is_none(),
+            "General can never be the active scenario"
+        );
     }
 
     #[test]
-    fn ensure_general_seeds_first_and_unaliases_active() {
+    fn ensure_general_seeds_first_and_normalizes_active() {
         let mut ar = AutoResponder {
             scenarios: vec![user_scenario("A", vec![])],
             active_scenario_id: Some(GENERAL_SCENARIO_ID.to_string()),
             general_active: true,
         };
         ar.ensure_general();
-        assert_eq!(ar.scenarios[0].id, GENERAL_SCENARIO_ID, "General is seeded first");
+        assert_eq!(
+            ar.scenarios[0].id, GENERAL_SCENARIO_ID,
+            "General is seeded first"
+        );
         assert_eq!(ar.scenarios.len(), 2);
         assert_eq!(
             ar.active_scenario_id, None,
             "an active pointer aliasing General is cleared"
         );
 
-        // Idempotent + relocates an out-of-place General to the front.
+        // Idempotent + relocates an out-of-place General to the front and
+        // restores its fixed display name.
         ar.scenarios.swap(0, 1);
+        ar.scenarios[1].name = "Renamed by an older build".to_string();
         ar.ensure_general();
         assert_eq!(ar.scenarios[0].id, GENERAL_SCENARIO_ID);
+        assert_eq!(ar.scenarios[0].name, GENERAL_SCENARIO_NAME);
         assert_eq!(ar.scenarios.len(), 2, "no duplicate General is added");
+
+        ar.active_scenario_id = Some("missing".to_string());
+        ar.ensure_general();
+        assert_eq!(
+            ar.active_scenario_id, None,
+            "a dangling persisted active pointer is normalized to Off"
+        );
     }
 
     fn map_remote_rule(id: &str, pattern: &str, kind: MatchKind, target: &str) -> Rule {
@@ -3245,7 +4277,10 @@ mod tests {
             MatchKind::Regex,
             "http://localhost:8080/${rest}",
         )];
-        match evaluate_request_rules(&rules, &req("GET", "https", "api.test", "/api/users?page=2")) {
+        match evaluate_request_rules(
+            &rules,
+            &req("GET", "https", "api.test", "/api/users?page=2"),
+        ) {
             RequestOutcome::MapRemote { url, .. } => {
                 assert_eq!(url, "http://localhost:8080/users?page=2");
             }
@@ -3297,7 +4332,9 @@ mod tests {
             true,
         );
         match ar.evaluate_request(&req("GET", "https", "h", "/x")) {
-            RequestOutcome::MapRemote { url, set_headers, .. } => {
+            RequestOutcome::MapRemote {
+                url, set_headers, ..
+            } => {
                 assert_eq!(url, "http://localhost:1234/x");
                 assert_eq!(
                     set_headers,
@@ -3337,16 +4374,41 @@ mod tests {
         assert_eq!(brace_numeric_refs("a_$1_1.js"), "a_${1}_1.js");
         assert_eq!(brace_numeric_refs("$10x"), "${10}x");
         assert_eq!(brace_numeric_refs("$$1"), "$$1", "escaped $ is untouched");
-        assert_eq!(brace_numeric_refs("${1}b"), "${1}b", "already braced is untouched");
-        assert_eq!(brace_numeric_refs("$name"), "$name", "named refs are untouched");
+        assert_eq!(
+            brace_numeric_refs("${1}b"),
+            "${1}b",
+            "already braced is untouched"
+        );
+        assert_eq!(
+            brace_numeric_refs("$name"),
+            "$name",
+            "named refs are untouched"
+        );
         assert_eq!(brace_numeric_refs("end$"), "end$");
     }
 
     #[test]
     fn url_scope_search_matches_map_remote_target() {
-        let rule = map_remote_rule("m", "/api", MatchKind::Contains, "http://localhost:8080/mock");
-        assert!(rule_matches_scope(&rule, RuleSearchScope::Url, "localhost:8080"));
-        assert!(rule_matches_scope(&rule, RuleSearchScope::All, "localhost:8080"));
-        assert!(!rule_matches_scope(&rule, RuleSearchScope::Url, "elsewhere"));
+        let rule = map_remote_rule(
+            "m",
+            "/api",
+            MatchKind::Contains,
+            "http://localhost:8080/mock",
+        );
+        assert!(rule_matches_scope(
+            &rule,
+            RuleSearchScope::Url,
+            "localhost:8080"
+        ));
+        assert!(rule_matches_scope(
+            &rule,
+            RuleSearchScope::All,
+            "localhost:8080"
+        ));
+        assert!(!rule_matches_scope(
+            &rule,
+            RuleSearchScope::Url,
+            "elsewhere"
+        ));
     }
 }

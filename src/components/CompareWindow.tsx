@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { compact } from "es-toolkit";
@@ -38,32 +38,47 @@ export function CompareWindow() {
   const [seed, setSeed] = useState<ResolvedSeed | null>(null);
   const [generation, setGeneration] = useState(0);
   const [loading, setLoading] = useState(true);
+  const loadGeneration = useRef(0);
 
   const load = useCallback(async () => {
+    const request = ++loadGeneration.current;
     setLoading(true);
     try {
-      setSeed(await resolveSeed());
+      const next = await resolveSeed();
+      if (request !== loadGeneration.current) return;
+      setSeed(next);
       setGeneration((g) => g + 1);
     } catch (e) {
-      notify("error", String(e));
+      if (request === loadGeneration.current) notify("error", String(e));
     } finally {
-      setLoading(false);
+      if (request === loadGeneration.current) setLoading(false);
     }
   }, [notify]);
 
   useEffect(() => {
-    void load();
     let active = true;
     let unlisten: (() => void) | undefined;
-    void onCompareSeedChanged(() => void load()).then((fn) => {
-      if (active) unlisten = fn;
-      else fn();
-    });
+    // Install the event listener before taking the mailbox snapshot. Loading
+    // first leaves a gap where a rapid re-seed is neither in that snapshot nor
+    // observed as an event, stranding this window on the previous selection.
+    void (async () => {
+      try {
+        const fn = await onCompareSeedChanged(() => void load());
+        if (!active) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+        await load();
+      } catch (error) {
+        if (active) notify("error", String(error));
+      }
+    })();
     return () => {
       active = false;
       unlisten?.();
     };
-  }, [load]);
+  }, [load, notify]);
 
   return (
     <ToastProvider value={notify}>

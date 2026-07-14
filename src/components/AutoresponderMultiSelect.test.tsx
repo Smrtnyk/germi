@@ -258,4 +258,14 @@ describe("RuleBulkSelection", () => {
     await screen.getByRole("button", { name: "Clear selection" }).click();
     expect(onClear).toHaveBeenCalledOnce();
   });
+
+  it("blocks bulk deletion when the selection contains a detached editor", async () => {
+    const onDelete = vi.fn();
+    const screen = await render(
+      <RuleBulkSelection count={2} onDelete={onDelete} onClear={vi.fn()} deleteDisabled />,
+    );
+
+    await expect.element(screen.getByRole("button", { name: "Delete 2 rules" })).toBeDisabled();
+    expect(onDelete).not.toHaveBeenCalled();
+  });
 });

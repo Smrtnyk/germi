@@ -4,10 +4,26 @@ import type { Script, ScriptDiagnostic } from "./types";
  *  every response (real or mocked). The motivating use case — what a Fiddler
  *  OnBeforeResponse script does — in a few lines. */
 export const CORS_TEMPLATE = `fn on_response(req, res) {
-    res.set_header("Access-Control-Allow-Origin", "*");
-    res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    res.set_header("Access-Control-Allow-Headers", "*");
-    res.set_header("Access-Control-Allow-Credentials", "true");
+    let origin = req.header("Origin");
+    if origin != "" {
+        res.set_header("Access-Control-Allow-Origin", origin);
+        res.set_header("Access-Control-Allow-Credentials", "true");
+        res.add_header("Vary", "Origin");
+
+        let requested_method = req.header("Access-Control-Request-Method");
+        if requested_method != "" {
+            res.add_header("Vary", "Access-Control-Request-Method");
+            res.set_header("Access-Control-Allow-Methods", requested_method);
+            let requested_headers = req.header("Access-Control-Request-Headers");
+            if requested_headers != "" {
+                res.add_header("Vary", "Access-Control-Request-Headers");
+                res.set_header("Access-Control-Allow-Headers", requested_headers);
+            }
+            if req.method == "OPTIONS" {
+                res.set_status(204);
+            }
+        }
+    }
 }
 `;
 
@@ -26,7 +42,9 @@ const STARTER_TEMPLATE = `// Scripts run on every request and response, includin
 //   }
 //
 // Read:  req.method, req.url, req.host, req.path, req.query, req.status,
-//        req.header(name), req.has_header(name), req.body
+//        req.header(name), req.has_header(name), req.body_complete, req.body
+// Bodies over the capture limit (or incomplete streams) set body_complete=false;
+// check it before reading body. Incomplete or non-UTF-8 bodies reject body reads.
 // Write: set_header(name, value), add_header(name, value),
 //        remove_header(name), res.set_status(code)
 `;

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use proxy_core::{
     Action, AutoResponder, MatchKind, Rule, Scenario, GENERAL_SCENARIO_ID, GENERAL_SCENARIO_NAME,
 };
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
 const DB_FILE: &str = "autoresponder.sqlite3";
 const SORT_STEP: f64 = 1024.0;
@@ -27,20 +27,55 @@ pub struct RuleStore {
 }
 
 impl RuleStore {
+    fn empty_autoresponder() -> AutoResponder {
+        let mut autoresponder = AutoResponder::default();
+        autoresponder.ensure_general();
+        autoresponder
+    }
+
     pub fn open(dir: &Path, read_only: bool) -> Result<(Self, AutoResponder), String> {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let store = Self {
             path: dir.join(DB_FILE),
             read_only,
         };
-        let mut connection = store.connect()?;
+        // A viewer must not create the shared database (or its parent) merely
+        // by opening. With no durable document yet, show the same empty General
+        // layer a fresh writable instance would seed later.
+        if read_only && !store.path.is_file() {
+            return Ok((store, Self::empty_autoresponder()));
+        }
+        if !read_only {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        let mut connection = match store.connect() {
+            Ok(connection) => connection,
+            Err(error) if read_only => {
+                // The viewer does not expose autoresponder controls. A writer may
+                // also be between file creation and schema commit, or the shared
+                // file may be from an incompatible/corrupt build. Neither should
+                // make an otherwise independent capture viewer fail to launch.
+                tracing::warn!(%error, "viewer could not open autoresponder database; using an empty view");
+                return Ok((store, Self::empty_autoresponder()));
+            }
+            Err(error) => return Err(error),
+        };
         // Self-heal a database written by an older build: if the `rules` table has
         // a different shape than the current schema (e.g. the pre-#74 `name`
         // column), `CREATE TABLE IF NOT EXISTS` would leave it as-is and every rule
         // insert would fail against the stale constraint. Rebuild the autoresponder
         // tables instead. A viewer opens read-only and must never mutate the shared
         // DB, so only the writable (capturing) instance heals.
-        if !read_only && Self::rules_schema_stale(&connection)? {
+        if read_only {
+            let autoresponder = match Self::load_with_connection(&connection) {
+                Ok(autoresponder) => autoresponder,
+                Err(error) => {
+                    tracing::warn!(%error, "viewer could not read autoresponder database; using an empty view");
+                    Self::empty_autoresponder()
+                }
+            };
+            return Ok((store, autoresponder));
+        }
+        if Self::rules_schema_stale(&connection)? {
             Self::rebuild_schema(&mut connection)?;
         } else {
             Self::create_schema(&connection)?;
@@ -49,15 +84,15 @@ impl RuleStore {
         // Persist the built-in General scenario row for a writable instance so a
         // rule inserted into it later has a valid parent (the FK). `load_*`
         // already guarantees it in-memory via `ensure_general`; this makes the
-        // seeded row durable. INSERT OR IGNORE keeps an existing one untouched.
-        if !read_only {
-            connection
-                .execute(
-                    "INSERT OR IGNORE INTO scenarios (id, name, sort_key) VALUES (?1, ?2, ?3)",
-                    params![GENERAL_SCENARIO_ID, GENERAL_SCENARIO_NAME, -SORT_STEP],
-                )
-                .map_err(|e| e.to_string())?;
-        }
+        // seeded row durable. On conflict, restore the built-in row's fixed
+        // name without disturbing its existing ordering key or rules.
+        connection
+            .execute(
+                "INSERT INTO scenarios (id, name, sort_key) VALUES (?1, ?2, ?3)\
+                 ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+                params![GENERAL_SCENARIO_ID, GENERAL_SCENARIO_NAME, -SORT_STEP],
+            )
+            .map_err(|e| e.to_string())?;
         Ok((store, autoresponder))
     }
 
@@ -127,18 +162,32 @@ impl RuleStore {
     }
 
     fn connect(&self) -> Result<Connection, String> {
-        let connection = Connection::open(&self.path).map_err(|e| e.to_string())?;
-        connection
-            .execute_batch(
-                "PRAGMA foreign_keys = ON;
-                 PRAGMA journal_mode = WAL;
-                 PRAGMA synchronous = NORMAL;
-                 -- A viewer instance shares this DB with the capturing one; wait
-                 -- out a transient write lock instead of failing a mutation with a
-                 -- raw \"database is locked\" surfaced to the UI.
-                 PRAGMA busy_timeout = 5000;",
-            )
-            .map_err(|e| e.to_string())?;
+        let connection = if self.read_only {
+            Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        } else {
+            Connection::open(&self.path)
+        }
+        .map_err(|e| e.to_string())?;
+        if self.read_only {
+            connection
+                .execute_batch(
+                    "PRAGMA query_only = ON;
+                     PRAGMA busy_timeout = 5000;",
+                )
+                .map_err(|e| e.to_string())?;
+        } else {
+            connection
+                .execute_batch(
+                    "PRAGMA foreign_keys = ON;
+                     PRAGMA journal_mode = WAL;
+                     PRAGMA synchronous = NORMAL;
+                     -- A viewer instance shares this DB with the capturing one; wait
+                     -- out a transient write lock instead of failing a mutation with a
+                     -- raw \"database is locked\" surfaced to the UI.
+                     PRAGMA busy_timeout = 5000;",
+                )
+                .map_err(|e| e.to_string())?;
+        }
         Ok(connection)
     }
 
@@ -176,6 +225,7 @@ impl RuleStore {
             .map_err(|e| e.to_string())
     }
 
+    #[cfg(test)]
     pub fn load(&self) -> Result<AutoResponder, String> {
         Self::load_with_connection(&self.connect()?)
     }
@@ -284,12 +334,7 @@ impl RuleStore {
                 )
                 .map_err(|e| e.to_string())?;
             for (rule_index, rule) in scenario.rules.iter().enumerate() {
-                insert_rule_row(
-                    transaction,
-                    &scenario.id,
-                    sort_key(rule_index),
-                    rule,
-                )?;
+                insert_rule_row(transaction, &scenario.id, sort_key(rule_index), rule)?;
             }
         }
         set_active_metadata(transaction, autoresponder.active_scenario_id.as_deref())?;
@@ -317,37 +362,58 @@ impl RuleStore {
         transaction.commit().map_err(|e| e.to_string())
     }
 
+    #[cfg(test)]
     pub fn insert_scenario(&self, scenario: &Scenario) -> Result<(), String> {
+        self.insert_scenario_inner(scenario, false)
+    }
+
+    /// Insert a newly-created scenario and move the durable active pointer in
+    /// one `SQLite` transaction. The live controller performs the same combined
+    /// mutation, so either both rows commit or neither does.
+    pub fn insert_scenario_and_activate(&self, scenario: &Scenario) -> Result<(), String> {
+        self.insert_scenario_inner(scenario, true)
+    }
+
+    fn insert_scenario_inner(&self, scenario: &Scenario, activate: bool) -> Result<(), String> {
         if self.read_only {
             return Ok(());
         }
-        let connection = self.connect()?;
-        let last = connection
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction().map_err(|e| e.to_string())?;
+        let last = transaction
             .query_row("SELECT MAX(sort_key) FROM scenarios", [], |row| {
                 row.get::<_, Option<f64>>(0)
             })
             .map_err(|e| e.to_string())?
             .unwrap_or(0.0);
-        connection
+        transaction
             .execute(
                 "INSERT INTO scenarios (id, name, sort_key) VALUES (?1, ?2, ?3)",
                 params![scenario.id, scenario.name, last + SORT_STEP],
             )
             .map_err(|e| e.to_string())?;
-        Ok(())
+        if activate {
+            set_active_metadata(&transaction, Some(scenario.id.as_str()))?;
+        }
+        transaction.commit().map_err(|e| e.to_string())
     }
 
     pub fn rename_scenario(&self, scenario_id: &str, name: &str) -> Result<(), String> {
         if self.read_only {
             return Ok(());
         }
-        self.connect()?
+        let changed = self
+            .connect()?
             .execute(
                 "UPDATE scenarios SET name = ?2 WHERE id = ?1",
                 params![scenario_id, name],
             )
             .map_err(|e| e.to_string())?;
-        Ok(())
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err("scenario not found".to_string())
+        }
     }
 
     pub fn delete_scenario(&self, scenario_id: &str) -> Result<(), String> {
@@ -356,9 +422,12 @@ impl RuleStore {
         }
         let mut connection = self.connect()?;
         let transaction = connection.transaction().map_err(|e| e.to_string())?;
-        transaction
+        let changed = transaction
             .execute("DELETE FROM scenarios WHERE id = ?1", [scenario_id])
             .map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("scenario not found".to_string());
+        }
         transaction
             .execute(
                 "UPDATE metadata SET value = NULL
@@ -378,9 +447,11 @@ impl RuleStore {
         if self.read_only {
             return Ok(());
         }
-        let connection = self.connect()?;
-        let key = insertion_key(&connection, scenario_id, after_rule_id)?;
-        insert_rule_connection(&connection, scenario_id, key, rule)
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction().map_err(|e| e.to_string())?;
+        let key = insertion_key(&transaction, scenario_id, after_rule_id)?;
+        insert_rule_row(&transaction, scenario_id, key, rule)?;
+        transaction.commit().map_err(|e| e.to_string())
     }
 
     pub fn update_rule(&self, scenario_id: &str, rule: &Rule) -> Result<(), String> {
@@ -390,7 +461,7 @@ impl RuleStore {
         let connection = self.connect()?;
         let (kind, status, content_type, action_name) = action_columns(&rule.action);
         let json = serde_json::to_string(rule).map_err(|e| e.to_string())?;
-        connection
+        let changed = connection
             .execute(
                 "UPDATE rules SET
                     enabled = ?3, fire_limit = ?4, repeat = ?5,
@@ -415,20 +486,46 @@ impl RuleStore {
                 ],
             )
             .map_err(|e| e.to_string())?;
-        Ok(())
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err("rule not found".to_string())
+        }
     }
 
     pub fn delete_rule(&self, scenario_id: &str, rule_id: &str) -> Result<(), String> {
         if self.read_only {
             return Ok(());
         }
-        self.connect()?
+        let changed = self
+            .connect()?
             .execute(
                 "DELETE FROM rules WHERE scenario_id = ?1 AND id = ?2",
                 params![scenario_id, rule_id],
             )
             .map_err(|e| e.to_string())?;
-        Ok(())
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err("rule not found".to_string())
+        }
+    }
+
+    pub fn delete_rules(&self, scenario_id: &str, rule_ids: &[String]) -> Result<(), String> {
+        if self.read_only {
+            return Ok(());
+        }
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction().map_err(|e| e.to_string())?;
+        for rule_id in rule_ids {
+            transaction
+                .execute(
+                    "DELETE FROM rules WHERE scenario_id = ?1 AND id = ?2",
+                    params![scenario_id, rule_id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        transaction.commit().map_err(|e| e.to_string())
     }
 
     pub fn reorder_rule(
@@ -443,8 +540,8 @@ impl RuleStore {
         }
         let mut connection = self.connect()?;
         let transaction = connection.transaction().map_err(|e| e.to_string())?;
-        let previous = rule_sort_key(&transaction, scenario_id, previous_id)?;
-        let next = rule_sort_key(&transaction, scenario_id, next_id)?;
+        let previous = required_neighbor_sort_key(&transaction, scenario_id, previous_id)?;
+        let next = required_neighbor_sort_key(&transaction, scenario_id, next_id)?;
         let key = match (previous, next) {
             (Some(previous), Some(next)) => {
                 let midpoint = f64::midpoint(previous, next);
@@ -460,6 +557,9 @@ impl RuleStore {
                         .ok_or_else(|| "rule not found".to_string())?;
                     let next = rule_sort_key(&transaction, scenario_id, next_id)?
                         .ok_or_else(|| "rule not found".to_string())?;
+                    if previous >= next {
+                        return Err("invalid rule reorder neighbors".to_string());
+                    }
                     f64::midpoint(previous, next)
                 }
             }
@@ -467,12 +567,15 @@ impl RuleStore {
             (None, Some(next)) => next - SORT_STEP,
             (None, None) => 0.0,
         };
-        transaction
+        let changed = transaction
             .execute(
                 "UPDATE rules SET sort_key = ?3 WHERE scenario_id = ?1 AND id = ?2",
                 params![scenario_id, rule_id, key],
             )
             .map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("rule not found".to_string());
+        }
         transaction.commit().map_err(|e| e.to_string())
     }
 
@@ -483,7 +586,10 @@ impl RuleStore {
         create_scenario: bool,
         rules: &[Rule],
     ) -> Result<(), String> {
-        if self.read_only {
+        // Every requested flow may have been evicted between the UI selection
+        // and batch preparation. An empty batch is a no-op, not a reason to
+        // create and activate an empty scenario.
+        if self.read_only || rules.is_empty() {
             return Ok(());
         }
         let mut connection = self.connect()?;
@@ -514,7 +620,12 @@ impl RuleStore {
             key += SORT_STEP;
             insert_rule_row(&transaction, scenario_id, key, rule)?;
         }
-        set_active_metadata(&transaction, Some(scenario_id))?;
+        // The built-in General layer stacks independently and must never occupy
+        // the switchable active-scenario pointer. Keep its current value when a
+        // bulk drop adds rules to General.
+        if scenario_id != GENERAL_SCENARIO_ID {
+            set_active_metadata(&transaction, Some(scenario_id))?;
+        }
         transaction.commit().map_err(|e| e.to_string())
     }
 }
@@ -543,44 +654,6 @@ fn set_general_metadata(transaction: &Transaction<'_>, active: bool) -> Result<(
             "INSERT INTO metadata (key, value) VALUES ('general_active', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [if active { "1" } else { "0" }],
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn insert_rule_connection(
-    connection: &Connection,
-    scenario_id: &str,
-    key: f64,
-    rule: &Rule,
-) -> Result<(), String> {
-    let (kind, status, content_type, action_name) = action_columns(&rule.action);
-    let json = serde_json::to_string(rule).map_err(|e| e.to_string())?;
-    connection
-        .execute(
-            "INSERT INTO rules (
-                id, scenario_id, sort_key, enabled, fire_limit, repeat,
-                method, url, url_match, action_kind, action_status,
-                action_content_type, action_name, rule_json
-             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
-             )",
-            params![
-                rule.id,
-                scenario_id,
-                key,
-                rule.enabled,
-                rule.fire_limit,
-                rule.repeat,
-                rule.matcher.method,
-                rule.matcher.url,
-                match_kind(&rule.matcher.url_match),
-                kind,
-                status,
-                content_type,
-                action_name,
-                json,
-            ],
         )
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -647,6 +720,27 @@ fn insertion_key(
             |row| row.get::<_, Option<f64>>(0),
         )
         .map_err(|e| e.to_string())?;
+    let Some(next) = next else {
+        return Ok(after + SORT_STEP);
+    };
+    let midpoint = f64::midpoint(after, next);
+    if midpoint > after && midpoint < next {
+        return Ok(midpoint);
+    }
+
+    // Repeated duplicate-after operations can eventually exhaust the f64 gap
+    // between two neighboring keys. Resequence within the caller's transaction
+    // before inserting, so matching priority never depends on tied sort keys.
+    resequence_sort_keys(connection, scenario_id)?;
+    let after = rule_sort_key(connection, scenario_id, Some(after_rule_id))?
+        .ok_or_else(|| "rule not found".to_string())?;
+    let next = connection
+        .query_row(
+            "SELECT MIN(sort_key) FROM rules WHERE scenario_id = ?1 AND sort_key > ?2",
+            params![scenario_id, after],
+            |row| row.get::<_, Option<f64>>(0),
+        )
+        .map_err(|e| e.to_string())?;
     Ok(next.map_or(after + SORT_STEP, |next| f64::midpoint(after, next)))
 }
 
@@ -686,6 +780,22 @@ fn rule_sort_key(
         )
         .optional()
         .map_err(|e| e.to_string())
+}
+
+/// `None` means a real list boundary; `Some(id)` must resolve to a durable row.
+/// Conflating an unknown stale neighbor with a boundary silently puts a rule in
+/// the wrong place while the live controller has already accepted another order.
+fn required_neighbor_sort_key(
+    connection: &Connection,
+    scenario_id: &str,
+    rule_id: Option<&str>,
+) -> Result<Option<f64>, String> {
+    match rule_id {
+        None => Ok(None),
+        Some(rule_id) => rule_sort_key(connection, scenario_id, Some(rule_id))?
+            .map(Some)
+            .ok_or_else(|| "rule not found".to_string()),
+    }
 }
 
 fn match_kind(kind: &MatchKind) -> &'static str {
@@ -747,6 +857,7 @@ mod tests {
                 status: 200,
                 headers: vec![("x-test".to_string(), id.to_string())],
                 body: body.to_string(),
+                body_base64: None,
                 content_type: Some("text/plain".to_string()),
                 content_encoding: None,
             },
@@ -758,7 +869,11 @@ mod tests {
             scenarios: vec![Scenario {
                 id: "scenario".to_string(),
                 name: "Scenario".to_string(),
-                rules: vec![rule("one", "first"), rule("two", "second"), rule("three", "third")],
+                rules: vec![
+                    rule("one", "first"),
+                    rule("two", "second"),
+                    rule("three", "third"),
+                ],
             }],
             active_scenario_id: Some("scenario".to_string()),
             general_active: true,
@@ -795,6 +910,42 @@ mod tests {
     }
 
     #[test]
+    fn viewer_without_a_database_does_not_create_shared_state() {
+        let dir = test_dir("viewer-empty");
+        let (_store, loaded) = RuleStore::open(&dir, true).expect("open empty viewer");
+
+        assert!(!dir.exists(), "a read-only viewer must not create app data");
+        assert_eq!(loaded.scenarios.len(), 1);
+        assert_eq!(loaded.scenarios[0].id, GENERAL_SCENARIO_ID);
+        assert!(loaded.scenarios[0].rules.is_empty());
+    }
+
+    #[test]
+    fn viewer_survives_an_incomplete_or_corrupt_shared_database_without_writing_it() {
+        for (name, bytes) in [
+            ("viewer-incomplete", Vec::new()),
+            ("viewer-corrupt", b"not a sqlite database".to_vec()),
+        ] {
+            let dir = test_dir(name);
+            std::fs::create_dir_all(&dir).expect("create app data");
+            let path = dir.join(DB_FILE);
+            std::fs::write(&path, &bytes).expect("seed broken database");
+
+            let (_store, loaded) = RuleStore::open(&dir, true).expect("viewer falls back");
+            assert_eq!(loaded.scenarios.len(), 1);
+            assert_eq!(loaded.scenarios[0].id, GENERAL_SCENARIO_ID);
+            assert!(loaded.scenarios[0].rules.is_empty());
+            assert_eq!(
+                std::fs::read(&path).expect("read database"),
+                bytes,
+                "read-only fallback must leave the shared file byte-for-byte unchanged"
+            );
+
+            std::fs::remove_dir_all(dir).expect("remove temp dir");
+        }
+    }
+
+    #[test]
     fn granular_update_and_reorder_preserve_other_rules() {
         let dir = test_dir("granular");
         let (store, _) = RuleStore::open(&dir, false).expect("open store");
@@ -811,7 +962,10 @@ mod tests {
         let loaded = store.load().expect("reload store");
         let rules = &user(&loaded).rules;
         assert_eq!(
-            rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
+            rules
+                .iter()
+                .map(|rule| rule.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["three", "one", "two"]
         );
         assert!(matches!(
@@ -823,6 +977,55 @@ mod tests {
             Action::Respond { body, .. } if body == "first"
         ));
 
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn granular_mutations_reject_missing_rows_instead_of_silently_diverging() {
+        let dir = test_dir("missing-row");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+        store.replace(&autoresponder()).expect("seed store");
+
+        assert_eq!(
+            store.rename_scenario("missing", "Ghost"),
+            Err("scenario not found".into())
+        );
+        assert_eq!(
+            store.delete_scenario("missing"),
+            Err("scenario not found".into())
+        );
+        assert_eq!(
+            store.update_rule("missing", &rule("one", "changed")),
+            Err("rule not found".into())
+        );
+        assert_eq!(
+            store.delete_rule("missing", "one"),
+            Err("rule not found".into())
+        );
+        assert_eq!(
+            store.reorder_rule("scenario", "missing", Some("one"), Some("two")),
+            Err("rule not found".into())
+        );
+        assert_eq!(
+            store.reorder_rule("scenario", "one", Some("missing"), Some("two")),
+            Err("rule not found".into()),
+            "an explicit missing previous neighbor is not a list boundary"
+        );
+        assert_eq!(
+            store.reorder_rule("scenario", "one", None, Some("missing")),
+            Err("rule not found".into()),
+            "an explicit missing next neighbor is not a list boundary"
+        );
+
+        let loaded = store.load().expect("reload");
+        assert_eq!(
+            user(&loaded)
+                .rules
+                .iter()
+                .map(|rule| rule.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one", "two", "three"]
+        );
         std::fs::remove_dir_all(dir).expect("remove temp dir");
     }
 
@@ -882,7 +1085,10 @@ mod tests {
         let loaded = store.load().expect("reload store");
         let rules = &user(&loaded).rules;
         assert_eq!(
-            rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
+            rules
+                .iter()
+                .map(|rule| rule.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["a", "b"]
         );
         assert_eq!(rules[0].matcher.url, rules[1].matcher.url);
@@ -911,7 +1117,9 @@ mod tests {
                 rules: Vec::new(),
             })
             .expect("insert is a no-op");
-        viewer.delete_rule("scenario", "one").expect("delete is a no-op");
+        viewer
+            .delete_rule("scenario", "one")
+            .expect("delete is a no-op");
         viewer
             .update_rule("scenario", &rule("two", "hacked"))
             .expect("update is a no-op");
@@ -1000,18 +1208,32 @@ mod tests {
             "the legacy `name` column must be dropped: {cols:?}"
         );
 
-        assert_eq!(user(&loaded).rules.len(), 1, "the rule is preserved via rule_json");
+        assert_eq!(
+            user(&loaded).rules.len(),
+            1,
+            "the rule is preserved via rule_json"
+        );
         assert_eq!(user(&loaded).rules[0].id, "one");
         assert_eq!(loaded.active_scenario_id.as_deref(), Some("scenario"));
-        assert!(loaded.general().is_some(), "healing still yields the General layer");
+        assert!(
+            loaded.general().is_some(),
+            "healing still yields the General layer"
+        );
 
         // The insert that used to fail on the dead constraint now succeeds.
         store
             .insert_rule("scenario", &rule("two", "second"), None)
             .expect("insert after heal");
         let reloaded = store.load().expect("reload");
-        let ids: Vec<_> = user(&reloaded).rules.iter().map(|r| r.id.as_str()).collect();
-        assert!(ids.contains(&"two"), "a fresh rule inserts cleanly: {ids:?}");
+        let ids: Vec<_> = user(&reloaded)
+            .rules
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert!(
+            ids.contains(&"two"),
+            "a fresh rule inserts cleanly: {ids:?}"
+        );
 
         drop(store);
         std::fs::remove_dir_all(dir).expect("remove temp dir");
@@ -1027,7 +1249,11 @@ mod tests {
         drop(store);
 
         let (_, reloaded) = RuleStore::open(&dir, false).expect("reopen store");
-        let ids: Vec<_> = user(&reloaded).rules.iter().map(|r| r.id.as_str()).collect();
+        let ids: Vec<_> = user(&reloaded)
+            .rules
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
         assert_eq!(ids, vec!["one", "two", "three"]);
 
         std::fs::remove_dir_all(dir).expect("remove temp dir");
@@ -1045,17 +1271,30 @@ mod tests {
         {
             // Simulate an older build: drop the General row + its metadata.
             let conn = Connection::open(dir.join(DB_FILE)).unwrap();
-            conn.execute("DELETE FROM scenarios WHERE id = ?1", params![GENERAL_SCENARIO_ID])
-                .unwrap();
+            conn.execute(
+                "DELETE FROM scenarios WHERE id = ?1",
+                params![GENERAL_SCENARIO_ID],
+            )
+            .unwrap();
             conn.execute("DELETE FROM metadata WHERE key = 'general_active'", [])
                 .unwrap();
         }
         drop(store);
 
         let (store, loaded) = RuleStore::open(&dir, false).expect("reopen seeds General");
-        assert_eq!(loaded.scenarios[0].id, GENERAL_SCENARIO_ID, "General seeded first");
-        assert!(loaded.general_active, "absent metadata defaults the layer on");
-        assert_eq!(user(&loaded).id, "scenario", "the user scenario is untouched");
+        assert_eq!(
+            loaded.scenarios[0].id, GENERAL_SCENARIO_ID,
+            "General seeded first"
+        );
+        assert!(
+            loaded.general_active,
+            "absent metadata defaults the layer on"
+        );
+        assert_eq!(
+            user(&loaded).id,
+            "scenario",
+            "the user scenario is untouched"
+        );
 
         // A rule inserted into the seeded General scenario persists (its FK parent
         // row exists) and round-trips.
@@ -1192,7 +1431,10 @@ mod tests {
             for (index, (id, json)) in [
                 ("one", serde_json::to_string(&rule("one", "first")).unwrap()),
                 ("two", "not json".to_string()),
-                ("three", serde_json::to_string(&rule("three", "third")).unwrap()),
+                (
+                    "three",
+                    serde_json::to_string(&rule("three", "third")).unwrap(),
+                ),
             ]
             .into_iter()
             .enumerate()
@@ -1237,12 +1479,17 @@ mod tests {
             .unwrap();
         }
 
-        let (store, loaded) = RuleStore::open(&dir, false).expect("open tolerates one bad rule row");
+        let (store, loaded) =
+            RuleStore::open(&dir, false).expect("open tolerates one bad rule row");
         let ids: Vec<_> = user(&loaded).rules.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["one", "three"], "the good rules still load");
 
         let reloaded = store.load().expect("load tolerates one bad rule row");
-        let ids: Vec<_> = user(&reloaded).rules.iter().map(|r| r.id.as_str()).collect();
+        let ids: Vec<_> = user(&reloaded)
+            .rules
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
         assert_eq!(ids, vec!["one", "three"]);
 
         std::fs::remove_dir_all(dir).expect("remove temp dir");
@@ -1280,7 +1527,56 @@ mod tests {
 
         let loaded = store.load().expect("reload");
         let ids: Vec<_> = user(&loaded).rules.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, vec!["two", "three", "one"], "order stays correct after 80 reorders");
+        assert_eq!(
+            ids,
+            vec!["two", "three", "one"],
+            "order stays correct after 80 reorders"
+        );
+
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn repeated_insertions_after_one_rule_keep_keys_and_priority_distinct() {
+        let dir = test_dir("insert-precision");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+        store.replace(&autoresponder()).expect("seed store");
+
+        for round in 0..80 {
+            let id = format!("copy-{round}");
+            store
+                .insert_rule("scenario", &rule(&id, &id), Some("two"))
+                .expect("insert after two");
+        }
+
+        let connection = Connection::open(dir.join(DB_FILE)).unwrap();
+        let keys: Vec<f64> = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT sort_key FROM rules WHERE scenario_id = 'scenario' ORDER BY sort_key",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(|key| key.unwrap())
+                .collect()
+        };
+        assert!(
+            keys.windows(2).all(|pair| pair[0] < pair[1]),
+            "every inserted rule must retain a distinct priority key"
+        );
+
+        let loaded = store.load().expect("reload");
+        let ids: Vec<_> = user(&loaded)
+            .rules
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .collect();
+        assert_eq!(&ids[..2], &["one", "two"]);
+        assert_eq!(ids[2], "copy-79");
+        assert_eq!(ids[81], "copy-0");
+        assert_eq!(ids[82], "three");
 
         std::fs::remove_dir_all(dir).expect("remove temp dir");
     }
@@ -1293,7 +1589,10 @@ mod tests {
         drop(store);
 
         let (_, loaded) = RuleStore::open(&dir, false).expect("reopen");
-        assert!(!loaded.general_active, "the off toggle persists across reopen");
+        assert!(
+            !loaded.general_active,
+            "the off toggle persists across reopen"
+        );
 
         std::fs::remove_dir_all(dir).expect("remove temp dir");
     }

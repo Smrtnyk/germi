@@ -24,13 +24,13 @@ use crate::tester::parse_url;
 #[derive(Deserialize, Default)]
 struct Har {
     #[serde(default)]
-    log: HarLog,
+    log: Option<HarLog>,
 }
 
 #[derive(Deserialize, Default)]
 struct HarLog {
     #[serde(default)]
-    entries: Vec<HarEntry>,
+    entries: Option<Vec<HarEntry>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -42,7 +42,7 @@ struct HarEntry {
     request: HarRequest,
     #[serde(default, deserialize_with = "null_default")]
     response: HarResponse,
-    #[serde(default, deserialize_with = "null_default")]
+    #[serde(default = "unknown_time", deserialize_with = "null_unknown_time")]
     time: f64,
     #[serde(default, deserialize_with = "null_default")]
     timings: HarTimings,
@@ -57,7 +57,7 @@ struct HarEntry {
 #[derive(Deserialize, Default)]
 struct HarTimings {
     /// Time-to-first-byte in HAR terms; `-1` means "not available".
-    #[serde(default, deserialize_with = "null_default")]
+    #[serde(default = "unknown_time", deserialize_with = "null_unknown_time")]
     wait: f64,
 }
 
@@ -98,6 +98,12 @@ struct Content {
     text: String,
     #[serde(default)]
     encoding: Option<String>,
+    /// Germi-only escape hatch: its exporter normally writes HTTP-decoded body
+    /// bytes, but retains the exact encoded bytes when decompression is unsafe
+    /// or unsupported. Without this marker an import must follow HAR convention
+    /// and treat `text` as the decoded representation.
+    #[serde(default, rename = "_germiBodyEncoded")]
+    germi_body_encoded: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -109,6 +115,8 @@ struct PostData {
     /// (and some other tools) base64-encode binary request bodies.
     #[serde(default)]
     encoding: Option<String>,
+    #[serde(default, rename = "_germiBodyEncoded")]
+    germi_body_encoded: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -131,18 +139,46 @@ where
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
+fn unknown_time() -> f64 {
+    -1.0
+}
+
+/// Missing/null HAR timings mean unknown (`-1`), while an explicit zero is a
+/// real measured duration and must survive import/export.
+fn null_unknown_time<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    Ok(Option::<f64>::deserialize(d)?.unwrap_or_else(unknown_time))
+}
+
 fn pairs(headers: Vec<NameValue>) -> Vec<(String, String)> {
     headers.into_iter().map(|h| (h.name, h.value)).collect()
+}
+
+/// HAR body fields conventionally contain the HTTP-decoded representation even
+/// though the captured header list still describes the wire payload. Normalize
+/// those headers to the bytes we actually store so replay/cURL/mock paths never
+/// send identity bytes mislabeled as gzip (or as still chunked). Germi's raw-body
+/// extension retains Content-Encoding for its exact-byte fallback.
+fn normalize_har_body_headers(headers: &mut Vec<(String, String)>, body_is_http_encoded: bool) {
+    let decoded_content = !body_is_http_encoded
+        && headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-encoding"));
+    let had_transfer_encoding = headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"));
+    headers.retain(|(name, _)| {
+        !(name.eq_ignore_ascii_case("transfer-encoding")
+            || decoded_content && name.eq_ignore_ascii_case("content-encoding")
+            || (decoded_content || had_transfer_encoding)
+                && name.eq_ignore_ascii_case("content-length"))
+    });
 }
 
 /// Accept any JSON number for an HTTP status, coercing out-of-range/float/negative
 /// to 0 rather than failing the entire `serde_json::from_slice`.
 fn lenient_status<'de, D: Deserializer<'de>>(d: D) -> Result<u16, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
-    let n = v
-        .as_u64()
-        .or_else(|| v.as_f64().map(|f| f as u64))
-        .unwrap_or(0);
+    let n = v.as_u64().unwrap_or(0);
     Ok(u16::try_from(n).unwrap_or(0))
 }
 
@@ -150,10 +186,17 @@ fn decode_har_body(content: &Content) -> Vec<u8> {
     if content.text.is_empty() {
         return Vec::new();
     }
-    if content.encoding.as_deref() == Some("base64") {
+    if content
+        .encoding
+        .as_deref()
+        .is_some_and(|encoding| encoding.eq_ignore_ascii_case("base64"))
+    {
         // Lenient: tolerate whitespace/line-wraps and missing padding instead of
-        // silently dropping the body of a real-world HAR.
-        crate::body::base64_lenient(&content.text).unwrap_or_default()
+        // silently dropping the body of a real-world HAR. If an exporter marks
+        // plain text as base64 by mistake, preserve those bytes rather than
+        // replacing the only copy with an empty body.
+        crate::body::base64_lenient(&content.text)
+            .unwrap_or_else(|| content.text.as_bytes().to_vec())
     } else {
         content.text.clone().into_bytes()
     }
@@ -186,29 +229,49 @@ pub fn har_embedded_rules(bytes: &[u8]) -> Option<Vec<u8>> {
 /// Parse a HAR 1.2 file into flows. Flow ids are left empty (assigned on insert).
 pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
     let har: Har = serde_json::from_slice(bytes)?;
-    let mut flows = Vec::with_capacity(har.log.entries.len());
+    let log = har
+        .log
+        .ok_or_else(|| anyhow::anyhow!("not a HAR archive: missing log object"))?;
+    let entries = log
+        .entries
+        .ok_or_else(|| anyhow::anyhow!("not a HAR archive: missing log.entries array"))?;
+    let entry_count = entries.len();
+    let mut flows = Vec::with_capacity(entry_count);
 
-    for entry in har.log.entries {
+    for entry in entries {
+        if entry.request.url.trim().is_empty() {
+            tracing::warn!("skipping HAR entry without a request URL");
+            continue;
+        }
         let (scheme, host, path) = parse_url(&entry.request.url);
-        let req_body = entry
-            .request
-            .post_data
-            .map(|p| {
-                if p.encoding.as_deref() == Some("base64") {
-                    crate::body::base64_lenient(&p.text).unwrap_or_default()
+        let (req_body, req_body_encoded) = entry.request.post_data.map_or_else(
+            || (Vec::new(), false),
+            |p| {
+                let encoded = p.germi_body_encoded;
+                if p.encoding
+                    .as_deref()
+                    .is_some_and(|encoding| encoding.eq_ignore_ascii_case("base64"))
+                {
+                    (
+                        crate::body::base64_lenient(&p.text)
+                            .unwrap_or_else(|| p.text.as_bytes().to_vec()),
+                        encoded,
+                    )
                 } else {
-                    p.text.into_bytes()
+                    (p.text.into_bytes(), encoded)
                 }
-            })
-            .unwrap_or_default();
+            },
+        );
 
-        let duration_ms = if entry.time > 0.0 {
+        let duration_ms = if entry.time.is_finite() && entry.time >= 0.0 {
             Some(entry.time as u64)
         } else {
             None
         };
         let ts = crate::flow::rfc3339_to_epoch_ms(&entry.started_date_time).unwrap_or_else(now_ms);
 
+        let mut request_headers = pairs(entry.request.headers);
+        normalize_har_body_headers(&mut request_headers, req_body_encoded);
         let request = CapturedRequest {
             method: if entry.request.method.is_empty() {
                 "GET".to_string()
@@ -220,23 +283,33 @@ pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
             host,
             path,
             version: entry.request.http_version,
-            headers: pairs(entry.request.headers),
+            headers: request_headers,
             body: req_body.into(),
             timestamp_ms: ts,
         };
 
-        // No response captured if status is 0 and there are no headers.
-        let response = if entry.response.status == 0 && entry.response.headers.is_empty() {
+        // Germi's unanswered-request HAR stub has status 0, no headers/version,
+        // and an empty body. Do not classify every status-less response as that
+        // stub: off-spec exporters sometimes omit status and headers while still
+        // carrying the only copy of the response body.
+        let response_body = decode_har_body(&entry.response.content);
+        let response = if entry.response.status == 0
+            && entry.response.headers.is_empty()
+            && entry.response.http_version.is_empty()
+            && response_body.is_empty()
+        {
             None
         } else {
+            let mut headers = pairs(entry.response.headers);
+            normalize_har_body_headers(&mut headers, entry.response.content.germi_body_encoded);
             Some(CapturedResponse {
                 status: entry.response.status,
                 version: entry.response.http_version,
-                headers: pairs(entry.response.headers),
-                body: decode_har_body(&entry.response.content).into(),
+                headers,
+                body: response_body.into(),
                 // HAR has no response timestamp of its own; the entry's start
                 // plus its total time is the closest reconstruction.
-                timestamp_ms: ts + duration_ms.unwrap_or(0),
+                timestamp_ms: ts.saturating_add(duration_ms.unwrap_or(0)),
             })
         };
 
@@ -247,7 +320,7 @@ pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
             response,
             matched_rule: entry.matched_rule,
             duration_ms,
-            ttfb_ms: if entry.timings.wait > 0.0 {
+            ttfb_ms: if entry.timings.wait.is_finite() && entry.timings.wait >= 0.0 {
                 Some(entry.timings.wait as u64)
             } else {
                 None
@@ -256,6 +329,10 @@ pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
             availability: None,
             imported: true,
         });
+    }
+
+    if entry_count > 0 && flows.is_empty() {
+        anyhow::bail!("HAR archive contains no usable request entries");
     }
 
     Ok(flows)
@@ -284,6 +361,10 @@ pub fn parse_saz(bytes: &[u8]) -> Result<Vec<Flow>> {
 }
 
 fn parse_saz_budgeted(bytes: &[u8], budget: u64) -> Result<Vec<Flow>> {
+    parse_saz_limited(bytes, budget, crate::body::MAX_DECOMPRESSED_BYTES as u64)
+}
+
+fn parse_saz_limited(bytes: &[u8], budget: u64, member_budget: u64) -> Result<Vec<Flow>> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| anyhow::anyhow!("not a valid SAZ archive: {e}"))?;
 
@@ -305,21 +386,36 @@ fn parse_saz_budgeted(bytes: &[u8], budget: u64) -> Result<Vec<Flow>> {
         let Ok(n) = caps[1].parse::<u64>() else {
             continue;
         };
-        if total_bytes > budget {
-            tracing::warn!("SAZ import exceeded {budget} bytes; remaining sessions skipped");
-            break;
-        }
         let is_client = caps[2].eq_ignore_ascii_case("c");
         let entry = zip.by_name(&name).map_err(|_| {
             anyhow::anyhow!("could not read '{name}' (encrypted SAZ is not supported)")
         })?;
         let mut buf = Vec::new();
         // Cap how much we inflate from a single zip member so a small crafted
-        // archive can't expand to gigabytes (zip-bomb) and exhaust memory.
-        entry
-            .take(crate::body::MAX_DECOMPRESSED_BYTES as u64)
-            .read_to_end(&mut buf)
-            .ok();
+        // archive can't expand to gigabytes (zip-bomb) and exhaust memory. Read
+        // one byte beyond the remaining aggregate budget so an overrun is
+        // detected without retaining an entire extra capped member.
+        let remaining = budget.saturating_sub(total_bytes);
+        let read_cap = member_budget
+            .saturating_add(1)
+            .min(remaining.saturating_add(1));
+        if entry.take(read_cap).read_to_end(&mut buf).is_err() {
+            sessions.remove(&n);
+            tracing::warn!("could not inflate SAZ member '{name}'; session skipped");
+            continue;
+        }
+        if (buf.len() as u64) > member_budget {
+            sessions.remove(&n);
+            tracing::warn!("SAZ member '{name}' exceeded {member_budget} bytes; session skipped");
+            continue;
+        }
+        if (buf.len() as u64) > remaining {
+            // If this was the second half of a session, do not turn its
+            // already-buffered request into a misleading request-only flow.
+            sessions.remove(&n);
+            tracing::warn!("SAZ import exceeded {budget} bytes; remaining sessions skipped");
+            break;
+        }
         total_bytes = total_bytes.saturating_add(buf.len() as u64);
         let slot = sessions.entry(n).or_default();
         if is_client {
@@ -336,10 +432,6 @@ fn parse_saz_budgeted(bytes: &[u8], budget: u64) -> Result<Vec<Flow>> {
     // many gzip-bomb bodies would expand to members x the per-body cap.
     let mut decoded_bytes: u64 = 0;
     for (_n, raw) in sessions {
-        if decoded_bytes > budget {
-            tracing::warn!("SAZ import decoded more than {budget} bytes; remaining sessions skipped");
-            break;
-        }
         let Some(client) = raw.client else {
             continue;
         };
@@ -347,10 +439,18 @@ fn parse_saz_budgeted(bytes: &[u8], budget: u64) -> Result<Vec<Flow>> {
             continue; // skip unparseable sessions (e.g. odd CONNECT records)
         };
         let response = raw.server.as_deref().and_then(|s| parse_response(s).ok());
-        decoded_bytes = decoded_bytes.saturating_add(request.body.len() as u64);
-        if let Some(res) = &response {
-            decoded_bytes = decoded_bytes.saturating_add(res.body.len() as u64);
+        let flow_bytes = (request.body.len() as u64).saturating_add(
+            response
+                .as_ref()
+                .map_or(0, |response| response.body.len() as u64),
+        );
+        if decoded_bytes.saturating_add(flow_bytes) > budget {
+            tracing::warn!(
+                "SAZ import decoded more than {budget} bytes; remaining sessions skipped"
+            );
+            break;
         }
+        decoded_bytes = decoded_bytes.saturating_add(flow_bytes);
         flows.push(Flow {
             id: String::new(),
             seq: 0,
@@ -384,12 +484,12 @@ fn parse_request(raw: &[u8]) -> Result<CapturedRequest> {
     }
     let target = req.path.unwrap_or("/").to_string();
     let version = format!("HTTP/1.{}", req.version.unwrap_or(1));
-    let headers = collect_headers(req.headers);
+    let mut headers = collect_headers(req.headers);
     let host_hdr = header_get(&headers, "host").unwrap_or_default();
-    let body = decode_body(&headers, body);
+    let body = decode_body(&mut headers, body);
 
     // Absolute-form (proxy) request lines carry the scheme; origin-form needs Host.
-    let (scheme, host, path, uri) = if target.contains("://") {
+    let (scheme, host, path, uri) = if has_uri_scheme(&target) {
         let (s, h, p) = parse_url(&target);
         (s, h, p, target)
     } else {
@@ -410,22 +510,47 @@ fn parse_request(raw: &[u8]) -> Result<CapturedRequest> {
     })
 }
 
+/// Absolute-form request targets start with an RFC-style URI scheme. Looking
+/// for `://` anywhere is insufficient: an ordinary origin-form query such as
+/// `/redirect?next=https://example.com` contains it too.
+fn has_uri_scheme(target: &str) -> bool {
+    let Some((scheme, _)) = target.split_once("://") else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme.as_bytes()[0].is_ascii_alphabetic()
+        && scheme
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+}
+
 fn parse_response(raw: &[u8]) -> Result<CapturedResponse> {
-    let (head, body) = split_head_body(raw);
-    let mut hbuf = [httparse::EMPTY_HEADER; 100];
-    let mut res = httparse::Response::new(&mut hbuf);
-    if res.parse(head)?.is_partial() {
-        anyhow::bail!("incomplete response head");
+    let mut remaining = raw;
+    loop {
+        let (head, body) = split_head_body(remaining);
+        let mut hbuf = [httparse::EMPTY_HEADER; 100];
+        let mut res = httparse::Response::new(&mut hbuf);
+        if res.parse(head)?.is_partial() {
+            anyhow::bail!("incomplete response head");
+        }
+        let status = res.code.unwrap_or(0);
+        // Fiddler can retain interim responses (most commonly 100 Continue)
+        // before the final response in one `_s.txt`. Store the final exchange;
+        // 101 is not interim here because it switches protocols.
+        if (100..200).contains(&status) && status != 101 && body.starts_with(b"HTTP/") {
+            remaining = body;
+            continue;
+        }
+        let mut headers = collect_headers(res.headers);
+        let body = decode_body(&mut headers, body);
+        return Ok(CapturedResponse {
+            status,
+            version: format!("HTTP/1.{}", res.version.unwrap_or(1)),
+            headers,
+            body: body.into(),
+            timestamp_ms: now_ms(),
+        });
     }
-    let headers = collect_headers(res.headers);
-    let body = decode_body(&headers, body);
-    Ok(CapturedResponse {
-        status: res.code.unwrap_or(0),
-        version: format!("HTTP/1.{}", res.version.unwrap_or(1)),
-        headers,
-        body: body.into(),
-        timestamp_ms: now_ms(),
-    })
 }
 
 /// Split raw HTTP bytes into (head-incl-terminator, body). Falls back to bare LF.
@@ -465,55 +590,115 @@ fn header_get(headers: &[(String, String)], name: &str) -> Option<String> {
         .map(|(_, v)| v.clone())
 }
 
-/// De-chunk (if chunked) then decompress (per Content-Encoding) a raw body.
-fn decode_body(headers: &[(String, String)], body: &[u8]) -> Vec<u8> {
-    let te = header_get(headers, "transfer-encoding")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let stage1 = if te.contains("chunked") {
-        let unchunked = dechunk(body);
-        // A non-empty body that de-chunks to nothing wasn't really chunked (some
-        // exporters store the de-chunked body but keep the header) or used LF-only
-        // delimiters — fall back to the raw bytes instead of dropping it.
-        if unchunked.is_empty() && !body.is_empty() {
-            body.to_vec()
-        } else {
-            unchunked
-        }
-    } else {
-        body.to_vec()
-    };
-    match crate::body::content_encoding_of(headers) {
-        Some(enc) => crate::body::try_decompress(&enc, &stage1).unwrap_or(stage1),
-        None => stage1,
-    }
+fn transfer_encodings(headers: &[(String, String)]) -> Vec<String> {
+    headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+        .flat_map(|(_, value)| value.split(','))
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| !token.is_empty())
+        .collect()
 }
 
-fn dechunk(body: &[u8]) -> Vec<u8> {
+/// De-chunk (if chunked) then decompress (per Content-Encoding) a raw body,
+/// removing framing/encoding headers only when their corresponding transform
+/// completed. The stored headers must always describe the stored bytes: replay
+/// and mock creation consume this same representation later.
+fn decode_body(headers: &mut Vec<(String, String)>, body: &[u8]) -> Vec<u8> {
+    let transfer_chain = transfer_encodings(headers);
+    let (stage1, transfer_decoded) = if transfer_chain.is_empty() {
+        (body.to_vec(), false)
+    } else {
+        // RFC transfer codings are undone in reverse and `chunked` must be the
+        // final coding on the wire. Decode all-or-nothing: preserving a raw
+        // `gzip, chunked` message is safer than dechunking it and then silently
+        // dropping the still-required gzip label when that second step fails.
+        let Some((last, preceding)) = transfer_chain.split_last() else {
+            unreachable!("the non-empty transfer chain has a last element")
+        };
+        if last != "chunked" {
+            return body.to_vec();
+        }
+        let Some(mut decoded) = dechunk(body) else {
+            return body.to_vec();
+        };
+        for encoding in preceding
+            .iter()
+            .rev()
+            .filter(|encoding| *encoding != "identity")
+        {
+            let Some((next, false)) = crate::body::try_decompress_checked(encoding, &decoded)
+            else {
+                return body.to_vec();
+            };
+            decoded = next;
+        }
+        (decoded, true)
+    };
+    let (body, content_decoded) = match crate::body::decode_body(headers, &stage1) {
+        Some((decoded, false)) => (decoded, true),
+        // Keep the exact compressed bytes when decoding hit its safety cap.
+        // Storing the capped prefix as if it were the full identity body would
+        // silently fabricate a truncated response while retaining the original
+        // Content-Encoding header.
+        Some((_partial, true)) => (stage1, false),
+        None => (stage1, false),
+    };
+    if transfer_decoded || content_decoded {
+        headers.retain(|(name, _)| {
+            if transfer_decoded
+                && (name.eq_ignore_ascii_case("transfer-encoding")
+                    || name.eq_ignore_ascii_case("trailer"))
+            {
+                return false;
+            }
+            if content_decoded && name.eq_ignore_ascii_case("content-encoding") {
+                return false;
+            }
+            !name.eq_ignore_ascii_case("content-length")
+        });
+    }
+    body
+}
+
+fn dechunk(body: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let mut rest = body;
-    while let Some(eol) = find_sub(rest, b"\r\n") {
+    loop {
+        let eol = find_sub(rest, b"\r\n")?;
         let hex = rest[..eol]
             .split(|&b| b == b';')
             .next()
             .unwrap_or(&rest[..eol]);
         let size = std::str::from_utf8(hex)
             .ok()
-            .and_then(|s| usize::from_str_radix(s.trim(), 16).ok())
-            .unwrap_or(0);
+            .and_then(|s| usize::from_str_radix(s.trim(), 16).ok())?;
         let data_start = eol + 2;
         if size == 0 {
-            break;
+            // The last-chunk is followed by either the final CRLF or a trailer
+            // section terminated by an empty line. Do not accept a truncated
+            // `0\r\n`: that would erase the only raw copy despite the decoder's
+            // all-or-nothing contract.
+            let trailers = &rest[data_start..];
+            if trailers == b"\r\n"
+                || (!trailers.starts_with(b"\r\n")
+                    && find_sub(trailers, b"\r\n\r\n").is_some_and(|end| end + 4 == trailers.len()))
+            {
+                return Some(out);
+            }
+            return None;
         }
-        let data_end = data_start.saturating_add(size);
+        let data_end = data_start.checked_add(size)?;
         if data_end > rest.len() {
-            out.extend_from_slice(&rest[data_start.min(rest.len())..]);
-            break;
+            return None;
         }
         out.extend_from_slice(&rest[data_start..data_end]);
-        rest = &rest[(data_end + 2).min(rest.len())..];
+        let terminator_end = data_end.checked_add(2)?;
+        if rest.get(data_end..terminator_end) != Some(b"\r\n") {
+            return None;
+        }
+        rest = &rest[terminator_end..];
     }
-    out
 }
 
 #[cfg(test)]
@@ -560,9 +745,68 @@ mod tests {
     }
 
     #[test]
+    fn har_decoded_bodies_drop_stale_wire_encoding_and_length_headers() {
+        let har = r#"{"log":{"entries":[{
+          "request":{"method":"POST","url":"https://a/upload",
+            "headers":[{"name":"Content-Encoding","value":"gzip"},{"name":"Content-Length","value":"20"}],
+            "postData":{"text":"request identity"}},
+          "response":{"status":200,
+            "headers":[{"name":"Content-Encoding","value":"br"},{"name":"Content-Length","value":"9"},{"name":"X-Keep","value":"yes"}],
+            "content":{"text":"response identity"}}
+        }]}}"#;
+        let flows = parse_har(har.as_bytes()).unwrap();
+        let flow = &flows[0];
+        assert_eq!(flow.request.body, b"request identity".as_slice());
+        assert!(flow.request.headers.is_empty());
+        let response = flow.response.as_ref().unwrap();
+        assert_eq!(response.body, b"response identity".as_slice());
+        assert_eq!(response.headers, vec![("X-Keep".into(), "yes".into())]);
+    }
+
+    #[test]
+    fn germi_raw_har_body_retains_its_content_encoding() {
+        let har = r#"{"log":{"entries":[{
+          "request":{"url":"https://a/"},
+          "response":{"status":200,
+            "headers":[{"name":"Content-Encoding","value":"zstd"},{"name":"Content-Length","value":"3"}],
+            "content":{"encoding":"base64","text":"AAEC","_germiBodyEncoded":true}}
+        }]}}"#;
+        let flow = parse_har(har.as_bytes()).unwrap().remove(0);
+        let response = flow.response.unwrap();
+        assert_eq!(response.body, [0, 1, 2].as_slice());
+        assert_eq!(
+            response.headers,
+            vec![
+                ("Content-Encoding".into(), "zstd".into()),
+                ("Content-Length".into(), "3".into())
+            ]
+        );
+    }
+
+    #[test]
     fn tolerates_minimal_har() {
         let flows = parse_har(br#"{"log":{"entries":[]}}"#).unwrap();
         assert!(flows.is_empty());
+    }
+
+    #[test]
+    fn rejects_json_that_is_not_structurally_a_har() {
+        assert!(parse_har(br"{}").is_err());
+        assert!(parse_har(br#"{"log":{}}"#).is_err());
+        assert!(parse_har(br#"{"log":{"entries":[{}]}}"#).is_err());
+    }
+
+    #[test]
+    fn preserves_explicit_zero_timings() {
+        let har = r#"{"log":{"entries":[{
+          "time":0,
+          "timings":{"wait":0},
+          "request":{"url":"https://a/"},
+          "response":{"status":200,"headers":[],"content":{}}
+        }]}}"#;
+        let flows = parse_har(har.as_bytes()).expect("zero timings are valid HAR values");
+        assert_eq!(flows[0].duration_ms, Some(0));
+        assert_eq!(flows[0].ttfb_ms, Some(0));
     }
 
     #[test]
@@ -574,10 +818,11 @@ mod tests {
           {"request":{"url":"https://a/2"},"response":{"status":99999,"headers":[{"name":"x","value":"1"}],"content":{}}},
           {"request":{"url":"https://a/3"},"response":{"status":204,"headers":[{"name":"x","value":"1"}],"content":{}}}
         ]}}"#;
-        let flows = parse_har(har.as_bytes()).expect("a malformed status must not abort the import");
+        let flows =
+            parse_har(har.as_bytes()).expect("a malformed status must not abort the import");
         assert_eq!(flows.len(), 3);
-        // 200.5 truncates to 200; 99999 is out of u16 range so it falls back to 0.
-        assert_eq!(flows[0].response.as_ref().unwrap().status, 200);
+        // A fractional number and an integer outside u16 both fall back to 0.
+        assert_eq!(flows[0].response.as_ref().unwrap().status, 0);
         assert_eq!(flows[1].response.as_ref().unwrap().status, 0);
         assert_eq!(flows[2].response.as_ref().unwrap().status, 204);
     }
@@ -594,8 +839,123 @@ mod tests {
     }
 
     #[test]
+    fn har_invalid_base64_marker_does_not_erase_the_only_body_copy() {
+        let har = r#"{"log":{"entries":[
+          {"request":{"url":"https://a/b","postData":{"encoding":"BASE64","text":"not@@base64"}},
+           "response":{"status":200,"headers":[],
+             "content":{"encoding":"base64","text":"also@@invalid"}}}
+        ]}}"#;
+        let flows = parse_har(har.as_bytes()).unwrap();
+        assert_eq!(flows[0].request.body, b"not@@base64".as_slice());
+        assert_eq!(
+            flows[0].response.as_ref().unwrap().body,
+            b"also@@invalid".as_slice()
+        );
+    }
+
+    #[test]
+    fn har_statusless_response_body_is_not_mistaken_for_an_unanswered_request() {
+        let har = r#"{"log":{"entries":[{
+          "request":{"url":"https://a/body-only"},
+          "response":{"content":{"text":"the only response copy"}}
+        }]}}"#;
+
+        let flow = parse_har(har.as_bytes()).unwrap().remove(0);
+        let response = flow
+            .response
+            .expect("a body proves a response was captured");
+        assert_eq!(response.status, 0);
+        assert_eq!(response.body, b"the only response copy".as_slice());
+    }
+
+    #[test]
     fn dechunks_body() {
-        assert_eq!(dechunk(b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n"), b"Wikipedia");
+        assert_eq!(
+            dechunk(b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n"),
+            Some(b"Wikipedia".to_vec())
+        );
+    }
+
+    #[test]
+    fn decodes_the_full_transfer_encoding_chain() {
+        use std::io::Write;
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(b"transfer-coded body").unwrap();
+        let compressed = gzip.finish().unwrap();
+        let chunked = format!("{:x}\r\n", compressed.len())
+            .into_bytes()
+            .into_iter()
+            .chain(compressed)
+            .chain(b"\r\n0\r\n\r\n".iter().copied())
+            .collect::<Vec<_>>();
+        let mut headers = vec![
+            ("Transfer-Encoding".into(), "gzip, chunked".into()),
+            ("Trailer".into(), "X-Checksum".into()),
+            ("Content-Length".into(), chunked.len().to_string()),
+            ("X-Keep".into(), "yes".into()),
+        ];
+
+        assert_eq!(decode_body(&mut headers, &chunked), b"transfer-coded body");
+        assert_eq!(headers, vec![("X-Keep".into(), "yes".into())]);
+    }
+
+    #[test]
+    fn unsupported_transfer_coding_preserves_the_exact_message() {
+        let raw = b"4\r\nWiki\r\n0\r\n\r\n";
+        let mut headers = vec![("Transfer-Encoding".into(), "snappy, chunked".into())];
+
+        assert_eq!(decode_body(&mut headers, raw), raw);
+        assert_eq!(
+            headers,
+            vec![("Transfer-Encoding".into(), "snappy, chunked".into())]
+        );
+    }
+
+    #[test]
+    fn malformed_later_chunk_preserves_the_raw_body() {
+        let body = b"4\r\nWiki\r\nnot-hex\r\nrest";
+        let mut headers = vec![("Transfer-Encoding".into(), "chunked".into())];
+        assert_eq!(decode_body(&mut headers, body), body);
+        assert_eq!(
+            headers,
+            vec![("Transfer-Encoding".into(), "chunked".into())]
+        );
+    }
+
+    #[test]
+    fn truncated_terminal_chunk_preserves_the_raw_body() {
+        let body = b"4\r\nWiki\r\n0\r\n";
+        let mut headers = vec![("Transfer-Encoding".into(), "chunked".into())];
+        assert_eq!(decode_body(&mut headers, body), body);
+        assert_eq!(
+            headers,
+            vec![("Transfer-Encoding".into(), "chunked".into())]
+        );
+    }
+
+    #[test]
+    fn origin_form_query_containing_a_url_keeps_its_real_host_and_path() {
+        let request = parse_request(
+            b"GET /redirect?next=https://other.test/path HTTP/1.1\r\nHost: source.test\r\n\r\n",
+        )
+        .expect("parse request");
+        assert_eq!(request.scheme, "https");
+        assert_eq!(request.host, "source.test");
+        assert_eq!(request.path, "/redirect?next=https://other.test/path");
+    }
+
+    #[test]
+    fn skips_interim_response_and_imports_the_final_exchange() {
+        let response = parse_response(
+            b"HTTP/1.1 100 Continue\r\nX-Interim: yes\r\n\r\nHTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nok",
+        )
+        .expect("parse response");
+        assert_eq!(response.status, 201);
+        assert_eq!(response.body, b"ok".as_slice());
+        assert!(response
+            .headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("x-interim")));
     }
 
     #[test]
@@ -624,8 +984,7 @@ mod tests {
             zw.start_file(format!("raw/{n}_c.txt"), opts).unwrap();
             zw.write_all(b"GET /big HTTP/1.1\r\nHost: api.test\r\n\r\n")
                 .unwrap();
-            let mut enc =
-                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             enc.write_all(&vec![b'a'; inflated_len]).unwrap();
             let gz = enc.finish().unwrap();
             zw.start_file(format!("raw/{n}_s.txt"), opts).unwrap();
@@ -636,6 +995,17 @@ mod tests {
         zw.finish().unwrap().into_inner()
     }
 
+    fn saz_with_raw_members(members: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let opts = zip::write::SimpleFileOptions::default();
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in members {
+            zip.start_file(*name, opts).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
     #[test]
     fn saz_decoded_body_budget_truncates_sessions() {
         // Each gzip body is a few hundred bytes in the archive but inflates to
@@ -643,8 +1013,53 @@ mod tests {
         // Content-Encoding-decoded output can stop this.
         let saz = saz_with_gzip_sessions(4, 100 * 1024);
         let flows = parse_saz_budgeted(&saz, 150 * 1024).unwrap();
-        assert_eq!(flows.len(), 2, "sessions past the decoded-bytes budget are skipped");
+        assert_eq!(flows.len(), 1, "the decoded-byte budget is never exceeded");
         assert_eq!(flows[0].response.as_ref().unwrap().body.len(), 100 * 1024);
+    }
+
+    #[test]
+    fn oversized_zip_member_drops_only_its_session() {
+        let request_one = b"GET /dropped HTTP/1.1\r\nHost: api.test\r\n\r\n";
+        let mut oversized = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
+        oversized.extend_from_slice(&[b'x'; 128]);
+        let request_two = b"GET /kept HTTP/1.1\r\nHost: api.test\r\n\r\n";
+        let response_two = b"HTTP/1.1 200 OK\r\n\r\nok";
+        let saz = saz_with_raw_members(&[
+            ("raw/1_c.txt", request_one),
+            ("raw/1_s.txt", &oversized),
+            ("raw/2_c.txt", request_two),
+            ("raw/2_s.txt", response_two),
+        ]);
+
+        let flows = parse_saz_limited(&saz, 4096, 96).expect("parse limited SAZ");
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0].request.path, "/kept");
+    }
+
+    #[test]
+    fn aggregate_overrun_does_not_leave_a_partial_request_only_flow() {
+        let request = b"GET /partial HTTP/1.1\r\nHost: api.test\r\n\r\n";
+        let response = b"HTTP/1.1 200 OK\r\n\r\nbody";
+        let saz = saz_with_raw_members(&[("raw/1_c.txt", request), ("raw/1_s.txt", response)]);
+        let budget = (request.len() + response.len() - 1) as u64;
+
+        let flows = parse_saz_limited(&saz, budget, 4096).expect("parse budgeted SAZ");
+        assert!(flows.is_empty());
+    }
+
+    #[test]
+    fn huge_har_duration_saturates_the_response_timestamp() {
+        let har = r#"{"log":{"entries":[{
+          "startedDateTime":"2026-01-01T00:00:00Z",
+          "time":1e300,
+          "request":{"url":"https://a/"},
+          "response":{"status":200,"headers":[{"name":"x","value":"1"}],"content":{}}
+        }]}}"#;
+        let flows = parse_har(har.as_bytes()).expect("huge duration remains importable");
+        assert_eq!(
+            flows[0].response.as_ref().expect("response").timestamp_ms,
+            u64::MAX
+        );
     }
 
     #[test]
@@ -660,8 +1075,7 @@ mod tests {
     #[test]
     fn decodes_chunked_gzip_response() {
         use std::io::Write;
-        let mut enc =
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(b"hello world").unwrap();
         let gz = enc.finish().unwrap();
 
@@ -675,5 +1089,39 @@ mod tests {
 
         let resp = parse_response(&raw).unwrap();
         assert_eq!(resp.body, b"hello world".as_slice());
+        assert!(resp.headers.iter().all(|(name, _)| {
+            !name.eq_ignore_ascii_case("content-encoding")
+                && !name.eq_ignore_ascii_case("transfer-encoding")
+        }));
+    }
+
+    #[test]
+    fn transfer_encoding_requires_an_exact_chunked_token() {
+        let body = b"4\r\nWiki\r\n0\r\n\r\n";
+        let mut headers = vec![("Transfer-Encoding".into(), "notchunked".into())];
+        assert_eq!(decode_body(&mut headers, body), body);
+        assert_eq!(
+            headers,
+            vec![("Transfer-Encoding".into(), "notchunked".into())]
+        );
+    }
+
+    #[test]
+    fn saz_body_decoding_undoes_the_full_content_encoding_chain() {
+        use std::io::Write;
+        let mut deflate =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        deflate.write_all(b"chained body").unwrap();
+        let deflated = deflate.finish().unwrap();
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(&deflated).unwrap();
+        let encoded = gzip.finish().unwrap();
+
+        let mut headers = vec![("Content-Encoding".into(), "deflate, gzip".into())];
+        assert_eq!(decode_body(&mut headers, &encoded), b"chained body");
+        assert!(
+            headers.is_empty(),
+            "decoded bytes must not retain the encoding label"
+        );
     }
 }

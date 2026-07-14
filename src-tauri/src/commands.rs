@@ -21,7 +21,8 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::state::AppState;
+use crate::state::{AppState, SystemProxyOwnership};
+use crate::system_proxy::{self, SystemProxyConfig};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,7 +43,11 @@ pub struct AvailabilityProgress {
 }
 
 #[derive(Serialize, Clone)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum BulkMockEvent {
     Progress {
         completed: usize,
@@ -68,6 +73,13 @@ pub struct BoundAddr {
     pub allow_remote: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemProxyStatus {
+    pub active: bool,
+    pub port: Option<u16>,
+}
+
 /// The live listen address (port + LAN scope), or `None` if stopped. Lets the
 /// webview re-read reality after a reload instead of trusting the persisted port.
 #[tauri::command]
@@ -81,7 +93,11 @@ pub async fn bound_addr(state: State<'_, AppState>) -> Result<Option<BoundAddr>,
 
 /// Bind `0.0.0.0` (LAN-reachable) only when explicitly allowed; loopback otherwise.
 fn listen_addr(port: u16, allow_remote: bool) -> SocketAddr {
-    let ip = if allow_remote { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
+    let ip = if allow_remote {
+        [0, 0, 0, 0]
+    } else {
+        [127, 0, 0, 1]
+    };
     SocketAddr::from((ip, port))
 }
 
@@ -266,10 +282,7 @@ pub fn get_autoresponder_summary(state: State<'_, AppState>) -> AutoResponderSum
 }
 
 #[tauri::command]
-pub async fn get_rule(
-    state: State<'_, AppState>,
-    rule_id: String,
-) -> Result<Option<Rule>, String> {
+pub async fn get_rule(state: State<'_, AppState>, rule_id: String) -> Result<Option<Rule>, String> {
     let controller = state.controller.clone();
     tauri::async_runtime::spawn_blocking(move || controller.get_rule(&rule_id))
         .await
@@ -290,15 +303,19 @@ pub async fn set_active_scenario(
     let controller = state.controller.clone();
     let rule_store = state.rule_store.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        activate_scenario(&controller, &rule_store, scenario_id.as_deref(), history_tag)
+        activate_scenario(
+            &controller,
+            &rule_store,
+            scenario_id.as_deref(),
+            history_tag,
+        )
     })
     .await
     .map_err(|e| format!("scenario activation task failed: {e}"))?
 }
 
-/// Engine first so an unknown scenario id is rejected before it hits the DB; a
-/// persist failure after leaves memory-only state that self-heals on restart
-/// (never disk-only).
+/// Engine first so an unknown scenario id is rejected before it hits the DB.
+/// `with_history` restores its before snapshot if persistence then fails.
 fn activate_scenario(
     controller: &ProxyController,
     rule_store: &crate::rule_store::RuleStore,
@@ -306,13 +323,14 @@ fn activate_scenario(
     history_tag: HistoryTag,
 ) -> Result<(), String> {
     controller.with_history(history_tag, |c| {
-        c.set_active_scenario(scenario_id).map_err(|e| e.to_string())
-    })?;
-    rule_store.set_active_scenario(scenario_id)
+        c.set_active_scenario(scenario_id)
+            .map_err(|e| e.to_string())?;
+        rule_store.set_active_scenario(scenario_id)
+    })
 }
 
-/// Toggle the built-in General layer on/off. Persisted, then applied to the live
-/// engine (undo-tracked) so it takes effect for new traffic immediately.
+/// Toggle the built-in General layer on/off and persist it as one rollback-safe
+/// history operation.
 #[tauri::command]
 pub async fn set_general_active(
     state: State<'_, AppState>,
@@ -322,9 +340,9 @@ pub async fn set_general_active(
     let controller = state.controller.clone();
     let rule_store = state.rule_store.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        rule_store.set_general_active(active)?;
         controller.with_history(history_tag, |c| {
-            c.set_general_active(active).map_err(|e| e.to_string())
+            c.set_general_active(active).map_err(|e| e.to_string())?;
+            rule_store.set_general_active(active)
         })
     })
     .await
@@ -341,17 +359,15 @@ pub async fn create_scenario(
     let rule_store = state.rule_store.clone();
     tauri::async_runtime::spawn_blocking(move || {
         controller.with_history(history_tag, |c| {
-            let summary = c.create_scenario(name.as_deref()).map_err(|e| e.to_string())?;
+            let summary = c
+                .create_scenario(name.as_deref())
+                .map_err(|e| e.to_string())?;
             let scenario = Scenario {
                 id: summary.id.clone(),
                 name: summary.name.clone(),
                 rules: Vec::new(),
             };
-            if let Err(error) = rule_store.insert_scenario(&scenario) {
-                let _ = c.delete_scenario(&summary.id);
-                return Err(error);
-            }
-            rule_store.set_active_scenario(Some(&summary.id))?;
+            rule_store.insert_scenario_and_activate(&scenario)?;
             Ok(summary)
         })
     })
@@ -372,9 +388,10 @@ pub async fn rename_scenario(
     let controller = state.controller.clone();
     let rule_store = state.rule_store.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        rule_store.rename_scenario(&scenario_id, &name)?;
         controller.with_history(history_tag, |c| {
-            c.rename_scenario(&scenario_id, name).map_err(|e| e.to_string())
+            c.rename_scenario(&scenario_id, name.clone())
+                .map_err(|e| e.to_string())?;
+            rule_store.rename_scenario(&scenario_id, &name)
         })
     })
     .await
@@ -393,9 +410,9 @@ pub async fn delete_scenario(
     let controller = state.controller.clone();
     let rule_store = state.rule_store.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        rule_store.delete_scenario(&scenario_id)?;
         controller.with_history(history_tag, |c| {
-            c.delete_scenario(&scenario_id).map_err(|e| e.to_string())
+            c.delete_scenario(&scenario_id).map_err(|e| e.to_string())?;
+            rule_store.delete_scenario(&scenario_id)
         })
     })
     .await
@@ -413,10 +430,7 @@ pub async fn create_rule(
     tauri::async_runtime::spawn_blocking(move || {
         controller.with_history(history_tag, |c| {
             let (rule, summary) = c.create_rule(&scenario_id).map_err(|e| e.to_string())?;
-            if let Err(error) = rule_store.insert_rule(&scenario_id, &rule, None) {
-                let _ = c.delete_rule(&scenario_id, &rule.id);
-                return Err(error);
-            }
+            rule_store.insert_rule(&scenario_id, &rule, None)?;
             Ok(summary)
         })
     })
@@ -438,8 +452,11 @@ pub async fn update_rule(
             return Err("rule not found".to_string());
         }
         controller.with_history(history_tag, |c| {
+            let summary = c
+                .update_rule(&scenario_id, rule.clone())
+                .map_err(|e| e.to_string())?;
             rule_store.update_rule(&scenario_id, &rule)?;
-            c.update_rule(&scenario_id, rule).map_err(|e| e.to_string())
+            Ok(summary)
         })
     })
     .await
@@ -456,9 +473,10 @@ pub async fn delete_rule(
     let controller = state.controller.clone();
     let rule_store = state.rule_store.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        rule_store.delete_rule(&scenario_id, &rule_id)?;
         controller.with_history(history_tag, |c| {
-            c.delete_rule(&scenario_id, &rule_id).map_err(|e| e.to_string())
+            c.delete_rule(&scenario_id, &rule_id)
+                .map_err(|e| e.to_string())?;
+            rule_store.delete_rule(&scenario_id, &rule_id)
         })
     })
     .await
@@ -475,15 +493,12 @@ pub async fn delete_rules(
     let controller = state.controller.clone();
     let rule_store = state.rule_store.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        // Persist first (idempotent DELETEs, so missing ids are harmless), then apply
-        // the whole batch inside one history step so it undoes as a single action.
-        for rule_id in &rule_ids {
-            rule_store.delete_rule(&scenario_id, rule_id)?;
-        }
         controller.with_history(history_tag, |c| {
             c.delete_rules(&scenario_id, &rule_ids)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            // A single SQLite transaction prevents a mid-batch write error from
+            // persisting only a prefix of the selection.
+            rule_store.delete_rules(&scenario_id, &rule_ids)
         })
     })
     .await
@@ -504,10 +519,7 @@ pub async fn duplicate_rule(
             let (rule, summary) = c
                 .duplicate_rule(&scenario_id, &rule_id)
                 .map_err(|e| e.to_string())?;
-            if let Err(error) = rule_store.insert_rule(&scenario_id, &rule, Some(&rule_id)) {
-                let _ = c.delete_rule(&scenario_id, &rule.id);
-                return Err(error);
-            }
+            rule_store.insert_rule(&scenario_id, &rule, Some(&rule_id))?;
             Ok(summary)
         })
     })
@@ -526,26 +538,41 @@ pub async fn reorder_rule(
     let controller = state.controller.clone();
     let rule_store = state.rule_store.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        controller.with_history(history_tag, |c| {
-            let (previous, next) = c
-                .reorder_rule(&scenario_id, &rule_id, &to_id)
-                .map_err(|e| e.to_string())?;
-            if let Err(error) = rule_store.reorder_rule(
-                &scenario_id,
-                &rule_id,
-                previous.as_deref(),
-                next.as_deref(),
-            ) {
-                if let Ok(autoresponder) = rule_store.load() {
-                    c.set_autoresponder(autoresponder);
-                }
-                return Err(error);
-            }
-            Ok(())
-        })
+        reorder_rule_and_persist(
+            &controller,
+            &rule_store,
+            &scenario_id,
+            &rule_id,
+            &to_id,
+            history_tag,
+        )
     })
     .await
     .map_err(|e| format!("rule reorder task failed: {e}"))?
+}
+
+fn reorder_rule_and_persist(
+    controller: &ProxyController,
+    rule_store: &crate::rule_store::RuleStore,
+    scenario_id: &str,
+    rule_id: &str,
+    to_id: &str,
+    history_tag: HistoryTag,
+) -> Result<(), String> {
+    // The engine deliberately treats dropping a rule onto itself as a no-op and
+    // returns no neighbors. Passing that pair to SQLite means "only item in the
+    // list" and would assign sort_key 0, silently moving the durable rule while
+    // live state stayed unchanged.
+    if rule_id == to_id {
+        return Ok(());
+    }
+    controller.with_history(history_tag, |c| {
+        let (previous, next) = c
+            .reorder_rule(scenario_id, rule_id, to_id)
+            .map_err(|e| e.to_string())?;
+        rule_store.reorder_rule(scenario_id, rule_id, previous.as_deref(), next.as_deref())?;
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -574,14 +601,16 @@ pub async fn set_settings(
     if state.viewer {
         return Err("Changing settings is disabled in viewer mode".to_string());
     }
+    let _settings_op = state.settings_ops.lock().await;
     let controller = state.controller.clone();
     let ca_dir = state.ca_dir.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        crate::persist::save_settings(&ca_dir, &settings).map_err(|e| e.to_string())?;
         controller.set_settings(settings.clone());
-        crate::persist::save_settings(&ca_dir, &settings);
+        Ok::<_, String>(())
     })
     .await
-    .map_err(|e| format!("settings save task failed: {e}"))
+    .map_err(|e| format!("settings save task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -599,15 +628,16 @@ pub async fn set_scripts(
     if state.viewer {
         return Err("Changing scripts is disabled in viewer mode".to_string());
     }
+    let _scripts_op = state.scripts_ops.lock().await;
     let controller = state.controller.clone();
     let ca_dir = state.ca_dir.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        crate::persist::save_scripts(&ca_dir, &scripts).map_err(|e| e.to_string())?;
         let diagnostics = controller.set_scripts(scripts.clone());
-        crate::persist::save_scripts(&ca_dir, &scripts);
-        diagnostics
+        Ok::<_, String>(diagnostics)
     })
     .await
-    .map_err(|e| format!("scripts save task failed: {e}"))
+    .map_err(|e| format!("scripts save task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -645,15 +675,16 @@ pub async fn mock_flows(
     let rule_store = state.rule_store.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let total = ids.len();
-        let batch = controller.prepare_mock_flows(&ids, scenario_id.as_deref(), |completed, total| {
-            if completed == total || completed % 25 == 0 {
-                let _ = progress.send(BulkMockEvent::Progress {
-                    completed,
-                    total,
-                    phase: "generating",
-                });
-            }
-        });
+        let batch =
+            controller.prepare_mock_flows(&ids, scenario_id.as_deref(), |completed, total| {
+                if completed == total || completed % 25 == 0 {
+                    let _ = progress.send(BulkMockEvent::Progress {
+                        completed,
+                        total,
+                        phase: "generating",
+                    });
+                }
+            });
         let _ = progress.send(BulkMockEvent::Progress {
             completed: total,
             total,
@@ -682,9 +713,9 @@ pub async fn mock_flows(
 }
 
 /// Engine commit first, disk second: persisting a batch the engine then rejects
-/// would resurrect ghost rules on the next launch. A persist failure after a
-/// successful commit leaves the rules live but memory-only, which self-heals on
-/// restart.
+/// would resurrect ghost rules on the next launch. `with_history` restores the
+/// pre-commit engine snapshot when persistence fails, so neither side keeps a
+/// partial batch.
 fn commit_and_persist_mock_batch(
     controller: &ProxyController,
     rule_store: &crate::rule_store::RuleStore,
@@ -695,13 +726,13 @@ fn commit_and_persist_mock_batch(
     let scenario_name = batch.scenario_name.clone();
     let create_scenario = batch.create_scenario;
     let rules = batch.rules.clone();
-    let result = controller.with_history(history_tag, |c| {
-        c.commit_mock_batch(batch).map_err(|e| e.to_string())
-    })?;
-    rule_store
-        .apply_mock_batch(&scenario_id, &scenario_name, create_scenario, &rules)
-        .map_err(|e| format!("mock rules are live but could not be persisted: {e}"))?;
-    Ok(result)
+    controller.with_history(history_tag, |c| {
+        let result = c.commit_mock_batch(batch).map_err(|e| e.to_string())?;
+        rule_store
+            .apply_mock_batch(&scenario_id, &scenario_name, create_scenario, &rules)
+            .map_err(|e| format!("mock rules could not be persisted: {e}"))?;
+        Ok(result)
+    })
 }
 
 /// Re-issue the given (doc) flows without credentials to test public
@@ -740,10 +771,7 @@ pub fn ca_info(state: State<'_, AppState>) -> CaInfo {
 
 /// Export the root CA certificate to a user-chosen file (PEM, or DER by extension).
 #[tauri::command]
-pub async fn export_ca(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<bool, String> {
+pub async fn export_ca(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
     let Some(picked) = app
         .dialog()
         .file()
@@ -786,49 +814,290 @@ pub async fn regenerate_ca(state: State<'_, AppState>) -> Result<(), String> {
 
 /// Route the OS system proxy through Germi (Windows `WinINET` / GNOME / KDE).
 #[tauri::command]
-pub fn set_system_proxy(port: u16, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn set_system_proxy(port: u16, state: State<'_, AppState>) -> Result<(), String> {
     // A viewer never binds the proxy port, so routing the OS proxy at it would
     // black-hole the system's traffic (same defense as `start_proxy`).
     if state.viewer {
         return Err("Changing the system proxy is disabled in viewer mode".to_string());
     }
-    let mut prior = state
-        .prior_system_proxy
+    let bound = state.controller.bound_addr().await.ok_or_else(|| {
+        "Cannot enable the system proxy while Germi's listener is stopped".to_string()
+    })?;
+    if bound.port() != port {
+        return Err(format!(
+            "Cannot route the system proxy to port {port}; Germi is listening on {}",
+            bound.port()
+        ));
+    }
+    let mut ownership = state
+        .system_proxy_ownership
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if prior.is_none() {
-        *prior = Some(sysproxy::Sysproxy::get_system_proxy().unwrap_or_default());
-    }
-    drop(prior);
-    let sp = sysproxy::Sysproxy {
-        enable: true,
-        host: "127.0.0.1".to_string(),
-        port,
-        bypass: "localhost,127.0.0.1,::1".to_string(),
+    let current = system_proxy::get()?;
+    let captured_prior = prepare_system_proxy_takeover(&mut ownership, &current);
+    let rollback_ownership = if captured_prior {
+        SystemProxyOwnership::default()
+    } else {
+        ownership.clone()
     };
-    sp.set_system_proxy().map_err(|e| e.to_string())
+    let sp = SystemProxyConfig::germi(port);
+    // Journal the transition before touching the OS. It retains the last
+    // confirmed port and the pending target, so the next process recognizes
+    // either side of a crash-interrupted platform call and can restore safely.
+    ownership.pending_port = Some(port);
+    if let Err(error) = crate::persist::save_system_proxy_ownership(&state.ca_dir, &ownership) {
+        *ownership = rollback_ownership;
+        return Err(format!("could not journal system proxy ownership: {error}"));
+    }
+    match system_proxy::set(&sp) {
+        Ok(()) => {
+            ownership.active_port = Some(port);
+            ownership.pending_port = None;
+            // The already-durable transition recognizes both crash outcomes, so
+            // a failure to compact it is safe and can be retried on status/exit.
+            if let Err(error) =
+                crate::persist::save_system_proxy_ownership(&state.ca_dir, &ownership)
+            {
+                tracing::warn!("failed to finalize system-proxy ownership journal: {error}");
+            }
+            Ok(())
+        }
+        Err(error) => {
+            // Some platform APIs can apply the setting and still report an
+            // error. A successful read-back is the authoritative outcome; report
+            // success so the ordinary toolbar path cannot leave the OS routed
+            // through Germi while its toggle incorrectly remains off. Otherwise
+            // a confirmed failed first takeover must not retain a false token.
+            match system_proxy::get() {
+                Ok(current) if is_germi_system_proxy(&current, port) => {
+                    ownership.active_port = Some(port);
+                    ownership.pending_port = None;
+                    if let Err(error) =
+                        crate::persist::save_system_proxy_ownership(&state.ca_dir, &ownership)
+                    {
+                        tracing::warn!(
+                            "failed to finalize applied system-proxy ownership journal: {error}"
+                        );
+                    }
+                    Ok(())
+                }
+                Ok(_) => {
+                    *ownership = rollback_ownership;
+                    let rollback = sync_system_proxy_ownership(&state.ca_dir, &ownership);
+                    match rollback {
+                        Ok(()) => Err(error.clone()),
+                        Err(rollback_error) => Err(format!(
+                            "{error}; could not roll back the ownership journal: {rollback_error}"
+                        )),
+                    }
+                }
+                Err(read_error) => Err(format!(
+                    "{error}; could not verify whether the system proxy changed ({read_error}). \
+                     The pending ownership journal was retained for safe recovery"
+                )),
+            }
+        }
+    }
+}
+
+fn sync_system_proxy_ownership(
+    dir: &std::path::Path,
+    ownership: &SystemProxyOwnership,
+) -> Result<(), String> {
+    if ownership.active_port.is_some() || ownership.pending_port.is_some() {
+        crate::persist::save_system_proxy_ownership(dir, ownership)
+    } else {
+        crate::persist::clear_system_proxy_ownership(dir)
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn is_germi_system_proxy(proxy: &SystemProxyConfig, owned_port: u16) -> bool {
+    let host = proxy.host.trim();
+    proxy.enable
+        && proxy.port == owned_port
+        && (host == "127.0.0.1"
+            || host == "::1"
+            || host == "[::1]"
+            || host.eq_ignore_ascii_case("localhost"))
+}
+
+fn matching_owned_port(
+    ownership: &SystemProxyOwnership,
+    current: &SystemProxyConfig,
+) -> Option<u16> {
+    [ownership.active_port, ownership.pending_port]
+        .into_iter()
+        .flatten()
+        .find(|port| is_germi_system_proxy(current, *port))
+}
+
+fn has_owned_port(ownership: &SystemProxyOwnership) -> bool {
+    ownership.active_port.is_some() || ownership.pending_port.is_some()
+}
+
+fn read_owned_system_proxy(
+    ownership: &SystemProxyOwnership,
+    read: impl FnOnce() -> Result<SystemProxyConfig, String>,
+) -> Result<Option<SystemProxyConfig>, String> {
+    if !has_owned_port(ownership) {
+        return Ok(None);
+    }
+    read().map(Some)
+}
+
+fn clear_incomplete_system_proxy_ownership(
+    dir: &std::path::Path,
+    ownership: &mut SystemProxyOwnership,
+) {
+    if *ownership == SystemProxyOwnership::default() {
+        return;
+    }
+    *ownership = SystemProxyOwnership::default();
+    if let Err(error) = crate::persist::clear_system_proxy_ownership(dir) {
+        tracing::warn!("failed to clear incomplete system-proxy ownership journal: {error}");
+    }
+}
+
+/// Ensure the saved restore target reflects the configuration Germi is taking
+/// over right now. Re-pointing an already-owned proxy keeps the original
+/// snapshot; reacquiring after an external replacement starts fresh from that
+/// replacement instead of restoring stale state later.
+fn prepare_system_proxy_takeover(
+    ownership: &mut SystemProxyOwnership,
+    current: &SystemProxyConfig,
+) -> bool {
+    if let Some(port) = matching_owned_port(ownership, current) {
+        // Resolve a transition left by a crashed/restarted process before
+        // staging the next one. The original restore target remains unchanged.
+        ownership.active_port = Some(port);
+        ownership.pending_port = None;
+        return false;
+    }
+    *ownership = SystemProxyOwnership {
+        prior: Some(current.clone()),
+        active_port: None,
+        pending_port: None,
+    };
+    true
+}
+
+/// Read the OS proxy plus this process's ownership token so a webview reload
+/// restores the real toggle state instead of resetting it to false.
+#[tauri::command]
+pub fn system_proxy_status(state: State<'_, AppState>) -> Result<SystemProxyStatus, String> {
+    let mut ownership = state
+        .system_proxy_ownership
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // With no ownership token Germi cannot be the component that enabled the OS
+    // proxy. Avoid probing unrelated platform state on every launch; in
+    // particular, valid Windows hostname/protocol-map values were rejected by
+    // `sysproxy` and used to leave all listener controls gated forever.
+    let Some(current) = read_owned_system_proxy(&ownership, system_proxy::get)? else {
+        clear_incomplete_system_proxy_ownership(&state.ca_dir, &mut ownership);
+        return Ok(SystemProxyStatus {
+            active: false,
+            port: None,
+        });
+    };
+    let before = ownership.clone();
+    let active = if let Some(port) = matching_owned_port(&ownership, &current) {
+        ownership.active_port = Some(port);
+        ownership.pending_port = None;
+        true
+    } else {
+        false
+    };
+    if active && *ownership != before {
+        if let Err(error) = crate::persist::save_system_proxy_ownership(&state.ca_dir, &ownership) {
+            tracing::warn!("failed to resolve system-proxy ownership transition: {error}");
+        }
+    } else if !active && has_owned_port(&ownership) {
+        // The OS setting changed outside Germi. Drop the stale restore token now
+        // so a later takeover snapshots that newer setting.
+        *ownership = SystemProxyOwnership::default();
+        if let Err(error) = crate::persist::clear_system_proxy_ownership(&state.ca_dir) {
+            tracing::warn!("failed to clear stale system-proxy ownership journal: {error}");
+        }
+    }
+    Ok(SystemProxyStatus {
+        active,
+        port: active.then_some(current.port),
+    })
 }
 
 #[tauri::command]
 pub fn clear_system_proxy(state: State<'_, AppState>) -> Result<(), String> {
-    if restore_prior_system_proxy(&state)? {
-        return Ok(());
+    if state.viewer {
+        return Err("Changing the system proxy is disabled in viewer mode".to_string());
     }
-    let mut sp = sysproxy::Sysproxy::get_system_proxy().map_err(|e| e.to_string())?;
-    sp.enable = false;
-    sp.set_system_proxy().map_err(|e| e.to_string())
+    // Never disable an unowned proxy as a fallback. If another application or
+    // the user replaced Germi's exact endpoint, leave that configuration alone.
+    restore_prior_system_proxy(&state).map(|_| ())
 }
 
 pub fn restore_prior_system_proxy(state: &AppState) -> Result<bool, String> {
-    let prior = state
-        .prior_system_proxy
+    if state.viewer {
+        return Ok(false);
+    }
+    let mut ownership = state
+        .system_proxy_ownership
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    let Some(prior) = prior else {
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(current) = read_owned_system_proxy(&ownership, system_proxy::get)? else {
+        clear_incomplete_system_proxy_ownership(&state.ca_dir, &mut ownership);
         return Ok(false);
     };
-    prior.set_system_proxy().map_err(|e| e.to_string())?;
+    let restored = restore_saved_proxy(&mut ownership, &current, system_proxy::set);
+    if restored.is_err()
+        && system_proxy::get().is_ok_and(|after| matching_owned_port(&ownership, &after).is_none())
+    {
+        // As with takeover, some platform backends report an error after the OS
+        // already applied the restore. Once the endpoint is no longer ours, the
+        // important safety invariant is satisfied and the UI should switch off.
+        *ownership = SystemProxyOwnership::default();
+        if let Err(error) = crate::persist::clear_system_proxy_ownership(&state.ca_dir) {
+            tracing::warn!("failed to clear restored system-proxy ownership journal: {error}");
+        }
+        return Ok(true);
+    }
+    if restored.is_ok() && !has_owned_port(&ownership) {
+        if let Err(error) = crate::persist::clear_system_proxy_ownership(&state.ca_dir) {
+            tracing::warn!("failed to clear system-proxy ownership journal: {error}");
+        }
+    }
+    restored
+}
+
+fn restore_saved_proxy(
+    ownership: &mut SystemProxyOwnership,
+    current: &SystemProxyConfig,
+    apply: impl FnOnce(&SystemProxyConfig) -> Result<(), String>,
+) -> Result<bool, String> {
+    let Some(_owned_port) = matching_owned_port(ownership, current) else {
+        if has_owned_port(ownership) {
+            // The OS proxy was replaced externally after Germi took ownership.
+            // Abandon our saved snapshot instead of clobbering the newer choice.
+            *ownership = SystemProxyOwnership::default();
+            return Ok(false);
+        }
+        ownership.prior = None;
+        return Ok(false);
+    };
+    // `prior` is always populated by a normal takeover, but an older/manual or
+    // partially corrupted journal can contain only the owned port. Leaving that
+    // endpoint enabled after the process exits would black-hole system traffic;
+    // fail safe by disabling the exact proxy we still own.
+    let fallback;
+    let saved = if let Some(saved) = ownership.prior.as_ref() {
+        saved
+    } else {
+        fallback = current.disabled_copy();
+        &fallback
+    };
+    apply(saved)?;
+    *ownership = SystemProxyOwnership::default();
     Ok(true)
 }
 
@@ -1154,16 +1423,14 @@ pub async fn import_rules(
     };
     let path = picked.into_path().map_err(|e| e.to_string())?;
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    let count = controller.with_history(history_tag, |c| {
-        c.import_rules(&bytes, replace).map_err(|e| e.to_string())
-    })?;
-    // Engine-first by design; a persist failure here leaves the import live but
-    // memory-only (self-heals on restart) — report it, don't roll back.
-    state
-        .rule_store
-        .replace(&controller.get_autoresponder())
-        .map_err(|e| format!("rules were imported but could not be persisted: {e}"))?;
-    Ok(count)
+    controller.with_history(history_tag, |c| {
+        let count = c.import_rules(&bytes, replace).map_err(|e| e.to_string())?;
+        state
+            .rule_store
+            .replace(&c.get_autoresponder())
+            .map_err(|e| format!("imported rules could not be persisted: {e}"))?;
+        Ok(count)
+    })
 }
 
 /// Import the mock-rules bundle embedded in the last opened HAR (parked by
@@ -1176,16 +1443,23 @@ pub async fn apply_har_rules(
     history_tag: HistoryTag,
 ) -> Result<usize, String> {
     let controller = state.controller.clone();
-    let bytes = state
+    let mut pending = state
         .pending_har_rules
         .lock()
-        .ok()
-        .and_then(|mut slot| slot.take())
-        .ok_or_else(|| "No pending mock rules to import".to_string())?;
-    let count = controller.with_history(history_tag, |c| {
-        c.import_rules(&bytes, false).map_err(|e| e.to_string())
-    })?;
-    state.rule_store.replace(&controller.get_autoresponder())?;
+        .map_err(|_| "Pending mock rules lock is poisoned".to_string())?;
+    let count = {
+        let bytes = pending
+            .as_deref()
+            .ok_or_else(|| "No pending mock rules to import".to_string())?;
+        controller.with_history(history_tag, |c| {
+            let count = c.import_rules(bytes, false).map_err(|e| e.to_string())?;
+            state.rule_store.replace(&c.get_autoresponder())?;
+            Ok::<usize, String>(count)
+        })?
+    };
+    // Consume the parked bundle only after both the live import and SQLite
+    // transaction succeed, so a persistence error remains retryable.
+    pending.take();
     Ok(count)
 }
 
@@ -1261,15 +1535,18 @@ pub async fn apply_settings_import(
     if state.viewer {
         return Err("Settings import is disabled in viewer mode".to_string());
     }
-    let text = state
+    let _settings_op = state.settings_ops.lock().await;
+    let mut pending = state
         .pending_settings_import
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let text = pending
+        .as_deref()
         .ok_or_else(|| "No settings file pending — pick one first".to_string())?;
-    let merged = proxy_core::merge_import(&state.controller.get_settings(), &text, &sections)?;
+    let merged = proxy_core::merge_import(&state.controller.get_settings(), text, &sections)?;
+    crate::persist::save_settings(&state.ca_dir, &merged).map_err(|e| e.to_string())?;
     state.controller.set_settings(merged.clone());
-    crate::persist::save_settings(&state.ca_dir, &merged);
+    pending.take();
     Ok(merged)
 }
 
@@ -1281,12 +1558,10 @@ pub async fn apply_settings_import(
 fn apply_history_step(
     controller: &proxy_core::ProxyController,
     rule_store: &crate::rule_store::RuleStore,
-    step: Option<HistoryStep>,
+    step: &HistoryStep,
 ) -> Result<(), String> {
-    if let Some(step) = step {
-        if step.mock_changed {
-            rule_store.replace(&controller.get_autoresponder())?;
-        }
+    if step.mock_changed {
+        rule_store.replace(&controller.get_autoresponder())?;
     }
     Ok(())
 }
@@ -1296,8 +1571,9 @@ pub async fn history_undo(state: State<'_, AppState>) -> Result<(), String> {
     let controller = state.controller.clone();
     let rule_store = state.rule_store.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let step = controller.undo();
-        apply_history_step(&controller, &rule_store, step)
+        controller
+            .undo_and_then(|current, step| apply_history_step(current, &rule_store, step))
+            .map(|_| ())
     })
     .await
     .map_err(|e| format!("undo task failed: {e}"))?
@@ -1308,8 +1584,9 @@ pub async fn history_redo(state: State<'_, AppState>) -> Result<(), String> {
     let controller = state.controller.clone();
     let rule_store = state.rule_store.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let step = controller.redo();
-        apply_history_step(&controller, &rule_store, step)
+        controller
+            .redo_and_then(|current, step| apply_history_step(current, &rule_store, step))
+            .map(|_| ())
     })
     .await
     .map_err(|e| format!("redo task failed: {e}"))?
@@ -1319,7 +1596,7 @@ pub async fn history_redo(state: State<'_, AppState>) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::rule_store::RuleStore;
-    use proxy_core::{Action, CertAuthority, MatchKind, Matcher};
+    use proxy_core::{Action, AutoResponder, CertAuthority, MatchKind, Matcher};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1339,6 +1616,16 @@ mod tests {
         HistoryTag::new("test", None)
     }
 
+    fn proxy(enable: bool, host: &str, port: u16, bypass: &str) -> SystemProxyConfig {
+        SystemProxyConfig {
+            enable,
+            host: host.to_string(),
+            port,
+            bypass: bypass.to_string(),
+            windows_raw: None,
+        }
+    }
+
     fn mock_rule(id: &str) -> Rule {
         Rule {
             id: id.to_string(),
@@ -1354,6 +1641,7 @@ mod tests {
                 status: 200,
                 headers: Vec::new(),
                 body: id.to_string(),
+                body_base64: None,
                 content_type: Some("text/plain".to_string()),
                 content_encoding: None,
             },
@@ -1368,7 +1656,10 @@ mod tests {
 
         let error = activate_scenario(&controller, &store, Some("missing"), tag())
             .expect_err("the engine rejects an unknown scenario id");
-        assert!(error.contains("scenario not found"), "unexpected error: {error}");
+        assert!(
+            error.contains("scenario not found"),
+            "unexpected error: {error}"
+        );
         assert_eq!(
             store.load().expect("load").active_scenario_id,
             None,
@@ -1404,6 +1695,57 @@ mod tests {
     }
 
     #[test]
+    fn failed_mock_persistence_rolls_back_live_rules_and_history() {
+        let dir = test_dir("mock-persist-rollback");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+        let controller = controller();
+        {
+            let connection =
+                rusqlite::Connection::open(dir.join("autoresponder.sqlite3")).expect("open db");
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER reject_rule_insert
+                     BEFORE INSERT ON rules
+                     BEGIN
+                       SELECT RAISE(FAIL, 'forced persistence failure');
+                     END;",
+                )
+                .expect("install failure trigger");
+        }
+
+        let batch = MockBatch {
+            scenario_id: "mocks".to_string(),
+            scenario_name: "My mocks".to_string(),
+            create_scenario: true,
+            rules: vec![mock_rule("not-kept")],
+        };
+        let error = commit_and_persist_mock_batch(&controller, &store, batch, tag())
+            .expect_err("forced SQLite error rejects the command");
+        assert!(error.contains("forced persistence failure"), "{error}");
+
+        let live = controller.get_autoresponder();
+        assert!(
+            live.scenarios.iter().all(|scenario| scenario.id != "mocks"),
+            "the rejected mutation must be rolled back in the live engine"
+        );
+        assert!(
+            controller.undo().is_none(),
+            "a rejected mutation must not advance history"
+        );
+        let persisted = store.load().expect("load");
+        assert!(
+            persisted
+                .scenarios
+                .iter()
+                .all(|scenario| scenario.id != "mocks"),
+            "the SQLite transaction must not leave the newly-created scenario"
+        );
+
+        drop(store);
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
     fn committed_mock_batch_is_persisted() {
         let dir = test_dir("mock-commit");
         let (store, _) = RuleStore::open(&dir, false).expect("open store");
@@ -1430,5 +1772,282 @@ mod tests {
 
         drop(store);
         std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn mocking_into_general_preserves_the_active_scenario_live_and_on_disk() {
+        let dir = test_dir("mock-general-active");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+        let controller = controller();
+        let mut initial = AutoResponder {
+            scenarios: vec![Scenario {
+                id: "active".into(),
+                name: "Active".into(),
+                rules: Vec::new(),
+            }],
+            active_scenario_id: Some("active".into()),
+            general_active: true,
+        };
+        initial.ensure_general();
+        controller.set_autoresponder(initial.clone());
+        store.replace(&initial).expect("seed store");
+
+        let batch = MockBatch {
+            scenario_id: GENERAL_SCENARIO_ID.to_string(),
+            scenario_name: proxy_core::GENERAL_SCENARIO_NAME.to_string(),
+            create_scenario: false,
+            rules: vec![mock_rule("general-mock")],
+        };
+        commit_and_persist_mock_batch(&controller, &store, batch, tag())
+            .expect("commit into General");
+
+        let live = controller.get_autoresponder();
+        assert_eq!(live.active_scenario_id.as_deref(), Some("active"));
+        assert_eq!(live.general().expect("live General").rules.len(), 1);
+        let persisted = store.load().expect("reload store");
+        assert_eq!(persisted.active_scenario_id.as_deref(), Some("active"));
+        assert_eq!(persisted.general().expect("durable General").rules.len(), 1);
+
+        drop(store);
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn empty_mock_batch_does_not_create_or_activate_a_scenario() {
+        let dir = test_dir("mock-empty");
+        let (store, initial) = RuleStore::open(&dir, false).expect("open store");
+        let controller = controller();
+        controller.set_autoresponder(initial);
+
+        let batch = MockBatch {
+            scenario_id: "empty".to_string(),
+            scenario_name: "My mocks".to_string(),
+            create_scenario: true,
+            rules: Vec::new(),
+        };
+        let result = commit_and_persist_mock_batch(&controller, &store, batch, tag())
+            .expect("empty batch is accepted as a no-op");
+        assert!(result.new_rule_ids.is_empty());
+        assert!(controller
+            .get_autoresponder()
+            .scenarios
+            .iter()
+            .all(|scenario| scenario.id != "empty"));
+        assert!(
+            controller.undo().is_none(),
+            "a no-op must not enter history"
+        );
+        let persisted = store.load().expect("reload store");
+        assert!(persisted.active_scenario_id.is_none());
+        assert!(persisted
+            .scenarios
+            .iter()
+            .all(|scenario| scenario.id != "empty"));
+
+        drop(store);
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn dropping_a_rule_onto_itself_does_not_change_durable_order() {
+        let dir = test_dir("reorder-self");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+        let controller = controller();
+        let autoresponder = AutoResponder {
+            scenarios: vec![Scenario {
+                id: "scenario".into(),
+                name: "Scenario".into(),
+                rules: vec![mock_rule("one"), mock_rule("two"), mock_rule("three")],
+            }],
+            active_scenario_id: Some("scenario".into()),
+            general_active: true,
+        };
+        controller.set_autoresponder(autoresponder.clone());
+        store.replace(&autoresponder).expect("seed store");
+
+        reorder_rule_and_persist(&controller, &store, "scenario", "two", "two", tag())
+            .expect("self drop is a no-op");
+
+        let durable = store.load().expect("reload store");
+        let ids: Vec<_> = durable
+            .scenarios
+            .iter()
+            .find(|scenario| scenario.id == "scenario")
+            .expect("scenario")
+            .rules
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["one", "two", "three"]);
+        assert!(
+            controller.undo().is_none(),
+            "a no-op must not create history"
+        );
+
+        drop(store);
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn identifies_only_enabled_loopback_system_proxies_as_germi() {
+        assert!(is_germi_system_proxy(
+            &proxy(true, "127.0.0.1", 8080, ""),
+            8080
+        ));
+        assert!(is_germi_system_proxy(
+            &proxy(true, "localhost", 8080, ""),
+            8080
+        ));
+        assert!(is_germi_system_proxy(
+            &proxy(true, "LOCALHOST", 8080, ""),
+            8080
+        ));
+        assert!(is_germi_system_proxy(&proxy(true, "::1", 8080, ""), 8080));
+        assert!(is_germi_system_proxy(&proxy(true, "[::1]", 8080, ""), 8080));
+        assert!(!is_germi_system_proxy(
+            &proxy(false, "127.0.0.1", 8080, ""),
+            8080
+        ));
+        assert!(!is_germi_system_proxy(
+            &proxy(true, "proxy.example.com", 8080, ""),
+            8080
+        ));
+        assert!(
+            !is_germi_system_proxy(&proxy(true, "127.0.0.1", 8080, ""), 8888),
+            "a different loopback port belongs to another proxy"
+        );
+    }
+
+    #[test]
+    fn status_without_ownership_does_not_read_the_os_proxy() {
+        let current = read_owned_system_proxy(&SystemProxyOwnership::default(), || {
+            panic!("an unowned status probe must not inspect unrelated OS proxy syntax")
+        })
+        .expect("an unowned proxy is a known inactive state");
+
+        assert!(current.is_none());
+    }
+
+    #[test]
+    fn repointing_an_owned_system_proxy_preserves_the_original_restore_target() {
+        let original = proxy(true, "prior.example", 3128, "localhost");
+        let current = proxy(true, "127.0.0.1", 8080, "");
+        let mut ownership = SystemProxyOwnership {
+            prior: Some(original.clone()),
+            active_port: Some(8080),
+            pending_port: None,
+        };
+
+        assert!(!prepare_system_proxy_takeover(&mut ownership, &current));
+        assert_eq!(ownership.prior, Some(original));
+        assert_eq!(ownership.active_port, Some(8080));
+    }
+
+    #[test]
+    fn reacquiring_after_external_replacement_snapshots_the_replacement() {
+        let replacement = proxy(true, "127.0.0.1", 8888, "localhost");
+        let mut ownership = SystemProxyOwnership {
+            prior: Some(proxy(true, "stale.example", 3128, "")),
+            active_port: Some(8080),
+            pending_port: None,
+        };
+
+        assert!(prepare_system_proxy_takeover(&mut ownership, &replacement));
+        assert_eq!(ownership.prior, Some(replacement));
+        assert_eq!(ownership.active_port, None);
+        assert_eq!(ownership.pending_port, None);
+    }
+
+    #[test]
+    fn failed_system_proxy_restore_keeps_the_saved_value_for_retry() {
+        let saved = proxy(true, "prior.example", 3128, "");
+        let current = proxy(true, "127.0.0.1", 8080, "");
+        let mut ownership = SystemProxyOwnership {
+            prior: Some(saved.clone()),
+            active_port: Some(8080),
+            pending_port: None,
+        };
+        let error = restore_saved_proxy(&mut ownership, &current, |_| {
+            Err("OS rejected update".into())
+        })
+        .expect_err("restore fails");
+        assert_eq!(error, "OS rejected update");
+        assert_eq!(
+            ownership.prior,
+            Some(saved),
+            "the prior proxy must remain available for retry"
+        );
+        assert_eq!(ownership.active_port, Some(8080));
+
+        assert!(restore_saved_proxy(&mut ownership, &current, |_| Ok(())).expect("retry succeeds"));
+        assert!(
+            ownership.prior.is_none()
+                && ownership.active_port.is_none()
+                && ownership.pending_port.is_none(),
+            "only a successful restore consumes the saved value"
+        );
+    }
+
+    #[test]
+    fn restore_does_not_clobber_a_different_loopback_proxy() {
+        let mut ownership = SystemProxyOwnership {
+            prior: Some(SystemProxyConfig::default()),
+            active_port: Some(8080),
+            pending_port: None,
+        };
+        let replacement = proxy(true, "127.0.0.1", 8888, "");
+        let mut applied = false;
+
+        assert!(!restore_saved_proxy(&mut ownership, &replacement, |_| {
+            applied = true;
+            Ok(())
+        })
+        .expect("external replacement is not an error"));
+        assert!(!applied, "the replacement proxy must be left untouched");
+        assert!(ownership.prior.is_none());
+        assert!(ownership.active_port.is_none());
+        assert!(ownership.pending_port.is_none());
+    }
+
+    #[test]
+    fn malformed_owned_journal_disables_the_exact_stale_proxy() {
+        let current = proxy(true, "127.0.0.1", 8080, "localhost");
+        let mut ownership = SystemProxyOwnership {
+            prior: None,
+            active_port: Some(8080),
+            pending_port: None,
+        };
+        let mut applied = None;
+
+        assert!(restore_saved_proxy(&mut ownership, &current, |saved| {
+            applied = Some(saved.clone());
+            Ok(())
+        })
+        .expect("the stale owned endpoint is disabled"));
+        assert_eq!(applied, Some(proxy(false, "127.0.0.1", 8080, "localhost")));
+        assert_eq!(ownership, SystemProxyOwnership::default());
+    }
+
+    #[test]
+    fn interrupted_repoint_recognizes_either_side_of_the_os_transition() {
+        let saved = proxy(true, "prior.example", 3128, "");
+
+        for current_port in [8080, 8081] {
+            let current = proxy(true, "127.0.0.1", current_port, "localhost");
+            let mut ownership = SystemProxyOwnership {
+                prior: Some(saved.clone()),
+                active_port: Some(8080),
+                pending_port: Some(8081),
+            };
+            let mut restored = None;
+
+            assert!(restore_saved_proxy(&mut ownership, &current, |prior| {
+                restored = Some(prior.clone());
+                Ok(())
+            })
+            .expect("either crash outcome remains owned"));
+            assert_eq!(restored, Some(saved.clone()));
+            assert_eq!(ownership, SystemProxyOwnership::default());
+        }
     }
 }

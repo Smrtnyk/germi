@@ -316,8 +316,8 @@ function ThrottlingSection({ settings, onChange }: SectionProps) {
     <div className="settings-pane">
       <h4>Throttling</h4>
       <p className="muted small">
-        Add an artificial delay before each response to simulate a slow network. Applies to live
-        captured responses (not mocked ones).
+        Add an artificial delay before each response to simulate a slow network. Applies to both
+        live upstream and mocked responses.
       </p>
       <div className="row">
         <label>Response delay</label>

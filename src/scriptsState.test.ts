@@ -54,6 +54,15 @@ describe("scriptsState", () => {
       expect(example.source).toMatch(/fn on_(request|response)/);
     }
     expect(SCRIPT_EXAMPLES.find((e) => e.id === "cors")?.source).toBe(CORS_TEMPLATE);
+    expect(CORS_TEMPLATE).toContain('req.header("Origin")');
+    expect(CORS_TEMPLATE).toContain('req.header("Access-Control-Request-Method")');
+    expect(CORS_TEMPLATE).toContain('res.add_header("Vary", "Origin")');
+    expect(CORS_TEMPLATE).toContain('res.add_header("Vary", "Access-Control-Request-Method")');
+    expect(CORS_TEMPLATE).toContain('res.add_header("Vary", "Access-Control-Request-Headers")');
+    expect(CORS_TEMPLATE).not.toContain('res.set_header("Vary"');
+    expect(CORS_TEMPLATE).toContain("res.set_status(204)");
+    expect(CORS_TEMPLATE).not.toContain('Access-Control-Allow-Origin", "*"');
+    expect(CORS_TEMPLATE).not.toContain('Access-Control-Allow-Headers", "*"');
   });
 
   it("errorsById keeps only the failing scripts", () => {

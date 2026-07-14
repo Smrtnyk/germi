@@ -77,7 +77,11 @@ fn settings_object(settings: &ProxySettings) -> Map<String, Value> {
 }
 
 fn count_noun(n: usize, noun: &str) -> String {
-    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
 }
 
 /// Human summary of one section, built only from the fields in `present`
@@ -91,7 +95,10 @@ fn section_detail(id: &str, s: &ProxySettings, present: &Map<String, Value>) -> 
                 parts.push(format!("port {}", s.port));
             }
             if has("allowRemote") {
-                parts.push(format!("remote devices {}", if s.allow_remote { "allowed" } else { "blocked" }));
+                parts.push(format!(
+                    "remote devices {}",
+                    if s.allow_remote { "allowed" } else { "blocked" }
+                ));
             }
         }
         "interception" => parts.push(count_noun(s.excluded_hosts.len(), "excluded host")),
@@ -107,7 +114,10 @@ fn section_detail(id: &str, s: &ProxySettings, present: &Map<String, Value>) -> 
                 });
             }
             if has("autoStartOnLaunch") {
-                parts.push(format!("auto-start {}", if s.auto_start_on_launch { "on" } else { "off" }));
+                parts.push(format!(
+                    "auto-start {}",
+                    if s.auto_start_on_launch { "on" } else { "off" }
+                ));
             }
         }
         "throttling" => parts.push(if s.response_delay_ms == 0 {
@@ -225,7 +235,8 @@ mod tests {
             header_columns: vec!["req:x-trace-id".into()],
             ..ProxySettings::default()
         };
-        s.highlight_colors.insert("row-mocked".into(), "#ff000040".into());
+        s.highlight_colors
+            .insert("row-mocked".into(), "#ff000040".into());
         s
     }
 
@@ -241,10 +252,17 @@ mod tests {
                 .iter()
                 .filter(|s| s.keys.contains(&key.as_str()))
                 .count();
-            assert_eq!(owners, 1, "field `{key}` must belong to exactly one section");
+            assert_eq!(
+                owners, 1,
+                "field `{key}` must belong to exactly one section"
+            );
         }
         let known: usize = SETTINGS_SECTIONS.iter().map(|s| s.keys.len()).sum();
-        assert_eq!(known, object.len(), "registry lists a field ProxySettings doesn't have");
+        assert_eq!(
+            known,
+            object.len(),
+            "registry lists a field ProxySettings doesn't have"
+        );
     }
 
     #[test]
@@ -253,7 +271,10 @@ mod tests {
         let parsed: Value = serde_json::from_str(&text).unwrap();
         let object = parsed.as_object().unwrap();
         assert_eq!(object.len(), 2);
-        assert_eq!(parsed["excludedHosts"], serde_json::json!(["spotify.com", "slack.com"]));
+        assert_eq!(
+            parsed["excludedHosts"],
+            serde_json::json!(["spotify.com", "slack.com"])
+        );
         assert_eq!(parsed["responseDelayMs"], serde_json::json!(500));
     }
 
@@ -269,10 +290,20 @@ mod tests {
     fn summaries_cover_all_sections_with_details() {
         let summaries = section_summaries(&sample());
         assert_eq!(summaries.len(), SETTINGS_SECTIONS.len());
-        let by_id = |id: &str| summaries.iter().find(|s| s.id == id).unwrap().detail.clone();
+        let by_id = |id: &str| {
+            summaries
+                .iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .detail
+                .clone()
+        };
         assert_eq!(by_id("connections"), "port 9999 · remote devices allowed");
         assert_eq!(by_id("interception"), "2 excluded hosts");
-        assert_eq!(by_id("capture"), "keep 5000 flows · 1 host filter · auto-start on");
+        assert_eq!(
+            by_id("capture"),
+            "keep 5000 flows · 1 host filter · auto-start on"
+        );
         assert_eq!(by_id("throttling"), "500 ms response delay");
         assert_eq!(by_id("shortcuts"), "Ctrl+Shift+P");
         assert_eq!(by_id("appearance"), "1 color override");
@@ -309,7 +340,10 @@ mod tests {
         let merged = merge_import(&current, file, &ids(&["interception", "throttling"])).unwrap();
         assert_eq!(merged.excluded_hosts, vec!["youtube.com".to_string()]);
         assert_eq!(merged.response_delay_ms, 0);
-        assert_eq!(merged.port, 9999, "unselected section must keep the current value");
+        assert_eq!(
+            merged.port, 9999,
+            "unselected section must keep the current value"
+        );
         assert!(merged.allow_remote);
         assert_eq!(merged.capture_filter, vec!["api.example.com".to_string()]);
     }
