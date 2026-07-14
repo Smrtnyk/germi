@@ -752,6 +752,24 @@ function TextActions({
   );
 }
 
+interface BodyViewControls {
+  msg: MessageDetail;
+  kind: "image" | "text" | "binary";
+  encLabel: string | null;
+  canPretty: boolean;
+  view: BodyView;
+  setView: (view: BodyView) => void;
+  showHex: boolean;
+  setShowHex: React.Dispatch<React.SetStateAction<boolean>>;
+  wrap: boolean;
+  setWrap: React.Dispatch<React.SetStateAction<boolean>>;
+  copy: (label: string, value: string) => void;
+}
+
+interface BodyBarProps extends BodyViewControls {
+  onMaximize?: () => void;
+}
+
 function BodyBar({
   msg,
   kind,
@@ -765,20 +783,7 @@ function BodyBar({
   setWrap,
   copy,
   onMaximize,
-}: {
-  msg: MessageDetail;
-  kind: "image" | "text" | "binary";
-  encLabel: string | null;
-  canPretty: boolean;
-  view: BodyView;
-  setView: (v: BodyView) => void;
-  showHex: boolean;
-  setShowHex: React.Dispatch<React.SetStateAction<boolean>>;
-  wrap: boolean;
-  setWrap: React.Dispatch<React.SetStateAction<boolean>>;
-  copy: (label: string, value: string) => void;
-  onMaximize?: () => void;
-}) {
+}: BodyBarProps) {
   return (
     <div className="body-bar">
       <span className="body-meta">
@@ -828,6 +833,15 @@ function useBodyContent(
   };
 }
 
+interface BodyRegionProps extends BodyViewControls {
+  find: InspectorFind;
+  text: string;
+  ct: string;
+  isRawEncoded: boolean;
+  onLoadFull: () => void;
+  onMaximize?: () => void;
+}
+
 function BodyRegion({
   msg,
   kind,
@@ -846,25 +860,7 @@ function BodyRegion({
   isRawEncoded,
   onLoadFull,
   onMaximize,
-}: {
-  msg: MessageDetail;
-  kind: "image" | "text" | "binary";
-  encLabel: string | null;
-  canPretty: boolean;
-  view: BodyView;
-  setView: (v: BodyView) => void;
-  showHex: boolean;
-  setShowHex: React.Dispatch<React.SetStateAction<boolean>>;
-  wrap: boolean;
-  setWrap: React.Dispatch<React.SetStateAction<boolean>>;
-  find: InspectorFind;
-  copy: (label: string, value: string) => void;
-  text: string;
-  ct: string;
-  isRawEncoded: boolean;
-  onLoadFull: () => void;
-  onMaximize?: () => void;
-}) {
+}: BodyRegionProps) {
   return (
     <>
       <BodyBar

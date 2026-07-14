@@ -2,6 +2,7 @@ import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 
+import { flushDetachedWindows, onWindowFlushRequested } from "./windowFlush";
 import { openOrFocusWindow } from "./windows";
 
 /**
@@ -82,20 +83,6 @@ export interface RuleWindowClosedPayload {
   ruleId: string;
 }
 
-interface RuleWindowsFlushRequestPayload {
-  requestId: string;
-  /** Process shutdown closes the detached writer immediately after its save,
-   * eliminating the post-acknowledgement edit gap. Other barriers only flush. */
-  closeAfterFlush?: boolean;
-}
-
-interface RuleWindowFlushResultPayload {
-  requestId: string;
-  ruleId: string;
-  ok: boolean;
-  error?: string;
-}
-
 const LABEL_PREFIX = "rule-";
 
 /** Tauri window labels allow [a-zA-Z0-9-/:_]; UUID rule ids already qualify. */
@@ -169,30 +156,12 @@ export function onRuleWindowsFlushRequested(
   ruleId: string,
   handler: (closeAfterFlush: boolean) => Promise<void>,
 ): Promise<UnlistenFn> {
-  return listen<RuleWindowsFlushRequestPayload>(RULE_WINDOWS_FLUSH_REQUESTED, (event) => {
-    void Promise.resolve()
-      .then(() => handler(event.payload.closeAfterFlush === true))
-      .then(
-        () =>
-          emit(RULE_WINDOW_FLUSH_FINISHED, {
-            requestId: event.payload.requestId,
-            ruleId,
-            ok: true,
-          } satisfies RuleWindowFlushResultPayload),
-        (error: unknown) =>
-          emit(RULE_WINDOW_FLUSH_FINISHED, {
-            requestId: event.payload.requestId,
-            ruleId,
-            ok: false,
-            error: String(error),
-          } satisfies RuleWindowFlushResultPayload),
-      )
-      .catch(() => {});
+  return onWindowFlushRequested({
+    requestEvent: RULE_WINDOWS_FLUSH_REQUESTED,
+    resultEvent: RULE_WINDOW_FLUSH_FINISHED,
+    targetId: ruleId,
+    flush: handler,
   });
-}
-
-function flushRequestId(): string {
-  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 }
 
 /** Wait for every currently-open detached rule editor to persist before the
@@ -202,73 +171,15 @@ export async function flushDetachedRuleWindows(
   timeoutMs = 5_000,
   closeAfterFlush = false,
 ): Promise<void> {
-  const pending = new Set(await listOpenRuleIds());
-  if (pending.size === 0) return;
-
-  const requestId = flushRequestId();
-  let settle!: (error?: Error) => void;
-  const result = new Promise<Error | undefined>((resolve) => {
-    settle = resolve;
+  await flushDetachedWindows({
+    requestEvent: RULE_WINDOWS_FLUSH_REQUESTED,
+    resultEvent: RULE_WINDOW_FLUSH_FINISHED,
+    closeAfterFlush,
+    timeoutMs,
+    listOpenTargetIds: listOpenRuleIds,
+    onTargetClosed: (handler) => onRuleWindowClosed(({ ruleId }) => handler(ruleId)),
+    saveError: (ruleId) => `Rule ${ruleId} could not be saved.`,
+    timeoutError: (pendingCount) =>
+      `Timed out waiting for ${pendingCount} detached rule editor${pendingCount === 1 ? "" : "s"} to save.`,
   });
-  let firstError: Error | undefined;
-  let settled = false;
-  let ready = false;
-  const finishRule = (ruleId: string, error?: Error) => {
-    if (!pending.delete(ruleId)) return;
-    firstError ??= error;
-    if (ready && pending.size === 0 && !settled) {
-      settled = true;
-      settle(firstError);
-    }
-  };
-
-  let unlistenResult: UnlistenFn | undefined;
-  let unlistenClosed: UnlistenFn | undefined;
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    unlistenResult = await listen<RuleWindowFlushResultPayload>(
-      RULE_WINDOW_FLUSH_FINISHED,
-      (event) => {
-        if (event.payload.requestId !== requestId) return;
-        finishRule(
-          event.payload.ruleId,
-          event.payload.ok
-            ? undefined
-            : new Error(event.payload.error || `Rule ${event.payload.ruleId} could not be saved.`),
-        );
-      },
-    );
-    unlistenClosed = await onRuleWindowClosed(({ ruleId }) => finishRule(ruleId));
-
-    // Drop windows that closed while the listeners were being installed. New
-    // windows cannot normally be opened during shutdown, but include one if it
-    // did appear before the request was emitted.
-    const stillOpen = new Set(await listOpenRuleIds());
-    for (const ruleId of pending) {
-      if (!stillOpen.has(ruleId)) finishRule(ruleId);
-    }
-    for (const ruleId of stillOpen) pending.add(ruleId);
-    ready = true;
-    if (pending.size === 0) return;
-
-    timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      settle(
-        new Error(
-          `Timed out waiting for ${pending.size} detached rule editor${pending.size === 1 ? "" : "s"} to save.`,
-        ),
-      );
-    }, timeoutMs);
-    await emit(RULE_WINDOWS_FLUSH_REQUESTED, {
-      requestId,
-      closeAfterFlush,
-    } satisfies RuleWindowsFlushRequestPayload);
-    const error = await result;
-    if (error) throw error;
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
-    unlistenResult?.();
-    unlistenClosed?.();
-  }
 }

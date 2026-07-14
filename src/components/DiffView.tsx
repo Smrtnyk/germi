@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import {
   changedSpanMap,
@@ -37,7 +37,7 @@ const SIGNS = { same: " ", del: "-", add: "+" } as const;
  *  long lines must show the exact change, not just a colored row). */
 function MarkedText({ text, span }: { text: string; span?: CharSpan }) {
   const clipped = clipLine(text);
-  if (!span || span.start >= clipped.length || span.end <= span.start) return <>{clipped}</>;
+  if (!span || span.start >= clipped.length || span.end <= span.start) return clipped;
   const end = Math.min(span.end, clipped.length);
   return (
     <>
@@ -99,14 +99,28 @@ function TailNote({ hidden }: { hidden: number }) {
   return <div className="diff-tail muted">… {hidden} more rows not shown</div>;
 }
 
-function UnifiedDiffRows({ lines }: { lines: DiffLine[] }) {
+function useRowExpansion() {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const expand = (index: number) => setExpanded((prev) => new Set(prev).add(index));
+  return { expanded, expand };
+}
+
+function DiffRowsFrame({ children, hidden }: { children: ReactNode; hidden: number }) {
+  return (
+    <div className="diff-rows">
+      {children}
+      <TailNote hidden={hidden} />
+    </div>
+  );
+}
+
+function UnifiedDiffRows({ lines }: { lines: DiffLine[] }) {
+  const { expanded, expand } = useRowExpansion();
   const rows = useMemo(() => renderRows(lines, expanded), [lines, expanded]);
   const spans = useMemo(() => changedSpanMap(lines), [lines]);
   const shown = rows.slice(0, MAX_RENDERED_ROWS);
-  const expand = (index: number) => setExpanded((prev) => new Set(prev).add(index));
   return (
-    <div className="diff-rows">
+    <DiffRowsFrame hidden={rows.length - shown.length}>
       {shown.map((row) =>
         row.kind === "line" ? (
           <DiffLineRow key={row.key} line={row.line} span={spans.get(row.line)} />
@@ -114,8 +128,7 @@ function UnifiedDiffRows({ lines }: { lines: DiffLine[] }) {
           <FoldButton key={row.key} count={row.count} onExpand={() => expand(row.index)} />
         ),
       )}
-      <TailNote hidden={rows.length - shown.length} />
-    </div>
+    </DiffRowsFrame>
   );
 }
 
@@ -163,14 +176,13 @@ function renderSplit(pairs: SplitPair[], expanded: Set<number>): SplitRenderRow[
 }
 
 function SplitDiffRows({ lines }: { lines: DiffLine[] }) {
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const { expanded, expand } = useRowExpansion();
   const pairs = useMemo(() => splitRows(lines), [lines]);
   const spans = useMemo(() => changedSpanMap(lines), [lines]);
   const rows = useMemo(() => renderSplit(pairs, expanded), [pairs, expanded]);
   const shown = rows.slice(0, MAX_RENDERED_ROWS);
-  const expand = (index: number) => setExpanded((prev) => new Set(prev).add(index));
   return (
-    <div className="diff-rows">
+    <DiffRowsFrame hidden={rows.length - shown.length}>
       {shown.map((row) =>
         row.kind === "pair" ? (
           <div key={row.key} className="diff-srow">
@@ -189,8 +201,7 @@ function SplitDiffRows({ lines }: { lines: DiffLine[] }) {
           <FoldButton key={row.key} count={row.count} onExpand={() => expand(row.index)} />
         ),
       )}
-      <TailNote hidden={rows.length - shown.length} />
-    </div>
+    </DiffRowsFrame>
   );
 }
 

@@ -680,19 +680,8 @@ function InterceptionSection({ settings, onChange }: SectionProps) {
   );
 }
 
-export interface SettingsDialogProps {
-  settings: ProxySettings;
-  onChange: (s: ProxySettings) => void;
+export interface SettingsDialogProps extends SectionCtx {
   onImportApplied: (s: ProxySettings) => void;
-  columnOrder: string[];
-  onColumnOrderChange: (order: string[]) => void;
-  shortcuts: Bindings;
-  onShortcutsChange: (b: Bindings) => void;
-  autoLayout: AutoLayout;
-  onAutoLayoutChange: (layout: AutoLayout) => void;
-  running: boolean;
-  portError: string | null;
-  onCaChanged: () => void;
   onClose: () => void;
 }
 

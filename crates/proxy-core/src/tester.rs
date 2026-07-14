@@ -9,10 +9,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::flow::{now_ms, CapturedRequest, CapturedResponse};
+use crate::http_semantics::{
+    is_framing_header, response_has_no_body, sanitize_status, valid_header,
+};
 use crate::rules::{
     apply_request_header_edits, apply_response_rules, blocked_response, evaluate_request_rules,
-    evaluate_request_rules_stateful, has_request_repeat_cycle, valid_header, RequestOutcome, Rule,
-    RuleCursors, RuleSet, SyntheticResponse,
+    evaluate_request_rules_stateful, has_request_repeat_cycle, RequestOutcome, Rule, RuleCursors,
+    RuleSet, SyntheticResponse,
 };
 
 #[derive(Deserialize, Clone, Debug)]
@@ -126,24 +129,11 @@ pub fn parse_url(url: &str) -> (String, String, String) {
 fn client_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
     headers
         .into_iter()
-        .filter(|(k, v)| {
-            valid_header(k, v)
-                && !k.eq_ignore_ascii_case("content-length")
-                && !k.eq_ignore_ascii_case("transfer-encoding")
-                && !k.eq_ignore_ascii_case("trailer")
-        })
+        .filter(|(k, v)| valid_header(k, v) && !is_framing_header(k))
         .collect()
 }
 
 const PREVIEW_CAP: usize = 10;
-
-fn wire_status(status: u16) -> u16 {
-    if (100..=999).contains(&status) {
-        status
-    } else {
-        200
-    }
-}
 
 fn preview_sequence(rules: &[Rule], req: &CapturedRequest) -> (Vec<SequenceStep>, bool) {
     let mut cursors = RuleCursors::default();
@@ -168,7 +158,7 @@ fn preview_sequence(rules: &[Rule], req: &CapturedRequest) -> (Vec<SequenceStep>
             } => {
                 steps.push(SequenceStep {
                     outcome: "respond".into(),
-                    status: Some(wire_status(response.status)),
+                    status: Some(sanitize_status(response.status)),
                     rule: Some(rule.clone()),
                 });
                 is_terminal_rule(rule_id)
@@ -457,11 +447,8 @@ fn preview_response(
     body: bytes::Bytes,
     source: String,
 ) -> TestResponse {
-    let status = wire_status(status);
-    let display_body = if method.eq_ignore_ascii_case("HEAD")
-        || (100..200).contains(&status)
-        || matches!(status, 204 | 205 | 304)
-    {
+    let status = sanitize_status(status);
+    let display_body = if response_has_no_body(method, status) {
         String::new()
     } else {
         match crate::body::decode_body(&headers, &body) {

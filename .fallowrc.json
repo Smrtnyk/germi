@@ -21,12 +21,6 @@
         "functions": ["useAutoresponder"],
         "maxCognitive": 19,
         "reason": "Feature hook that wires the scenario/rule/mock action callbacks (cyclomatic 1); cognitive reflects per-action callback fan-out (incl. the General-layer on/off toggle) — each action also tags its mutation for the undo-history timeline — not branching."
-      },
-      {
-        "files": ["src/components/SettingsDialog.tsx"],
-        "functions": ["SettingsDialog"],
-        "maxCognitive": 16,
-        "reason": "Settings shell driven by the section registry (cyclomatic 3); cognitive reflects prop fan-out to the section components (incl. the inline port-rebind error passed to Connections), not branching."
       }
     ]
   }

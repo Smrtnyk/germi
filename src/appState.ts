@@ -35,6 +35,7 @@ import { nextSort, resolveSort, sortFlows, type SortState } from "./sort";
 import { useSplitRatio } from "./useResizable";
 import { useProxyIndicator } from "./useProxyIndicator";
 import { useSystemHotkeys } from "./useSystemHotkeys";
+import { useAsyncSubscription } from "./useTauriListen";
 import { friendlyError, useToasts, type Notify } from "./toast";
 import { toCurl } from "./curl";
 import { copyText } from "./useCopy";
@@ -196,23 +197,12 @@ interface InitialStateOptions {
   getCaMutationGeneration: () => number;
   getProxyOperationGeneration: () => number;
   serializeProxyOperation: (operation: () => Promise<void>) => Promise<void>;
-  getSettingsSaveTail: () => Promise<unknown>;
+  flushSettingsSaves: () => Promise<void>;
   reconcileListenerSettings: (previous: ProxySettings) => Promise<void>;
   onPortBound: (port: number) => void;
   setCaInfo: (ca: CaInfo) => void;
   loadInitialFlows: () => Promise<void>;
   setError: SetError;
-}
-
-async function waitForStableSettingsSaves(opts: InitialStateOptions): Promise<void> {
-  // A settings write can be appended while the current tail is awaiting IPC.
-  // Follow the moving tail so startup never reconciles the listener against an
-  // optimistic snapshot whose persistence outcome is still unknown.
-  for (;;) {
-    const tail = opts.getSettingsSaveTail();
-    await tail;
-    if (tail === opts.getSettingsSaveTail()) return;
-  }
 }
 
 async function disableOwnedSystemProxy(
@@ -301,7 +291,7 @@ async function restoreRunningProxyState(
   // Settings becomes editable before the remaining startup probes finish. If a
   // fast save landed while running was still unknown, its ordinary listener
   // reconciliation returned early. Reconcile after the actual address is known.
-  await waitForStableSettingsSaves(opts);
+  await opts.flushSettingsSaves();
   if (opts.getProxyOperationGeneration() === proxyGeneration) {
     await opts.reconcileListenerSettings(loadedSettings);
   }
@@ -342,7 +332,7 @@ async function autoStartInitialProxy(
 
   // A harmless edit while the other startup reads were in flight must not
   // cancel auto-start. Wait for it and bind from the latest durable value.
-  await waitForStableSettingsSaves(opts);
+  await opts.flushSettingsSaves();
   const startupSettings = opts.getLatestSettings();
   const settingsGeneration = opts.getSettingsMutationGeneration();
   if (!startupSettings.autoStartOnLaunch) return;
@@ -356,7 +346,7 @@ async function autoStartInitialProxy(
     // A save may have begun while startProxy awaited the bind. Reconcile from
     // the address that actually started once that save has settled.
     if (opts.getSettingsMutationGeneration() !== settingsGeneration) {
-      await waitForStableSettingsSaves(opts);
+      await opts.flushSettingsSaves();
       await opts.reconcileListenerSettings(startupSettings);
     }
   } catch (error) {
@@ -775,7 +765,9 @@ function useProxyControl(
     setBoundAllowRemoteState(value);
   }
 
-  const operationTailRef = useRef<Promise<unknown>>(Promise.resolve());
+  const operationQueueRef = useRef<OrderedTaskQueue | null>(null);
+  operationQueueRef.current ??= new OrderedTaskQueue();
+  const operationQueue = operationQueueRef.current;
   const operationCountRef = useRef(0);
   const operationGenerationRef = useRef(0);
 
@@ -788,8 +780,7 @@ function useProxyControl(
     operationGenerationRef.current += 1;
     operationCountRef.current += 1;
     setBusyState(true);
-    const run = operationTailRef.current.then(operation);
-    operationTailRef.current = run.catch(() => {});
+    const run = operationQueue.run(operation);
     return run.finally(() => {
       operationCountRef.current -= 1;
       if (operationCountRef.current === 0) setBusyState(false);
@@ -1238,23 +1229,14 @@ function useAutoresponderStore(setError: SetError, mutationQueue: OrderedTaskQue
 /** A detached rule editor writes directly to the shared store. Reload when a
  * different window announces a save so the docked list cannot stay stale. */
 function useExternalRuleRefresh(refresh: () => Promise<void>, setError: SetError) {
-  useEffect(() => {
-    const self = currentRuleWindowLabel();
-    let active = true;
-    let unlisten: (() => void) | undefined;
-    void onRulesChanged((p) => {
+  const self = currentRuleWindowLabel();
+  useAsyncSubscription(
+    onRulesChanged,
+    (p) => {
       if (p.source !== self) void refresh();
-    })
-      .then((fn) => {
-        if (active) unlisten = fn;
-        else fn();
-      })
-      .catch((error) => setError(String(error)));
-    return () => {
-      active = false;
-      unlisten?.();
-    };
-  }, [refresh, setError]);
+    },
+    (error) => setError(String(error)),
+  );
 }
 
 function useAutoresponder(
@@ -2302,7 +2284,8 @@ function useTrafficWorkspace(
 }
 
 function useSettingsCoordinator(settings: ProxySettings) {
-  const settingsSaveChain = useRef(Promise.resolve());
+  const settingsSaveQueueRef = useRef<OrderedTaskQueue | null>(null);
+  settingsSaveQueueRef.current ??= new OrderedTaskQueue();
   const settingsSaveErrorRef = useRef<unknown>(null);
   const settingsMutationGenerationRef = useRef(0);
   // Async listener operations must merge into the newest settings snapshot,
@@ -2314,7 +2297,7 @@ function useSettingsCoordinator(settings: ProxySettings) {
   // use the last durable snapshot instead of resurrecting an earlier failed edit.
   const durableSettingsRef = useRef(settings);
   return {
-    settingsSaveChain,
+    settingsSaveQueue: settingsSaveQueueRef.current,
     settingsSaveErrorRef,
     settingsMutationGenerationRef,
     latestSettingsRef,
@@ -2360,7 +2343,7 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
 
   const settings = useSettings();
   const {
-    settingsSaveChain,
+    settingsSaveQueue,
     settingsSaveErrorRef,
     settingsMutationGenerationRef,
     latestSettingsRef,
@@ -2504,7 +2487,7 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
         getCaMutationGeneration: () => caMutationGenerationRef.current,
         getProxyOperationGeneration: proxy.getOperationGeneration,
         serializeProxyOperation: proxy.serializeOperation,
-        getSettingsSaveTail: () => settingsSaveChain.current,
+        flushSettingsSaves: () => settingsSaveQueue.flush(),
         reconcileListenerSettings: (previous) =>
           proxy.applyListenChange(previous, latestSettingsRef.current),
         onPortBound: (port) => saveSettings({ ...latestSettingsRef.current, port }),
@@ -2522,8 +2505,8 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
     settingsMutationGenerationRef.current += 1;
     latestSettingsRef.current = next;
     settings.setSettings(next);
-    settingsSaveChain.current = settingsSaveChain.current
-      .then(async () => {
+    void settingsSaveQueue
+      .run(async () => {
         const durableBefore = durableSettingsRef.current;
         try {
           await persistSettings(next, durableBefore.headerColumns, flowStore.refresh, setError);
@@ -2581,8 +2564,8 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
     // The import command already persisted once. Queue the imported snapshot
     // behind any ordinary save that was waiting in this webview, so an older
     // full-settings write cannot land afterward and silently undo the import.
-    settingsSaveChain.current = settingsSaveChain.current
-      .then(async () => {
+    void settingsSaveQueue
+      .run(async () => {
         const durableBefore = durableSettingsRef.current;
         let persisted = next;
         try {
@@ -2645,15 +2628,9 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
   }
 
   const flushSettings = useCallback(async (): Promise<void> => {
-    // A save can be appended while an earlier queued write is awaiting IPC.
-    // Follow the moving tail so shutdown never resolves against a stale chain.
-    for (;;) {
-      const tail = settingsSaveChain.current;
-      await tail;
-      if (tail === settingsSaveChain.current) break;
-    }
+    await settingsSaveQueue.flush();
     if (settingsSaveErrorRef.current !== null) throw settingsSaveErrorRef.current;
-  }, [settingsSaveChain, settingsSaveErrorRef]);
+  }, [settingsSaveErrorRef, settingsSaveQueue]);
 
   function handleRowClick(id: string, e: ReactMouseEvent) {
     setFullBody(false);

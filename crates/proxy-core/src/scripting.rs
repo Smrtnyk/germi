@@ -15,11 +15,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use hudsucker::hyper::header::{HeaderName, HeaderValue};
+use hudsucker::hyper::header::HeaderName;
 use rhai::{Dynamic, Engine, EvalAltResult, ImmutableString, Position, Scope, AST};
 use serde::{Deserialize, Serialize};
 
 use crate::flow::{CapturedRequest, CapturedResponse};
+use crate::http_semantics::valid_header;
 
 /// Per-run operation cap. A single hook invocation that exceeds it is aborted
 /// with an error (caught and logged), so an accidental infinite loop degrades to
@@ -308,11 +309,6 @@ impl HttpMessage {
             s.status_override = Some(code);
         }
     }
-}
-
-fn valid_header(name: &str, value: &str) -> bool {
-    HeaderName::from_bytes(name.as_bytes()).is_ok()
-        && HeaderValue::from_bytes(value.as_bytes()).is_ok()
 }
 
 /// Split a captured `path` (which is stored as path + query) into the two parts,

@@ -23,6 +23,9 @@ use hudsucker::{
 };
 
 use crate::flow::{now_ms, CapturedRequest, CapturedResponse, Flow};
+use crate::http_semantics::{
+    is_framing_header, response_has_no_body, sanitize_status, status_forbids_body,
+};
 use crate::rules::{RequestOutcome, SyntheticResponse};
 use crate::scripting::{Effects, HeaderOp};
 use crate::shared::Shared;
@@ -860,16 +863,8 @@ fn captured_request(
     }
 }
 
-fn status_forbids_body(status: u16) -> bool {
-    (100..200).contains(&status) || matches!(status, 204 | 205 | 304)
-}
-
 fn status_forbids_metadata(status: u16) -> bool {
     (100..200).contains(&status) || matches!(status, 204 | 205)
-}
-
-fn response_has_no_body(method: &str, status: u16) -> bool {
-    method.eq_ignore_ascii_case("HEAD") || status_forbids_body(status)
 }
 
 /// HEAD and 304 may carry the selected representation's length despite having
@@ -1138,19 +1133,6 @@ fn header_values<'a>(pairs: &'a [(String, String)], name: &str) -> Vec<&'a str> 
         .collect()
 }
 
-/// Clamp a rule/script-supplied status to hyper's valid range (100..=999). An
-/// out-of-range value poisons `Response::builder`, whose fallback serves 200
-/// with EVERY header dropped — while the store would record the configured
-/// status, so wire and inspector disagree. Falling back to 200 here, before the
-/// response is built or recorded, keeps the headers and keeps them in sync.
-fn sanitize_status(status: u16) -> u16 {
-    if (100..=999).contains(&status) {
-        status
-    } else {
-        200
-    }
-}
-
 fn build_parts(status: u16, headers: &[(String, String)], body: &Bytes) -> Response<Body> {
     let mut builder = Response::builder().status(status);
     for (k, v) in headers {
@@ -1252,12 +1234,6 @@ fn apply_response_effects(captured: &mut CapturedResponse, effects: Effects) {
 
 fn remove_header_ci(headers: &mut Vec<(String, String)>, name: &str) {
     headers.retain(|(k, _)| !k.eq_ignore_ascii_case(name));
-}
-
-fn is_framing_header(name: &str) -> bool {
-    name.eq_ignore_ascii_case("content-length")
-        || name.eq_ignore_ascii_case("transfer-encoding")
-        || name.eq_ignore_ascii_case("trailer")
 }
 
 fn restore_message_framing(

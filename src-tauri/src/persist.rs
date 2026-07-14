@@ -3,8 +3,6 @@
 
 use std::io::Write;
 use std::path::Path;
-#[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use proxy_core::{ProxySettings, Script};
 use serde::{Deserialize, Serialize};
@@ -62,9 +60,6 @@ struct StoredSystemProxyOwnership {
     #[serde(default)]
     pending_port: Option<u16>,
 }
-
-#[cfg(test)]
-static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Write `contents` to `path` atomically: write a sibling temp file, flush +
 /// fsync it, then rename it over the target (atomic on the same filesystem).
@@ -158,17 +153,9 @@ pub fn clear_system_proxy_ownership(dir: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    fn unique_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "germi-persist-{name}-{}-{}",
-            std::process::id(),
-            TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ))
-    }
-
     #[test]
     fn settings_and_scripts_round_trip_after_successful_saves() {
-        let dir = unique_path("round-trip");
+        let dir = tempfile::tempdir().expect("temp dir");
         let settings = ProxySettings::default();
         let scripts = vec![Script {
             id: "s".into(),
@@ -176,32 +163,31 @@ mod tests {
             enabled: true,
             source: "fn on_request(req) {}".into(),
         }];
-        save_settings(&dir, &ProxySettings::default()).expect("initial settings save");
-        save_scripts(&dir, &[]).expect("initial scripts save");
+        save_settings(dir.path(), &ProxySettings::default()).expect("initial settings save");
+        save_scripts(dir.path(), &[]).expect("initial scripts save");
         // Both destinations now exist: replacement must remain atomic and work
         // on Windows as well as Unix.
-        save_settings(&dir, &settings).expect("replace settings");
-        save_scripts(&dir, &scripts).expect("replace scripts");
+        save_settings(dir.path(), &settings).expect("replace settings");
+        save_scripts(dir.path(), &scripts).expect("replace scripts");
         assert_eq!(
-            serde_json::to_value(load_settings(&dir).expect("load settings")).expect("json"),
+            serde_json::to_value(load_settings(dir.path()).expect("load settings")).expect("json"),
             serde_json::to_value(settings).expect("json"),
         );
-        assert_eq!(load_scripts(&dir), Some(scripts));
-        std::fs::remove_dir_all(dir).expect("cleanup");
+        assert_eq!(load_scripts(dir.path()), Some(scripts));
     }
 
     #[test]
     fn save_failures_are_returned_instead_of_reported_as_success() {
-        let path = unique_path("not-a-directory");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("not-a-directory");
         std::fs::write(&path, b"file").expect("seed file");
         assert!(save_settings(&path, &ProxySettings::default()).is_err());
         assert!(save_scripts(&path, &[]).is_err());
-        std::fs::remove_file(path).expect("cleanup");
     }
 
     #[test]
     fn system_proxy_ownership_survives_a_process_restart() {
-        let dir = unique_path("proxy-ownership");
+        let dir = tempfile::tempdir().expect("temp dir");
         let ownership = SystemProxyOwnership {
             prior: Some(SystemProxyConfig {
                 enable: true,
@@ -218,10 +204,9 @@ mod tests {
             pending_port: Some(8081),
         };
 
-        save_system_proxy_ownership(&dir, &ownership).expect("save ownership");
-        assert_eq!(load_system_proxy_ownership(&dir), Some(ownership));
-        clear_system_proxy_ownership(&dir).expect("clear ownership");
-        assert_eq!(load_system_proxy_ownership(&dir), None);
-        std::fs::remove_dir_all(dir).expect("cleanup");
+        save_system_proxy_ownership(dir.path(), &ownership).expect("save ownership");
+        assert_eq!(load_system_proxy_ownership(dir.path()), Some(ownership));
+        clear_system_proxy_ownership(dir.path()).expect("clear ownership");
+        assert_eq!(load_system_proxy_ownership(dir.path()), None);
     }
 }

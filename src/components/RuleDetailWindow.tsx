@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { api } from "../ipc";
@@ -11,6 +11,8 @@ import {
   onRuleWindowsFlushRequested,
   onRulesChanged,
 } from "../ruleWindows";
+import { useSafeWindowClose } from "../useSafeWindowClose";
+import { useAsyncSubscription } from "../useTauriListen";
 import { RuleEditor, useSelectedRule } from "./AutoresponderPanel";
 import { RuleTester } from "./RuleTester";
 
@@ -55,27 +57,14 @@ function useExternalReloadToken(
   onError: (error: unknown) => void,
 ): { reloadToken: number; ready: boolean } {
   const [reloadToken, setReloadToken] = useState(0);
-  const [ready, setReady] = useState(false);
-  useEffect(() => {
-    let active = true;
-    let unlisten: (() => void) | undefined;
-    setReady(false);
-    void onRulesChanged((p) => {
+  const ready = useAsyncSubscription(
+    onRulesChanged,
+    (p) => {
       if (p.source === label) return;
       if (p.ruleId === null || p.ruleId === ruleId) setReloadToken((t) => t + 1);
-    })
-      .then((fn) => {
-        if (active) {
-          unlisten = fn;
-          setReady(true);
-        } else fn();
-      })
-      .catch(onError);
-    return () => {
-      active = false;
-      unlisten?.();
-    };
-  }, [label, onError, ruleId]);
+    },
+    onError,
+  );
   return { reloadToken, ready };
 }
 
@@ -115,84 +104,38 @@ function useDetailWindowClose(
   editor: Editor,
   setError: (msg: string) => void,
 ) {
-  const closeTaskRef = useRef<Promise<boolean> | null>(null);
-  const [closing, setClosing] = useState(false);
-  const [ready, setReady] = useState(false);
-  // Reassigned each render so the once-mounted listeners flush the latest edit.
-  const closeRef = useRef<() => Promise<boolean>>(() => Promise.resolve(false));
-
-  function beginClose(operation: () => Promise<void>, failureMessage: string): Promise<boolean> {
-    const active = closeTaskRef.current;
-    if (active) return active;
-    setClosing(true);
-    const task = operation().then(
-      () => true,
-      (error: unknown) => {
-        setError(`${failureMessage} (${error}). The editor was left open so you can retry.`);
-        return false;
-      },
-    );
-    closeTaskRef.current = task;
-    void task.then((closed) => {
-      if (closeTaskRef.current !== task || closed) return;
-      closeTaskRef.current = null;
-      setClosing(false);
-    });
-    return task;
-  }
-
-  closeRef.current = () => {
-    return beginClose(async () => {
+  const { beginClose, close, closing, ready } = useSafeWindowClose({
+    operation: async () => {
       await editor.flush();
       await getCurrentWindow().destroy();
-    }, "Rule changes could not be saved or the window could not close");
-  };
-  const close = useCallback(() => closeRef.current(), []);
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape" && !e.defaultPrevented) {
-        e.preventDefault();
-        void close();
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    let active = true;
-    let unlisten: (() => void) | undefined;
-    setReady(false);
-    void getCurrentWindow()
-      .onCloseRequested((e) => {
-        e.preventDefault();
-        void close();
-      })
-      .then((fn) => {
-        if (active) {
-          unlisten = fn;
-          setReady(true);
-        } else fn();
-      })
-      .catch((error) => setError(String(error)));
-    return () => {
-      active = false;
-      window.removeEventListener("keydown", onKey);
-      unlisten?.();
-    };
-  }, [close, setError]);
+    },
+    onFailure: (error) =>
+      setError(
+        `Rule changes could not be saved or the window could not close (${error}). The editor was left open so you can retry.`,
+      ),
+    onSetupError: (error) => setError(String(error)),
+  });
 
   async function handleDelete() {
-    await beginClose(async () => {
-      editor.clearPending();
-      // A save that already entered IPC cannot be cancelled. Let it settle
-      // before submitting the delete so async Tauri command scheduling cannot
-      // reorder the stale update behind the deletion. Its failure is irrelevant
-      // here because deletion deliberately supersedes that editor snapshot.
-      await editor.flush().catch(() => {});
-      await api.deleteRule(scenarioId, ruleId, {
-        label: `Delete rule "${ruleLabel(editor.rule?.matcher.url ?? "")}"`,
-      });
-      emitRulesChanged(currentRuleWindowLabel(), ruleId);
-      await getCurrentWindow().destroy();
-    }, "The rule could not be deleted or the window could not close");
+    await beginClose(
+      async () => {
+        editor.clearPending();
+        // A save that already entered IPC cannot be cancelled. Let it settle
+        // before submitting the delete so async Tauri command scheduling cannot
+        // reorder the stale update behind the deletion. Its failure is irrelevant
+        // here because deletion deliberately supersedes that editor snapshot.
+        await editor.flush().catch(() => {});
+        await api.deleteRule(scenarioId, ruleId, {
+          label: `Delete rule "${ruleLabel(editor.rule?.matcher.url ?? "")}"`,
+        });
+        emitRulesChanged(currentRuleWindowLabel(), ruleId);
+        await getCurrentWindow().destroy();
+      },
+      (error) =>
+        setError(
+          `The rule could not be deleted or the window could not close (${error}). The editor was left open so you can retry.`,
+        ),
+    );
   }
 
   return { handleDelete, close, closing, ready };
@@ -280,34 +223,26 @@ export function RuleDetailWindow({ ruleId, scenarioId }: { ruleId: string; scena
   } = useDetailWindowClose(ruleId, scenarioId, editor, setError);
   const hits = useRuleHitCount(ruleId, reloadToken);
   useRememberWindowSize();
-  const [flushReady, setFlushReady] = useState(false);
   const flushEditor = editor.flush;
+  const subscribeToFlush = useCallback(
+    (handler: (closeAfterFlush: boolean) => Promise<void>) =>
+      onRuleWindowsFlushRequested(ruleId, handler),
+    [ruleId],
+  );
 
   // The main window owns process exit. Register this editor in its shutdown
   // barrier so an app close cannot terminate a pending debounced rule save.
-  useEffect(() => {
-    let active = true;
-    let unlisten: (() => void) | undefined;
-    setFlushReady(false);
-    void onRuleWindowsFlushRequested(ruleId, async (closeAfterFlush) => {
+  const flushReady = useAsyncSubscription(
+    subscribeToFlush,
+    async (closeAfterFlush) => {
       if (!closeAfterFlush) {
         await flushEditor();
         return;
       }
       if (!(await close())) throw new Error("The detached rule editor could not close safely.");
-    })
-      .then((fn) => {
-        if (active) {
-          unlisten = fn;
-          setFlushReady(true);
-        } else fn();
-      })
-      .catch((setupError) => setError(String(setupError)));
-    return () => {
-      active = false;
-      unlisten?.();
-    };
-  }, [close, flushEditor, ruleId]);
+    },
+    (setupError) => setError(String(setupError)),
+  );
 
   const editorReady = syncReady && closeReady && flushReady;
 

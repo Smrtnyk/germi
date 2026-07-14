@@ -31,7 +31,7 @@ import { FlowInspector } from "./components/FlowInspector";
 import { AutoresponderPanel, type AutoresponderPanelProps } from "./components/AutoresponderPanel";
 import { ScriptsContainer } from "./components/ScriptsContainer";
 import { flushDetachedScriptsWindow, openOrFocusScriptsWindow } from "./scriptWindows";
-import { closeMainWindowWithEditors } from "./scriptsClose";
+import { useSafeWindowClose } from "./useSafeWindowClose";
 import { CaDialog } from "./components/CaDialog";
 import { SettingsDialog, type SettingsDialogProps } from "./components/SettingsDialog";
 import { StatusBar } from "./components/StatusBar";
@@ -665,51 +665,26 @@ function useSafeAppClose(
   ruleFlushRef: RefObject<() => Promise<void>>,
   scriptsFlushRef: RefObject<() => Promise<void>>,
 ) {
-  const [closing, setClosing] = useState(false);
-  const closingRef = useRef(false);
   const flushSettings = s.flushSettings;
   const flushRuleMutations = s.ar.flushMutations;
   const flushHistory = s.history.flush;
   const notify = s.notify;
-
-  useEffect(() => {
-    const appWindow = getCurrentWindow();
-    let alive = true;
-    let unlisten: (() => void) | undefined;
-    void appWindow
-      .onCloseRequested((event) => {
-        event.preventDefault();
-        if (closingRef.current) return;
-        closingRef.current = true;
-        setClosing(true);
-        void closeMainWindowWithEditors(
-          () => flushDetachedScriptsWindow(5_000, true),
-          () => flushDetachedRuleWindows(5_000, true),
-          async () => {
-            await ruleFlushRef.current();
-            await flushRuleMutations();
-            await flushHistory();
-          },
-          flushSettings,
-          () => scriptsFlushRef.current(),
-          () => appWindow.destroy(),
-        ).catch((error: unknown) => {
-          closingRef.current = false;
-          setClosing(false);
-          notify("error", `Could not close safely: ${String(error)}`);
-        });
-      })
-      .then((fn) => {
-        if (alive) unlisten = fn;
-        else fn();
-      })
-      .catch((error) => notify("error", `Could not install the safe-close handler: ${error}`));
-    return () => {
-      alive = false;
-      unlisten?.();
-    };
-  }, [flushHistory, flushRuleMutations, flushSettings, notify, ruleFlushRef, scriptsFlushRef]);
-
+  const { closing, closingRef } = useSafeWindowClose({
+    closeOnEscape: false,
+    operation: async () => {
+      await flushDetachedScriptsWindow(5_000, true);
+      await flushDetachedRuleWindows(5_000, true);
+      await ruleFlushRef.current();
+      await flushRuleMutations();
+      await flushHistory();
+      await flushSettings();
+      await scriptsFlushRef.current();
+      await getCurrentWindow().destroy();
+    },
+    onFailure: (error) => notify("error", `Could not close safely: ${String(error)}`),
+    onSetupError: (error) =>
+      notify("error", `Could not install the safe-close handler: ${String(error)}`),
+  });
   return { closing, closingRef };
 }
 
