@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-import { closeScriptsEditorWindow } from "../scriptsClose";
 import { onScriptsFlushRequested } from "../scriptWindows";
+import { useSafeWindowClose } from "../useSafeWindowClose";
+import { useAsyncSubscription } from "../useTauriListen";
 import { ScriptsContainer } from "./ScriptsContainer";
 
 /** The scripts editor in a detached OS window (loaded by `main.tsx` on
@@ -13,81 +14,36 @@ import { ScriptsContainer } from "./ScriptsContainer";
  *  event and then broadcasts so the docked pane unlocks. */
 export function ScriptsWindow() {
   const flushRef = useRef<() => Promise<void>>(() => Promise.resolve());
-  const closeTaskRef = useRef<Promise<boolean> | null>(null);
-  const [closing, setClosing] = useState(false);
-  const [closeReady, setCloseReady] = useState(false);
-  const [flushReady, setFlushReady] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
-
-  const close = useCallback((): Promise<boolean> => {
-    const active = closeTaskRef.current;
-    if (active) return active;
-    setClosing(true);
-    const task = closeScriptsEditorWindow(flushRef.current, () => getCurrentWindow().destroy());
-    closeTaskRef.current = task;
-    void task.then((closed) => {
-      if (closeTaskRef.current !== task || closed) return;
-      closeTaskRef.current = null;
-      setClosing(false);
-      setSetupError("Scripts could not be saved or the editor window could not close.");
-    });
-    return task;
-  }, []);
+  const {
+    close,
+    closing,
+    ready: closeReady,
+  } = useSafeWindowClose({
+    operation: async () => {
+      await flushRef.current();
+      await getCurrentWindow().destroy();
+    },
+    onFailure: () =>
+      setSetupError("Scripts could not be saved or the editor window could not close."),
+    onSetupError: (error) => setSetupError(String(error)),
+  });
 
   useEffect(() => {
     void getCurrentWindow().setTitle("Scripts");
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape" && !e.defaultPrevented) {
-        e.preventDefault();
-        void close();
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    let alive = true;
-    let unlisten: (() => void) | undefined;
-    setCloseReady(false);
-    void getCurrentWindow()
-      .onCloseRequested((e) => {
-        e.preventDefault();
-        void close();
-      })
-      .then((fn) => {
-        if (alive) {
-          unlisten = fn;
-          setCloseReady(true);
-        } else fn();
-      })
-      .catch((error) => setSetupError(String(error)));
-    return () => {
-      alive = false;
-      window.removeEventListener("keydown", onKey);
-      unlisten?.();
-    };
-  }, [close]);
+  }, []);
 
-  useEffect(() => {
-    let alive = true;
-    let unlisten: (() => void) | undefined;
-    setFlushReady(false);
-    void onScriptsFlushRequested(async (closeAfterFlush) => {
+  const flushReady = useAsyncSubscription(
+    onScriptsFlushRequested,
+    async (closeAfterFlush) => {
       if (!closeAfterFlush) {
         await flushRef.current();
         return;
       }
       if (!(await close())) throw new Error("The detached scripts editor could not close safely.");
-    })
-      .then((fn) => {
-        if (alive) {
-          unlisten = fn;
-          setFlushReady(true);
-        } else fn();
-      })
-      .catch((error) => setSetupError(String(error)));
-    return () => {
-      alive = false;
-      unlisten?.();
-    };
-  }, [close]);
+    },
+    (error) => setSetupError(String(error)),
+  );
 
   return (
     <div className="scripts-window" inert={closing} aria-busy={closing}>

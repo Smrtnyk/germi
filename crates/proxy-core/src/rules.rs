@@ -16,11 +16,11 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::{LazyLock, Mutex};
 
-use hudsucker::hyper::header::{HeaderName, HeaderValue};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::flow::{header, CapturedRequest, CapturedResponse, Flow};
+use crate::http_semantics::valid_header;
 
 /// Compile-once cache for user rule regexes. The same pattern is evaluated on
 /// every intercepted request (and response), so memoize the compiled `Regex`
@@ -1722,11 +1722,6 @@ pub(crate) fn apply_request_header_edits(
     for (name, value) in edits {
         set_header(headers, name, value);
     }
-}
-
-pub(crate) fn valid_header(name: &str, value: &str) -> bool {
-    HeaderName::from_bytes(name.as_bytes()).is_ok()
-        && HeaderValue::from_bytes(value.as_bytes()).is_ok()
 }
 
 /// The status text a rule's action contributes to a `Status`-scope search.

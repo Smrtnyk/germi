@@ -11,6 +11,7 @@ import {
   onScriptsWindowClosed,
 } from "../scriptWindows";
 import type { Script } from "../types";
+import { useAsyncSubscription } from "../useTauriListen";
 import { Button } from "./ui/Button";
 import { ScriptsPanel } from "./ScriptsPanel";
 
@@ -141,22 +142,9 @@ function useScriptsWindowGate(enabled: boolean, onClosed: () => Promise<void>) {
 
 /** Reload when the OTHER window saves (own broadcasts are skipped via `source`). */
 function useExternalScriptsReload(label: string, reload: () => Promise<void>) {
-  useEffect(() => {
-    let alive = true;
-    let unlisten: (() => void) | undefined;
-    void onScriptsChanged((payload) => {
-      if (payload.source !== label) void reload().catch(() => {});
-    })
-      .then((fn) => {
-        if (alive) unlisten = fn;
-        else fn();
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-      unlisten?.();
-    };
-  }, [label, reload]);
+  useAsyncSubscription(onScriptsChanged, (payload) => {
+    if (payload.source !== label) void reload().catch(() => {});
+  });
 }
 
 function useScriptListActions(

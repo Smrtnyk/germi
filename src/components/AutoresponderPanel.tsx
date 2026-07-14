@@ -1364,13 +1364,6 @@ function useScenarioName(
     setSaveState("idle");
   }, [scenario.id, scenario.name]);
 
-  useEffect(
-    () => () => {
-      void queue.flush().catch(() => {});
-    },
-    [queue],
-  );
-
   function change(next: string) {
     setName(next);
     setSaveState("saving");

@@ -187,18 +187,14 @@ export function stepSelection(
 export interface Extraction {
   rest: FlowSummary[];
   moved: FlowSummary[];
-  /** Suggested focus in the source pane: the row that takes the visual place
-   *  of the first removed one. */
-  nextFocus: string | null;
 }
 
 /** Remove `ids` from `list` (keeping list order); null when none are present. */
 export function extractFlows(list: FlowSummary[], ids: Set<string>): Extraction | null {
-  const firstIdx = list.findIndex((f) => ids.has(f.id));
-  if (firstIdx === -1) return null;
   const moved = list.filter((f) => ids.has(f.id));
+  if (moved.length === 0) return null;
   const rest = list.filter((f) => !ids.has(f.id));
-  return { rest, moved, nextFocus: rest[Math.min(firstIdx, rest.length - 1)]?.id ?? null };
+  return { rest, moved };
 }
 
 /** Everything one pane owns: its rows, its selection, and its view query. */
@@ -252,9 +248,8 @@ export function movePaneFlows(
   const wanted = ids ?? new Set(fromVisibleIds.filter((id) => from.sel.selectedIds.has(id)));
   const extraction = extractFlows(from.flows, wanted);
   if (!extraction) return null;
-  // Focus follows the *visible* list, not the unfiltered backing list. Using
-  // `extraction.nextFocus` here can point keyboard/diff actions at a row the
-  // active filter hides after the selected row is moved away.
+  // Focus follows the visible list, not the unfiltered backing list, so keyboard
+  // and diff actions never point at a row the active filter hides.
   const firstVisibleIndex = fromVisibleIds.findIndex((id) => wanted.has(id));
   const remainingVisibleIds = fromVisibleIds.filter((id) => !wanted.has(id));
   const nextVisible =

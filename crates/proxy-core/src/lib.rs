@@ -27,6 +27,7 @@ mod flow;
 mod handler;
 mod har_export;
 mod history;
+mod http_semantics;
 mod import;
 mod reissue;
 mod rules;

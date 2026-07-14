@@ -180,11 +180,10 @@ describe("pane selection", () => {
 });
 
 describe("moving rows across panes", () => {
-  it("extracts by id keeping order and suggests the next focus", () => {
+  it("extracts by id while keeping order", () => {
     const extraction = extractFlows(FLOWS, new Set(["a", "c"]));
     expect(extraction?.moved.map((f) => f.id)).toEqual(["a", "c"]);
     expect(extraction?.rest.map((f) => f.id)).toEqual(["b"]);
-    expect(extraction?.nextFocus).toBe("b");
   });
 
   it("returns null when nothing matches", () => {
