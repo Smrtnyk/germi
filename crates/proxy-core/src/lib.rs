@@ -43,6 +43,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use hudsucker::rustls::crypto::aws_lc_rs;
@@ -57,16 +58,18 @@ pub use flow::{
     MessageDetail, ResourceKind,
 };
 pub use history::HistoryTag;
+pub use import::har_embedded_rules;
 pub use rules::{
     Action, ActionSummary, AutoResponder, AutoResponderSummary, MatchKind, Matcher, Rule,
     RuleSearchScope, RuleSet, RuleSummary, Scenario, ScenarioSummary, GENERAL_SCENARIO_ID,
     GENERAL_SCENARIO_NAME,
 };
-pub use import::har_embedded_rules;
 pub use rules_export::{preview_rules, RulesExport, ScenarioPreview};
 pub use scripting::{Script, ScriptDiagnostic};
 pub use settings::ProxySettings;
-pub use settings_io::{export_sections, import_preview, merge_import, section_summaries, SectionSummary};
+pub use settings_io::{
+    export_sections, import_preview, merge_import, section_summaries, SectionSummary,
+};
 pub use tester::{test_rules, SequenceStep, TestInput, TestResponse, TestResult};
 
 use handler::CaptureHandler;
@@ -77,6 +80,11 @@ use shared::Shared;
 const MAX_FLOWS: usize = 5_000;
 /// Max concurrent outbound availability checks (bounds load + open sockets).
 const AVAILABILITY_CONCURRENCY: usize = 12;
+/// Long-lived tunnels and stalled upstreams must not make Stop/Restart wait
+/// forever. Hudsucker begins graceful connection shutdown immediately; after
+/// this window, abort its serving coordinator so the listener/controller can
+/// make progress even if a connection never drains.
+const PROXY_SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 static ENTITY_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn new_entity_id(prefix: &str) -> String {
@@ -122,6 +130,33 @@ pub enum SearchSide {
 /// join handle (so `stop()` can wait for the listener socket to be released).
 type RunningProxy = (SocketAddr, oneshot::Sender<()>, JoinHandle<()>);
 
+/// A serving task can exit independently after a successful bind (for example,
+/// a fatal accept-loop error). Do not leave that finished task masquerading as
+/// a live listener forever or blocking a later Start/CA regeneration.
+fn discard_finished_proxy(slot: &mut Option<RunningProxy>) {
+    if slot.as_ref().is_some_and(|(_, _, task)| task.is_finished()) {
+        slot.take();
+    }
+}
+
+async fn shutdown_proxy(
+    shutdown: oneshot::Sender<()>,
+    mut task: JoinHandle<()>,
+    grace: Duration,
+) -> bool {
+    let _ = shutdown.send(());
+    if tokio::time::timeout(grace, &mut task).await.is_ok() {
+        return false;
+    }
+    tracing::warn!(
+        grace_ms = grace.as_millis(),
+        "proxy connections did not drain before the shutdown deadline; aborting the serving task"
+    );
+    task.abort();
+    let _ = task.await;
+    true
+}
+
 /// Owns the proxy lifecycle, the captured-flow store and the rules.
 pub struct ProxyController {
     shared: Arc<Shared>,
@@ -136,7 +171,11 @@ impl ProxyController {
     /// Build a controller around an already-loaded CA. Seeds an example scenario.
     pub fn new(ca: CertAuthority) -> Self {
         Self {
-            shared: Shared::new(MAX_FLOWS, AutoResponder::example(), ProxySettings::default()),
+            shared: Shared::new(
+                MAX_FLOWS,
+                AutoResponder::example(),
+                ProxySettings::default(),
+            ),
             ca: RwLock::new(ca),
             running: Mutex::new(None),
         }
@@ -153,11 +192,17 @@ impl ProxyController {
     }
 
     pub fn ca_cert_pem(&self) -> String {
-        self.ca.read().map(|c| c.cert_pem.clone()).unwrap_or_default()
+        self.ca
+            .read()
+            .map(|c| c.cert_pem.clone())
+            .unwrap_or_default()
     }
 
     pub fn ca_cert_der(&self) -> Vec<u8> {
-        self.ca.read().map(|c| c.cert_der.clone()).unwrap_or_default()
+        self.ca
+            .read()
+            .map(|c| c.cert_der.clone())
+            .unwrap_or_default()
     }
 
     /// Generate a fresh root CA, persist it under `dir`, and swap it in. The
@@ -167,7 +212,8 @@ impl ProxyController {
         // Hold the `running` lock across the whole swap so a concurrent start()
         // cannot read the old CA and bake it into a freshly-spawned proxy in the
         // window between the check and the swap (check-then-act TOCTOU).
-        let running = self.running.lock().await;
+        let mut running = self.running.lock().await;
+        discard_finished_proxy(&mut running);
         if running.is_some() {
             bail!("stop the proxy before regenerating the CA");
         }
@@ -179,14 +225,18 @@ impl ProxyController {
     }
 
     pub async fn is_running(&self) -> bool {
-        self.running.lock().await.is_some()
+        let mut running = self.running.lock().await;
+        discard_finished_proxy(&mut running);
+        running.is_some()
     }
 
     /// The address the proxy is currently bound to, or `None` if stopped. Lets the
     /// UI re-read the live listen address (port + LAN scope) after a reload,
     /// instead of guessing from the persisted setting.
     pub async fn bound_addr(&self) -> Option<SocketAddr> {
-        self.running.lock().await.as_ref().map(|(addr, _, _)| *addr)
+        let mut running = self.running.lock().await;
+        discard_finished_proxy(&mut running);
+        running.as_ref().map(|(addr, _, _)| *addr)
     }
 
     /// Start the proxy listening on `addr`. Errors if already running, or if the
@@ -194,6 +244,7 @@ impl ProxyController {
     /// (e.g. resolving port 0 to the OS-assigned port).
     pub async fn start(&self, addr: SocketAddr) -> Result<SocketAddr> {
         let mut guard = self.running.lock().await;
+        discard_finished_proxy(&mut guard);
         if guard.is_some() {
             bail!("proxy is already running");
         }
@@ -209,11 +260,45 @@ impl ProxyController {
     /// error — a mistyped port never kills a working proxy. Returns the bound addr.
     pub async fn restart(&self, addr: SocketAddr) -> Result<SocketAddr> {
         let mut guard = self.running.lock().await;
+
+        discard_finished_proxy(&mut guard);
+        if guard.as_ref().is_some_and(|(bound, _, _)| *bound == addr) {
+            return Ok(addr);
+        }
+
+        // `127.0.0.1:PORT` and `0.0.0.0:PORT` overlap. That is exactly the
+        // rebind produced by toggling "allow remote devices", so the usual
+        // bind-first strategy cannot work. Stop first in this one case, but
+        // remember the old address and restore it if the replacement bind
+        // fails so a bad setting still does not strand a working proxy.
+        if guard
+            .as_ref()
+            .is_some_and(|(bound, _, _)| bound.port() == addr.port())
+        {
+            let (old_addr, tx, task) = guard.take().expect("checked running proxy");
+            shutdown_proxy(tx, task, PROXY_SHUTDOWN_GRACE).await;
+            match self.spawn_proxy(addr).await {
+                Ok(state) => {
+                    let local_addr = state.0;
+                    *guard = Some(state);
+                    return Ok(local_addr);
+                }
+                Err(error) => {
+                    let restored = self.spawn_proxy(old_addr).await.map_err(|restore_error| {
+                        anyhow!(
+                            "failed to bind {addr}: {error}; also failed to restore {old_addr}: {restore_error}"
+                        )
+                    })?;
+                    *guard = Some(restored);
+                    return Err(error);
+                }
+            }
+        }
+
         let state = self.spawn_proxy(addr).await?;
         let local_addr = state.0;
         if let Some((_addr, tx, task)) = guard.take() {
-            let _ = tx.send(());
-            let _ = task.await;
+            shutdown_proxy(tx, task, PROXY_SHUTDOWN_GRACE).await;
         }
         *guard = Some(state);
         Ok(local_addr)
@@ -265,11 +350,16 @@ impl ProxyController {
     /// (the listener socket is released) before returning, so an immediate
     /// restart on the same port doesn't fail with "address already in use".
     pub async fn stop(&self) {
-        let taken = self.running.lock().await.take();
+        // Keep lifecycle operations serialized until the old listener is
+        // actually gone. Publishing an empty slot before the bounded drain let
+        // a concurrent status/start/CA operation observe "stopped" while the
+        // socket was still serving (and a same-port Start would then fail).
+        let mut running = self.running.lock().await;
+        let taken = running.take();
         if let Some((_addr, tx, task)) = taken {
-            let _ = tx.send(());
-            let _ = task.await;
+            shutdown_proxy(tx, task, PROXY_SHUTDOWN_GRACE).await;
         }
+        drop(running);
     }
 
     // ---- captured-flow access (for IPC commands) ----
@@ -312,13 +402,23 @@ impl ProxyController {
                         return None;
                     }
                     let req = &flow.request;
+                    let url = req
+                        .uri
+                        .parse::<hudsucker::hyper::Uri>()
+                        .ok()
+                        .filter(|uri| uri.scheme().is_some() && uri.authority().is_some())
+                        .map_or_else(
+                            || format!("{}://{}{}", req.scheme, req.host, req.path),
+                            |uri| uri.to_string(),
+                        );
                     Some((
                         id.clone(),
                         reissue::ReissueTarget {
                             method,
-                            // Rebuild the absolute URL: intercepted-HTTPS captures
-                            // store an origin-form URI (just the path).
-                            url: format!("{}://{}{}", req.scheme, req.host, req.path),
+                            // Captures normally retain an absolute URI; rebuild
+                            // from parts as a defensive fallback for older/imported
+                            // in-memory data that may carry origin form.
+                            url,
                             headers: req.headers.clone(),
                         },
                     ))
@@ -380,7 +480,10 @@ impl ProxyController {
     pub fn remove_flows(&self, ids: &[String]) {
         if let Ok(mut store) = self.shared.store.lock() {
             if store.remove(ids) > 0 {
-                let _ = self.shared.events.send(FlowEvent::Removed { ids: ids.to_vec() });
+                let _ = self
+                    .shared
+                    .events
+                    .send(FlowEvent::Removed { ids: ids.to_vec() });
             }
         }
     }
@@ -448,7 +551,10 @@ impl ProxyController {
             ),
             _ => None,
         };
-        Some(BodyComparison { request_equal, response_equal })
+        Some(BodyComparison {
+            request_equal,
+            response_equal,
+        })
     }
 
     /// Shared scan core for body/header content search. `extract` projects a
@@ -536,9 +642,15 @@ impl ProxyController {
     /// so a malformed file leaves traffic intact.
     pub fn open_capture(&self, bytes: &[u8], ext: &str) -> Result<usize> {
         let flows = Self::parse_capture(bytes, ext)?;
-        self.clear_flows();
-        self.shared.reset_seq();
-        Ok(self.import_flows(flows).len())
+        let _history_op = self
+            .shared
+            .history_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Ok(mut history) = self.shared.history.lock() {
+            history.discard_flow_entries();
+        }
+        Ok(self.shared.import_flows(flows, true).len())
     }
 
     /// Append a capture file to the current traffic WITHOUT clearing it — for
@@ -547,7 +659,9 @@ impl ProxyController {
     /// continues (only a replacing open renumbers from 1). Returns the new
     /// flows' summaries in file order, so the caller can address exactly them.
     pub fn append_capture(&self, bytes: &[u8], ext: &str) -> Result<Vec<FlowSummary>> {
-        Ok(self.import_flows(Self::parse_capture(bytes, ext)?))
+        Ok(self
+            .shared
+            .import_flows(Self::parse_capture(bytes, ext)?, false))
     }
 
     /// Serialize the current traffic to a HAR 1.2 archive (JSON bytes). With
@@ -637,19 +751,6 @@ impl ProxyController {
         ar.ensure_general();
         self.set_autoresponder(ar);
         Ok(count)
-    }
-
-    /// Insert imported flows (assigning ids) and stream them to the UI.
-    /// Returns their summaries in insertion order.
-    fn import_flows(&self, flows: Vec<crate::flow::Flow>) -> Vec<FlowSummary> {
-        let mut summaries = Vec::with_capacity(flows.len());
-        for mut flow in flows {
-            flow.id = self.shared.next_id();
-            flow.seq = self.shared.next_seq();
-            summaries.push(flow.summary());
-            self.shared.record_imported(flow);
-        }
-        summaries
     }
 
     // ---- autoresponder (scenarios) access ----
@@ -810,7 +911,25 @@ impl ProxyController {
         let scenario = Scenario {
             id,
             name: name.map_or_else(
-                || format!("Scenario {}", ar.scenarios.len() + 1),
+                || {
+                    // The built-in General layer is not a numbered scenario.
+                    // Continue after the largest existing generated name so a
+                    // fresh document starts at Scenario 1 and deleting an
+                    // earlier scenario cannot create a duplicate label.
+                    let next = ar
+                        .scenarios
+                        .iter()
+                        .filter_map(|scenario| {
+                            scenario
+                                .name
+                                .strip_prefix("Scenario ")
+                                .and_then(|suffix| suffix.parse::<u64>().ok())
+                        })
+                        .max()
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    format!("Scenario {next}")
+                },
                 str::to_string,
             ),
             rules: Vec::new(),
@@ -943,7 +1062,9 @@ impl ProxyController {
             .ok_or_else(|| anyhow!("scenario not found"))?;
         let doomed: HashSet<&str> = rule_ids.iter().map(String::as_str).collect();
         let before = scenario.rules.len();
-        scenario.rules.retain(|rule| !doomed.contains(rule.id.as_str()));
+        scenario
+            .rules
+            .retain(|rule| !doomed.contains(rule.id.as_str()));
         let removed = before - scenario.rules.len();
         if removed > 0 {
             self.reconcile_rule_cursors(previous_active.as_deref(), &ar);
@@ -1103,7 +1224,11 @@ impl ProxyController {
 
     /// Compile `source` without storing it; `Some(message)` if it doesn't compile.
     pub fn check_script(&self, source: &str) -> Option<String> {
-        self.shared.scripts.read().ok().and_then(|engine| engine.check(source))
+        self.shared
+            .scripts
+            .read()
+            .ok()
+            .and_then(|engine| engine.check(source))
     }
 
     /// Build mock rules without changing live state. Callers can report progress,
@@ -1131,7 +1256,10 @@ impl ProxyController {
             .map(str::to_string)
             .or(ar.active_scenario_id)
             .unwrap_or_else(|| new_entity_id("scenario"));
-        let create_scenario = !ar.scenarios.iter().any(|scenario| scenario.id == scenario_id);
+        let create_scenario = !ar
+            .scenarios
+            .iter()
+            .any(|scenario| scenario.id == scenario_id);
         MockBatch {
             scenario_id,
             scenario_name: "My mocks".to_string(),
@@ -1141,6 +1269,12 @@ impl ProxyController {
     }
 
     pub fn commit_mock_batch(&self, batch: MockBatch) -> Result<MockResult> {
+        if batch.rules.is_empty() {
+            return Ok(MockResult {
+                scenario_id: batch.scenario_id,
+                new_rule_ids: Vec::new(),
+            });
+        }
         let mut ar = self
             .shared
             .autoresponder
@@ -1162,7 +1296,12 @@ impl ProxyController {
         let new_rule_ids = batch.rules.iter().map(|rule| rule.id.clone()).collect();
         scenario.rules.reserve(batch.rules.len());
         scenario.rules.extend(batch.rules);
-        ar.active_scenario_id = Some(batch.scenario_id.clone());
+        // General is an independently-toggleable layer, never the switchable
+        // active scenario. Dropping flows onto it must preserve the user's
+        // currently active ordinary scenario.
+        if batch.scenario_id != GENERAL_SCENARIO_ID {
+            ar.active_scenario_id = Some(batch.scenario_id.clone());
+        }
         self.reconcile_rule_cursors(previous_active.as_deref(), &ar);
         Ok(MockResult {
             scenario_id: batch.scenario_id,
@@ -1174,10 +1313,11 @@ impl ProxyController {
     /// progress events.
     pub fn mock_flows(&self, ids: &[String], scenario_id: Option<&str>) -> MockResult {
         let batch = self.prepare_mock_flows(ids, scenario_id, |_, _| {});
-        self.commit_mock_batch(batch).unwrap_or_else(|_| MockResult {
-            scenario_id: scenario_id.unwrap_or_default().to_string(),
-            new_rule_ids: Vec::new(),
-        })
+        self.commit_mock_batch(batch)
+            .unwrap_or_else(|_| MockResult {
+                scenario_id: scenario_id.unwrap_or_default().to_string(),
+                new_rule_ids: Vec::new(),
+            })
     }
 
     // ---- undo / redo history ----
@@ -1191,8 +1331,36 @@ impl ProxyController {
         tag: HistoryTag,
         mutation: impl FnOnce(&Self) -> std::result::Result<T, E>,
     ) -> std::result::Result<T, E> {
+        let _history_op = self
+            .shared
+            .history_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = self.get_autoresponder();
-        let result = mutation(self)?;
+        let before_cursors = self
+            .shared
+            .cursors
+            .lock()
+            .ok()
+            .map(|cursors| cursors.snapshot());
+        let result = match mutation(self) {
+            Ok(result) => result,
+            Err(error) => {
+                // Callers deliberately keep their persistence write inside this
+                // serialized closure. If that write fails after the live engine
+                // changed, restore the snapshot so the rejected command is not
+                // memory-only, invisible to undo, and lost on restart.
+                if self.get_autoresponder() != before {
+                    self.set_autoresponder(before);
+                }
+                if let (Some(snapshot), Ok(mut cursors)) =
+                    (before_cursors, self.shared.cursors.lock())
+                {
+                    cursors.restore(snapshot);
+                }
+                return Err(error);
+            }
+        };
         let after = self.get_autoresponder();
         if before != after {
             if let Ok(mut history) = self.shared.history.lock() {
@@ -1206,13 +1374,21 @@ impl ProxyController {
     /// can be undone — the removed flows (bodies and capture positions) are held
     /// in the history entry.
     pub fn remove_flows_tracked(&self, ids: &[String]) {
+        let _history_op = self
+            .shared
+            .history_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let items = match self.shared.store.lock() {
             Ok(mut store) => {
                 let items = store.remove_capturing(ids);
                 if !items.is_empty() {
                     let removed_ids: Vec<String> =
                         items.iter().map(|(_, flow)| flow.id.clone()).collect();
-                    let _ = self.shared.events.send(FlowEvent::Removed { ids: removed_ids });
+                    let _ = self
+                        .shared
+                        .events
+                        .send(FlowEvent::Removed { ids: removed_ids });
                 }
                 items
             }
@@ -1227,7 +1403,10 @@ impl ProxyController {
             if items.len() == 1 { "" } else { "s" }
         );
         if let Ok(mut history) = self.shared.history.lock() {
-            history.record(HistoryOp::FlowsRemoved { items }, HistoryTag::new(label, None));
+            history.record(
+                HistoryOp::FlowsRemoved { items },
+                HistoryTag::new(label, None),
+            );
         }
     }
 
@@ -1247,6 +1426,11 @@ impl ProxyController {
     /// Like [`clear_flows`](Self::clear_flows), but records the cleared snapshot
     /// so it can be undone.
     pub fn clear_flows_tracked(&self) {
+        let _history_op = self
+            .shared
+            .history_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let flows = match self.shared.store.lock() {
             Ok(mut store) => {
                 let all = store.all_flows();
@@ -1265,11 +1449,19 @@ impl ProxyController {
             if flows.len() == 1 { "" } else { "s" }
         );
         if let Ok(mut history) = self.shared.history.lock() {
-            history.record(HistoryOp::FlowsCleared { flows }, HistoryTag::new(label, None));
+            history.record(
+                HistoryOp::FlowsCleared { flows },
+                HistoryTag::new(label, None),
+            );
         }
     }
 
     pub fn clear_history(&self) {
+        let _history_op = self
+            .shared
+            .history_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Ok(mut history) = self.shared.history.lock() {
             history.clear();
         }
@@ -1278,6 +1470,52 @@ impl ProxyController {
     /// Undo the newest action. Returns whether the autoresponder changed (so the
     /// caller re-persists it); `None` when there is nothing to undo.
     pub fn undo(&self) -> Option<HistoryStep> {
+        let _history_op = self
+            .shared
+            .history_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.undo_inner()
+    }
+
+    /// Undo while keeping a caller-owned persistence step inside the same
+    /// serialized history transaction. The Tauri shell uses this so a newer
+    /// mutation cannot be overwritten by a delayed full-document DB rewrite.
+    pub fn undo_and_then<E>(
+        &self,
+        after: impl FnOnce(&Self, &HistoryStep) -> std::result::Result<(), E>,
+    ) -> std::result::Result<Option<HistoryStep>, E> {
+        let _history_op = self
+            .shared
+            .history_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before_cursors = self
+            .shared
+            .cursors
+            .lock()
+            .ok()
+            .map(|cursors| cursors.snapshot());
+        let step = self.undo_inner();
+        if let Some(step) = &step {
+            if let Err(error) = after(self, step) {
+                // `undo_inner` already moved the entry to redo and changed live
+                // state. The persistence callback is transactional, so reverse
+                // the in-memory transition too before reporting its error.
+                let rolled_back = self.redo_inner();
+                debug_assert!(rolled_back.is_some(), "failed undo must remain redoable");
+                if let (Some(snapshot), Ok(mut cursors)) =
+                    (before_cursors, self.shared.cursors.lock())
+                {
+                    cursors.restore(snapshot);
+                }
+                return Err(error);
+            }
+        }
+        Ok(step)
+    }
+
+    fn undo_inner(&self) -> Option<HistoryStep> {
         let entry = self.shared.history.lock().ok()?.take_undo()?;
         let mock_changed = self.apply_undo(&entry);
         self.shared.history.lock().ok()?.stash_redo(entry);
@@ -1286,6 +1524,47 @@ impl ProxyController {
 
     /// Redo the most recently undone action.
     pub fn redo(&self) -> Option<HistoryStep> {
+        let _history_op = self
+            .shared
+            .history_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.redo_inner()
+    }
+
+    /// Redo counterpart to [`Self::undo_and_then`].
+    pub fn redo_and_then<E>(
+        &self,
+        after: impl FnOnce(&Self, &HistoryStep) -> std::result::Result<(), E>,
+    ) -> std::result::Result<Option<HistoryStep>, E> {
+        let _history_op = self
+            .shared
+            .history_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before_cursors = self
+            .shared
+            .cursors
+            .lock()
+            .ok()
+            .map(|cursors| cursors.snapshot());
+        let step = self.redo_inner();
+        if let Some(step) = &step {
+            if let Err(error) = after(self, step) {
+                let rolled_back = self.undo_inner();
+                debug_assert!(rolled_back.is_some(), "failed redo must remain undoable");
+                if let (Some(snapshot), Ok(mut cursors)) =
+                    (before_cursors, self.shared.cursors.lock())
+                {
+                    cursors.restore(snapshot);
+                }
+                return Err(error);
+            }
+        }
+        Ok(step)
+    }
+
+    fn redo_inner(&self) -> Option<HistoryStep> {
         let entry = self.shared.history.lock().ok()?.take_redo()?;
         let mock_changed = self.apply_redo(&entry);
         self.shared.history.lock().ok()?.stash_undo(entry);
@@ -1295,6 +1574,11 @@ impl ProxyController {
     /// Undo or redo until the entry with `entry_id` is the current state (the top
     /// of the applied stack). A no-op when the id isn't in the timeline.
     pub fn jump_to(&self, entry_id: u64) -> Option<HistoryStep> {
+        let _history_op = self
+            .shared
+            .history_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut mock_changed = false;
         loop {
             let (is_top, in_undo, in_redo) = {
@@ -1308,7 +1592,11 @@ impl ProxyController {
             if is_top || (!in_undo && !in_redo) {
                 break;
             }
-            let step = if in_undo { self.undo() } else { self.redo() };
+            let step = if in_undo {
+                self.undo_inner()
+            } else {
+                self.redo_inner()
+            };
             match step {
                 Some(step) => mock_changed |= step.mock_changed,
                 None => break,
@@ -1345,8 +1633,13 @@ impl ProxyController {
                 self.remove_flows(&ids);
                 false
             }
-            HistoryOp::FlowsCleared { .. } => {
-                self.clear_flows();
+            HistoryOp::FlowsCleared { flows } => {
+                // Redo the original clear, not "clear whatever exists now".
+                // Traffic may have arrived after the clear was undone; removing
+                // it here would make redo destroy data that was never part of
+                // the history entry (and also breaks failed-undo rollback).
+                let ids: Vec<String> = flows.iter().map(|flow| flow.id.clone()).collect();
+                self.remove_flows(&ids);
                 false
             }
         }
@@ -1396,6 +1689,7 @@ mod tests {
                 status: 200,
                 headers: vec![],
                 body: id.to_string(),
+                body_base64: None,
                 content_type: Some("text/plain".to_string()),
                 content_encoding: None,
             },
@@ -1408,6 +1702,39 @@ mod tests {
             name: id.to_string(),
             rules,
         }
+    }
+
+    fn delayed_origin() -> (
+        std::net::SocketAddr,
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind origin");
+        let origin = listener.local_addr().expect("addr");
+        let (first_seen_tx, first_seen_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let mut first_conn = Some((first_seen_tx, release_rx));
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let gate = first_conn.take();
+                std::thread::spawn(move || {
+                    let mut buf = [0_u8; 2048];
+                    let _ = stream.read(&mut buf);
+                    if let Some((first_seen, release)) = gate {
+                        let _ = first_seen.send(());
+                        let _ = release.recv_timeout(std::time::Duration::from_secs(10));
+                    }
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    );
+                    let _ = stream.flush();
+                });
+            }
+        });
+        (origin, first_seen_rx, release_tx)
     }
 
     fn request() -> CapturedRequest {
@@ -1425,7 +1752,11 @@ mod tests {
     }
 
     fn fire_active_once(controller: &ProxyController) {
-        let ar = controller.shared.autoresponder.read().expect("read autoresponder");
+        let ar = controller
+            .shared
+            .autoresponder
+            .read()
+            .expect("read autoresponder");
         let mut cursors = controller.shared.cursors.lock().expect("lock cursors");
         ar.evaluate_request_stateful(&request(), &mut cursors);
     }
@@ -1477,6 +1808,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finished_serving_task_is_not_reported_as_a_live_proxy() {
+        let c = controller();
+        let (shutdown, _shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async {});
+        tokio::task::yield_now().await;
+        assert!(task.is_finished(), "test serving task must have exited");
+        *c.running.lock().await = Some((loopback(43210), shutdown, task));
+
+        assert!(!c.is_running().await);
+        assert_eq!(c.bound_addr().await, None);
+    }
+
+    #[tokio::test]
+    async fn shutdown_deadline_aborts_a_serving_task_that_never_drains() {
+        let (shutdown, _shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(std::future::pending());
+        assert!(
+            shutdown_proxy(shutdown, task, Duration::from_millis(5)).await,
+            "the controller must force progress after the grace period"
+        );
+    }
+
+    #[tokio::test]
     async fn restart_rebinds_to_a_new_port() {
         let c = controller();
         let first = c.start(loopback(0)).await.expect("start");
@@ -1488,6 +1842,29 @@ mod tests {
         assert_ne!(first.port(), second.port());
         c.stop().await;
         assert!(!c.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn restart_can_toggle_loopback_and_lan_scope_on_the_same_port() {
+        let c = controller();
+        let first = c.start(loopback(0)).await.expect("start");
+        let lan_addr = SocketAddr::from(([0, 0, 0, 0], first.port()));
+
+        let rebound = c
+            .restart(lan_addr)
+            .await
+            .expect("same-port scope change must rebind");
+        assert_eq!(rebound, lan_addr);
+        assert_eq!(c.bound_addr().await, Some(lan_addr));
+
+        let local_addr = loopback(first.port());
+        let rebound = c
+            .restart(local_addr)
+            .await
+            .expect("scope can be narrowed again");
+        assert_eq!(rebound, local_addr);
+        assert_eq!(c.bound_addr().await, Some(local_addr));
+        c.stop().await;
     }
 
     #[tokio::test]
@@ -1525,7 +1902,9 @@ mod tests {
                 let mut buf = [0u8; 2048];
                 let n = s.read(&mut buf).unwrap_or(0);
                 let _ = head_tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
-                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nmapped");
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nmapped",
+                );
                 let _ = s.flush();
             }
         });
@@ -1558,7 +1937,9 @@ mod tests {
 
         // Plain-HTTP forward-proxy request for an unresolvable host — only the
         // Map Remote rewrite can produce a 200.
-        let mut client = tokio::net::TcpStream::connect(proxy_addr).await.expect("connect proxy");
+        let mut client = tokio::net::TcpStream::connect(proxy_addr)
+            .await
+            .expect("connect proxy");
         client
             .write_all(
                 b"GET http://origin.invalid/js/agent_A2qru_10240521.js HTTP/1.1\r\n\
@@ -1567,10 +1948,19 @@ mod tests {
             .await
             .expect("send through proxy");
         let mut response = Vec::new();
-        client.read_to_end(&mut response).await.expect("read response");
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
         let response = String::from_utf8_lossy(&response);
-        assert!(response.starts_with("HTTP/1.1 200"), "unexpected response: {response}");
-        assert!(response.ends_with("mapped"), "unexpected response: {response}");
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            response.ends_with("mapped"),
+            "unexpected response: {response}"
+        );
 
         // The mapped server saw the expanded path and its own authority as Host.
         let head = head_rx
@@ -1581,7 +1971,8 @@ mod tests {
             "wire request: {head}"
         );
         assert!(
-            head.to_lowercase().contains(&format!("host: {mapped_addr}")),
+            head.to_lowercase()
+                .contains(&format!("host: {mapped_addr}")),
             "wire request: {head}"
         );
 
@@ -1599,34 +1990,11 @@ mod tests {
     /// the request from the store.
     #[tokio::test]
     async fn response_rules_apply_after_cap_eviction_through_the_live_proxy() {
-        use std::io::{Read, Write};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         // The origin: holds the FIRST request's response until released, so the
         // second capture evicts the first while it's still pending.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind origin");
-        let origin = listener.local_addr().expect("addr");
-        let (first_seen_tx, first_seen_rx) = tokio::sync::oneshot::channel::<()>();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        std::thread::spawn(move || {
-            let mut first_conn = Some((first_seen_tx, release_rx));
-            for stream in listener.incoming() {
-                let Ok(mut s) = stream else { continue };
-                let gate = first_conn.take();
-                std::thread::spawn(move || {
-                    let mut buf = [0u8; 2048];
-                    let _ = s.read(&mut buf);
-                    if let Some((first_seen, release)) = gate {
-                        let _ = first_seen.send(());
-                        let _ = release.recv_timeout(std::time::Duration::from_secs(10));
-                    }
-                    let _ = s.write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-                    );
-                    let _ = s.flush();
-                });
-            }
-        });
+        let (origin, first_seen_rx, release_tx) = delayed_origin();
 
         let c = controller();
         let mut ar = AutoResponder::default();
@@ -1652,12 +2020,16 @@ mod tests {
         });
         ar.active_scenario_id = Some("s".to_string());
         c.set_autoresponder(ar);
-        c.set_settings(ProxySettings { max_flows: 1, ..Default::default() });
+        c.set_settings(ProxySettings {
+            max_flows: 1,
+            ..Default::default()
+        });
 
         let proxy_addr = c.start(loopback(0)).await.expect("start proxy");
 
-        let mut held_client =
-            tokio::net::TcpStream::connect(proxy_addr).await.expect("connect proxy");
+        let mut held_client = tokio::net::TcpStream::connect(proxy_addr)
+            .await
+            .expect("connect proxy");
         held_client
             .write_all(
                 format!(
@@ -1674,8 +2046,9 @@ mod tests {
 
         // Second request completes fully first; at cap 1 it evicted the pending
         // first flow when it was recorded.
-        let mut second_client =
-            tokio::net::TcpStream::connect(proxy_addr).await.expect("connect proxy");
+        let mut second_client = tokio::net::TcpStream::connect(proxy_addr)
+            .await
+            .expect("connect proxy");
         second_client
             .write_all(
                 format!(
@@ -1686,16 +2059,24 @@ mod tests {
             .await
             .expect("send second request");
         let mut second_response = Vec::new();
-        second_client.read_to_end(&mut second_response).await.expect("read second response");
+        second_client
+            .read_to_end(&mut second_response)
+            .await
+            .expect("read second response");
         let second_response = String::from_utf8_lossy(&second_response).to_lowercase();
         assert!(
             second_response.contains("x-germi-rule: on"),
             "second response: {second_response}"
         );
 
-        release_tx.send(()).expect("release the held origin response");
+        release_tx
+            .send(())
+            .expect("release the held origin response");
         let mut held_response = Vec::new();
-        held_client.read_to_end(&mut held_response).await.expect("read held response");
+        held_client
+            .read_to_end(&mut held_response)
+            .await
+            .expect("read held response");
         let held_response = String::from_utf8_lossy(&held_response).to_lowercase();
         assert!(
             held_response.contains("x-germi-rule: on"),
@@ -1751,7 +2132,10 @@ mod tests {
             }
             let stored: HashSet<String> =
                 c.shared.store.lock().unwrap().ids().into_iter().collect();
-            assert_eq!(live, stored, "replaying the event stream must reproduce the store");
+            assert_eq!(
+                live, stored,
+                "replaying the event stream must reproduce the store"
+            );
         }
     }
 
@@ -1776,6 +2160,7 @@ mod tests {
         flow.request.scheme = "http".to_string();
         flow.request.host = addr.to_string();
         flow.request.path = "/doc".to_string();
+        flow.request.uri = format!("http://{addr}/doc");
         c.shared.record_imported(flow);
         // Subscribe AFTER the import so the only event we see is the verdict update.
         let mut rx = c.subscribe();
@@ -1796,7 +2181,10 @@ mod tests {
             Ok(FlowEvent::Completed { summary }) => {
                 assert_eq!(summary.id, "d1");
                 assert_eq!(
-                    summary.availability.expect("verdict on emitted row").verdict,
+                    summary
+                        .availability
+                        .expect("verdict on emitted row")
+                        .verdict,
                     AvailabilityVerdict::Public
                 );
             }
@@ -1839,7 +2227,10 @@ mod tests {
         {
             let store = c.shared.store.lock().expect("lock store");
             assert!(store.get("f1").is_none());
-            assert!(store.get("f2").is_some(), "an unselected flow survives the prune");
+            assert!(
+                store.get("f2").is_some(),
+                "an unselected flow survives the prune"
+            );
             assert!(store.get("f3").is_none());
             assert_eq!(store.len(), 1);
         }
@@ -1903,7 +2294,9 @@ mod tests {
         let store = c.shared.store.lock().expect("lock store");
         assert_eq!(
             store.ids(),
-            ["imp1", "cap1", "imp2", "cap2"].map(str::to_string).to_vec(),
+            ["imp1", "cap1", "imp2", "cap2"]
+                .map(str::to_string)
+                .to_vec(),
             "undo restores captured flows to their original capture positions"
         );
     }
@@ -1935,11 +2328,17 @@ mod tests {
 
         // Subscribe after the inserts so the only event seen is the cap shrink.
         let mut rx = c.subscribe();
-        c.set_settings(ProxySettings { max_flows: 2, ..Default::default() });
+        c.set_settings(ProxySettings {
+            max_flows: 2,
+            ..Default::default()
+        });
 
         {
             let store = c.shared.store.lock().expect("lock store");
-            assert!(store.get("imp").is_some(), "imported reference survives a cap shrink");
+            assert!(
+                store.get("imp").is_some(),
+                "imported reference survives a cap shrink"
+            );
             assert_eq!(store.ids(), vec!["imp".to_string(), "cc".to_string()]);
         }
         // The evicted ids are announced so the UI drops exactly those rows instead of
@@ -1957,7 +2356,10 @@ mod tests {
         let c = controller();
         c.shared.record_new(flow("live"));
         assert_eq!(
-            c.list_flows().iter().find(|s| s.id == "live").map(|s| s.imported),
+            c.list_flows()
+                .iter()
+                .find(|s| s.id == "live")
+                .map(|s| s.imported),
             Some(false),
             "a live proxy capture is not marked imported"
         );
@@ -1983,7 +2385,11 @@ mod tests {
             c.shared.record_new(f);
         }
         let seqs: Vec<u64> = c.list_flows().into_iter().map(|s| s.seq).collect();
-        assert_eq!(seqs, vec![1, 2, 3], "request numbers increase in capture order");
+        assert_eq!(
+            seqs,
+            vec![1, 2, 3],
+            "request numbers increase in capture order"
+        );
     }
 
     #[test]
@@ -2000,7 +2406,11 @@ mod tests {
         let n = c.open_capture(&bytes, "har").expect("open har");
         assert_eq!(n, 2);
         let seqs: Vec<u64> = c.list_flows().into_iter().map(|s| s.seq).collect();
-        assert_eq!(seqs, vec![1, 2], "an opened session is numbered 1..N, not continued");
+        assert_eq!(
+            seqs,
+            vec![1, 2],
+            "an opened session is numbered 1..N, not continued"
+        );
     }
 
     #[test]
@@ -2014,8 +2424,57 @@ mod tests {
         let n = c.open_capture(har, "har").expect("open har");
         assert_eq!(n, 2);
         let store = c.shared.store.lock().expect("lock store");
-        assert_eq!(store.len(), 2, "open replaces — the seeded flow is gone, not appended to");
+        assert_eq!(
+            store.len(),
+            2,
+            "open replaces — the seeded flow is gone, not appended to"
+        );
         assert!(store.get("stale").is_none());
+    }
+
+    #[test]
+    fn opening_capture_discards_undo_entries_for_previous_traffic() {
+        let c = controller();
+        c.shared.record_new(flow("stale"));
+        c.clear_flows_tracked();
+        assert!(c.shared.history.lock().expect("history").can_undo());
+
+        let bytes = crate::har_export::export_har(&[flow("fresh")], None);
+        c.open_capture(&bytes, "har").expect("open capture");
+
+        assert!(
+            c.undo().is_none(),
+            "undo must not restore traffic from the replaced session"
+        );
+        assert_eq!(c.list_flows().len(), 1);
+    }
+
+    #[test]
+    fn opening_capture_keeps_mock_undo_history_without_touching_new_traffic() {
+        let c = controller();
+        seed_one_rule(&c);
+        c.with_history(HistoryTag::new("Edit rule", None), |ctrl| {
+            ctrl.update_rule("A", rule_with_url("/edited"))
+        })
+        .expect("edit rule");
+        c.shared.record_new(flow("stale"));
+        c.clear_flows_tracked();
+
+        let bytes = crate::har_export::export_har(&[flow("fresh")], None);
+        c.open_capture(&bytes, "har").expect("open capture");
+        let step = c.undo().expect("mock edit remains undoable");
+        assert!(step.mock_changed);
+        assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/seq");
+        let flows = c.list_flows();
+        assert_eq!(
+            flows.len(),
+            1,
+            "mock undo keeps the newly-opened traffic intact"
+        );
+        assert!(
+            flows.iter().all(|flow| flow.id != "stale"),
+            "mock undo must not resurrect traffic from the replaced session"
+        );
     }
 
     #[test]
@@ -2029,15 +2488,118 @@ mod tests {
     }
 
     #[test]
+    fn undoing_an_inflight_delete_restores_its_late_response() {
+        let c = controller();
+        c.shared.record_new(flow("pending"));
+        c.remove_flows_tracked(&["pending".to_string()]);
+
+        c.shared.record_complete(
+            "pending",
+            CapturedResponse {
+                status: 204,
+                version: "HTTP/1.1".into(),
+                headers: Vec::new(),
+                body: bytes::Bytes::new(),
+                timestamp_ms: 1,
+            },
+            12,
+            Some(5),
+            None,
+        );
+        c.undo().expect("delete is undoable");
+
+        let restored = c.get_flow("pending", false, true).expect("flow restored");
+        assert_eq!(restored.status, Some(204));
+        assert!(
+            restored.response.is_some(),
+            "late response body is retained"
+        );
+        assert_eq!(restored.duration_ms, Some(12));
+        assert_eq!(c.list_flows()[0].ttfb_ms, Some(5));
+    }
+
+    #[test]
+    fn redo_snapshot_tracks_a_response_that_arrives_after_delete_was_undone() {
+        let c = controller();
+        c.shared.record_new(flow("pending"));
+        c.remove_flows_tracked(&["pending".to_string()]);
+        c.undo().expect("restore pending flow");
+
+        c.shared.record_complete(
+            "pending",
+            CapturedResponse {
+                status: 201,
+                version: "HTTP/1.1".into(),
+                headers: vec![("x-complete".into(), "yes".into())],
+                body: bytes::Bytes::from_static(b"done"),
+                timestamp_ms: 2,
+            },
+            17,
+            Some(6),
+            Some("late rule".into()),
+        );
+        c.redo().expect("delete the completed flow again");
+        assert!(c.get_flow("pending", false, true).is_none());
+        c.undo().expect("restore from the updated delete snapshot");
+
+        let restored = c.get_flow("pending", false, true).expect("flow restored");
+        assert_eq!(restored.status, Some(201));
+        assert_eq!(restored.duration_ms, Some(17));
+        assert_eq!(restored.response.expect("response").body_text, "done");
+        assert_eq!(c.list_flows()[0].ttfb_ms, Some(6));
+        assert_eq!(c.list_flows()[0].matched_rule.as_deref(), Some("late rule"));
+    }
+
+    #[test]
+    fn redo_snapshot_tracks_comment_and_availability_changes_after_undo() {
+        let c = controller();
+        c.shared.record_new(flow("annotated"));
+        c.remove_flows_tracked(&["annotated".to_string()]);
+        c.undo().expect("restore flow");
+
+        c.set_flow_comment("annotated", Some("keep this note".into()));
+        c.shared.set_availability(
+            "annotated",
+            Availability {
+                verdict: AvailabilityVerdict::Protected,
+                status: Some(401),
+                location: Some("https://example.com/login".into()),
+            },
+        );
+        c.redo().expect("delete the annotated flow again");
+        c.undo().expect("restore the updated snapshot");
+
+        let restored = &c.list_flows()[0];
+        assert_eq!(restored.comment.as_deref(), Some("keep this note"));
+        assert_eq!(
+            restored.availability.as_ref().map(|value| value.verdict),
+            Some(AvailabilityVerdict::Protected)
+        );
+        assert_eq!(
+            restored
+                .availability
+                .as_ref()
+                .and_then(|value| value.location.as_deref()),
+            Some("https://example.com/login")
+        );
+    }
+
+    #[test]
     fn export_har_embeds_only_the_scenarios_shaping_traffic() {
         let c = controller();
         let mut ar = c.get_autoresponder();
         ar.ensure_general();
-        if let Some(general) = ar.scenarios.iter_mut().find(|s| s.id == GENERAL_SCENARIO_ID) {
+        if let Some(general) = ar
+            .scenarios
+            .iter_mut()
+            .find(|s| s.id == GENERAL_SCENARIO_ID)
+        {
             general.rules.push(respond_rule("g-1"));
         }
-        ar.scenarios.push(scenario("active", vec![respond_rule("a-1")]));
-        ar.scenarios.push(scenario("idle", vec![respond_rule("i-1")]));
+        ar.scenarios
+            .push(scenario("active", vec![respond_rule("a-1")]));
+        ar.scenarios
+            .push(scenario("idle", vec![respond_rule("i-1")]));
         ar.active_scenario_id = Some("active".to_string());
         ar.general_active = true;
         c.set_autoresponder(ar);
@@ -2066,7 +2628,8 @@ mod tests {
         let c = controller();
         let mut ar = c.get_autoresponder();
         ar.ensure_general();
-        ar.scenarios.push(scenario("idle", vec![respond_rule("i-1")]));
+        ar.scenarios
+            .push(scenario("idle", vec![respond_rule("i-1")]));
         ar.general_active = true;
         c.set_autoresponder(ar);
 
@@ -2083,12 +2646,12 @@ mod tests {
         let c = controller();
         let mut ar = c.get_autoresponder();
         ar.scenarios.retain(|s| s.id == GENERAL_SCENARIO_ID);
-        ar.scenarios.push(scenario("orig", vec![respond_rule("r-1")]));
+        ar.scenarios
+            .push(scenario("orig", vec![respond_rule("r-1")]));
         ar.active_scenario_id = Some("orig".to_string());
         c.set_autoresponder(ar);
 
-        let bundle =
-            har_embedded_rules(&c.export_har(true)).expect("Germi HAR carries the bundle");
+        let bundle = har_embedded_rules(&c.export_har(true)).expect("Germi HAR carries the bundle");
         let imported = c.import_rules(&bundle, false).expect("bundle imports");
         assert_eq!(imported, 1);
 
@@ -2138,8 +2701,15 @@ mod tests {
             "summaries come back in file order"
         );
         let store = c.shared.store.lock().expect("lock store");
-        assert_eq!(store.len(), 3, "append adds to the traffic instead of replacing it");
-        assert!(store.get("live").is_some(), "existing traffic survives the append");
+        assert_eq!(
+            store.len(),
+            3,
+            "append adds to the traffic instead of replacing it"
+        );
+        assert!(
+            store.get("live").is_some(),
+            "existing traffic survives the append"
+        );
     }
 
     #[test]
@@ -2195,7 +2765,8 @@ mod tests {
     #[test]
     fn compare_bodies_matches_decoded_content_across_encodings() {
         let c = controller();
-        c.shared.record_new(flow_with_bodies("plain", b"ask", &[], b"same payload"));
+        c.shared
+            .record_new(flow_with_bodies("plain", b"ask", &[], b"same payload"));
         c.shared.record_new(flow_with_bodies(
             "gz",
             b"ask",
@@ -2214,11 +2785,17 @@ mod tests {
     #[test]
     fn compare_bodies_detects_differing_sides_independently() {
         let c = controller();
-        c.shared.record_new(flow_with_bodies("a", b"same-req", &[], b"payload-a"));
-        c.shared.record_new(flow_with_bodies("b", b"same-req", &[], b"payload-b"));
+        c.shared
+            .record_new(flow_with_bodies("a", b"same-req", &[], b"payload-a"));
+        c.shared
+            .record_new(flow_with_bodies("b", b"same-req", &[], b"payload-b"));
         let cmp = c.compare_bodies("a", "b").expect("both flows exist");
         assert!(cmp.request_equal, "identical request bodies compare equal");
-        assert_eq!(cmp.response_equal, Some(false), "differing response bodies are reported");
+        assert_eq!(
+            cmp.response_equal,
+            Some(false),
+            "differing response bodies are reported"
+        );
     }
 
     #[test]
@@ -2226,7 +2803,9 @@ mod tests {
         let c = controller();
         c.shared.record_new(flow("pending"));
         c.shared.record_new(completed_flow("done"));
-        let cmp = c.compare_bodies("pending", "done").expect("both flows exist");
+        let cmp = c
+            .compare_bodies("pending", "done")
+            .expect("both flows exist");
         assert_eq!(
             cmp.response_equal, None,
             "a missing response on either side yields no response verdict"
@@ -2285,6 +2864,7 @@ mod tests {
                         status: 200,
                         headers: vec![("x-secret".to_string(), "header-secret".to_string())],
                         body: "body-secret".to_string(),
+                        body_base64: None,
                         content_type: Some("text/plain".to_string()),
                         content_encoding: None,
                     },
@@ -2316,7 +2896,11 @@ mod tests {
         c.set_autoresponder(AutoResponder {
             scenarios: vec![scenario(
                 "scenario",
-                vec![respond_rule("one"), respond_rule("two"), respond_rule("three")],
+                vec![
+                    respond_rule("one"),
+                    respond_rule("two"),
+                    respond_rule("three"),
+                ],
             )],
             active_scenario_id: Some("scenario".to_string()),
             general_active: true,
@@ -2431,14 +3015,25 @@ mod tests {
         assert_eq!(count, 1);
 
         let ar = dst.get_autoresponder();
-        assert_eq!(user_names(&ar), vec!["A", "B"], "merge appends the imported scenario");
-        assert!(ar.general().is_some(), "the built-in General layer stays present");
+        assert_eq!(
+            user_names(&ar),
+            vec!["A", "B"],
+            "merge appends the imported scenario"
+        );
+        assert!(
+            ar.general().is_some(),
+            "the built-in General layer stays present"
+        );
         assert_eq!(
             ar.active_scenario_id.as_deref(),
             Some("A"),
             "merge must not steal the active selection"
         );
-        let imported = ar.scenarios.iter().find(|s| s.name == "B").expect("imported B");
+        let imported = ar
+            .scenarios
+            .iter()
+            .find(|s| s.name == "B")
+            .expect("imported B");
         assert_ne!(imported.id, "B", "imported scenario must be re-keyed");
     }
 
@@ -2487,11 +3082,19 @@ mod tests {
         });
 
         let only_a = rules_export::parse_rules(&c.export_rules(Some("A"))).expect("parse A");
-        assert_eq!(only_a.len(), 1, "exporting one id yields exactly that scenario");
+        assert_eq!(
+            only_a.len(),
+            1,
+            "exporting one id yields exactly that scenario"
+        );
         assert_eq!(only_a[0].name, "A");
 
-        let missing = rules_export::parse_rules(&c.export_rules(Some("missing"))).expect("parse missing");
-        assert!(missing.is_empty(), "exporting an unknown id yields an empty bundle");
+        let missing =
+            rules_export::parse_rules(&c.export_rules(Some("missing"))).expect("parse missing");
+        assert!(
+            missing.is_empty(),
+            "exporting an unknown id yields an empty bundle"
+        );
     }
 
     #[test]
@@ -2516,14 +3119,22 @@ mod tests {
         c.import_rules(&bytes, false).expect("import");
 
         let ar = c.get_autoresponder();
-        let clone = ar.scenarios.iter().rev().find(|s| s.name == "A (2)").expect("imported clone");
+        let clone = ar
+            .scenarios
+            .iter()
+            .rev()
+            .find(|s| s.name == "A (2)")
+            .expect("imported clone");
         let clone_rule_id = &clone.rules[0].id;
         assert_ne!(
             clone_rule_id, "seq-rule",
             "the imported rule must be re-keyed away from the original id"
         );
         assert_eq!(
-            c.rule_hits().get(clone_rule_id.as_str()).copied().unwrap_or(0),
+            c.rule_hits()
+                .get(clone_rule_id.as_str())
+                .copied()
+                .unwrap_or(0),
             0,
             "the re-keyed clone starts with an independent (zero) hit count"
         );
@@ -2553,8 +3164,15 @@ mod tests {
         assert_eq!(count, 1);
 
         let ar = dst.get_autoresponder();
-        assert_eq!(user_names(&ar), vec!["C"], "replace wipes the existing user scenarios");
-        assert!(ar.general().is_some(), "the built-in General layer survives a replace");
+        assert_eq!(
+            user_names(&ar),
+            vec!["C"],
+            "replace wipes the existing user scenarios"
+        );
+        assert!(
+            ar.general().is_some(),
+            "the built-in General layer survives a replace"
+        );
         let c = ar
             .scenarios
             .iter()
@@ -2593,8 +3211,14 @@ mod tests {
             vec!["Only"],
             "replace into an empty config yields exactly the import"
         );
-        assert!(ar.general().is_some(), "General is seeded even into an empty config");
-        assert_eq!(ar.active_scenario_id, None, "still Off after replace into empty");
+        assert!(
+            ar.general().is_some(),
+            "General is seeded even into an empty config"
+        );
+        assert_eq!(
+            ar.active_scenario_id, None,
+            "still Off after replace into empty"
+        );
     }
 
     #[test]
@@ -2609,9 +3233,21 @@ mod tests {
         let src = controller();
         src.set_autoresponder(AutoResponder {
             scenarios: vec![
-                Scenario { id: "a".into(), name: "Set".into(), rules: vec![] },
-                Scenario { id: "b".into(), name: "Set".into(), rules: vec![] },
-                Scenario { id: "c".into(), name: "Set".into(), rules: vec![] },
+                Scenario {
+                    id: "a".into(),
+                    name: "Set".into(),
+                    rules: vec![],
+                },
+                Scenario {
+                    id: "b".into(),
+                    name: "Set".into(),
+                    rules: vec![],
+                },
+                Scenario {
+                    id: "c".into(),
+                    name: "Set".into(),
+                    rules: vec![],
+                },
             ],
             active_scenario_id: None,
             general_active: true,
@@ -2621,7 +3257,11 @@ mod tests {
         dst.import_rules(&bytes, false).expect("import");
         assert_eq!(
             user_names(&dst.get_autoresponder()),
-            vec!["Set".to_string(), "Set (2)".to_string(), "Set (3)".to_string()],
+            vec![
+                "Set".to_string(),
+                "Set (2)".to_string(),
+                "Set (3)".to_string()
+            ],
             "duplicate names inside a single imported file are de-duped in order"
         );
     }
@@ -2630,7 +3270,11 @@ mod tests {
     fn merge_dedupes_against_existing_and_within_file() {
         let dst = controller();
         dst.set_autoresponder(AutoResponder {
-            scenarios: vec![Scenario { id: "x".into(), name: "Set".into(), rules: vec![] }],
+            scenarios: vec![Scenario {
+                id: "x".into(),
+                name: "Set".into(),
+                rules: vec![],
+            }],
             active_scenario_id: None,
             general_active: true,
         });
@@ -2638,8 +3282,16 @@ mod tests {
         let src = controller();
         src.set_autoresponder(AutoResponder {
             scenarios: vec![
-                Scenario { id: "a".into(), name: "Set".into(), rules: vec![] },
-                Scenario { id: "b".into(), name: "Set".into(), rules: vec![] },
+                Scenario {
+                    id: "a".into(),
+                    name: "Set".into(),
+                    rules: vec![],
+                },
+                Scenario {
+                    id: "b".into(),
+                    name: "Set".into(),
+                    rules: vec![],
+                },
             ],
             active_scenario_id: None,
             general_active: true,
@@ -2649,7 +3301,11 @@ mod tests {
         dst.import_rules(&bytes, false).expect("import");
         assert_eq!(
             user_names(&dst.get_autoresponder()),
-            vec!["Set".to_string(), "Set (2)".to_string(), "Set (3)".to_string()],
+            vec![
+                "Set".to_string(),
+                "Set (2)".to_string(),
+                "Set (3)".to_string()
+            ],
             "merge de-dupes the imported names against the existing one AND against each other"
         );
     }
@@ -2741,10 +3397,16 @@ mod tests {
         let removed = c
             .with_history(HistoryTag::new("Delete 2 rules", None), |ctrl| {
                 // "gone" isn't a rule id — it must be skipped, not abort the batch.
-                ctrl.delete_rules("A", &["r1".to_string(), "gone".to_string(), "r3".to_string()])
+                ctrl.delete_rules(
+                    "A",
+                    &["r1".to_string(), "gone".to_string(), "r3".to_string()],
+                )
             })
             .expect("delete_rules");
-        assert_eq!(removed, 2, "only the two present ids are counted as removed");
+        assert_eq!(
+            removed, 2,
+            "only the two present ids are counted as removed"
+        );
 
         let remaining: Vec<String> = c
             .get_autoresponder()
@@ -2756,8 +3418,16 @@ mod tests {
             .iter()
             .map(|rule| rule.id.clone())
             .collect();
-        assert_eq!(remaining, vec!["r2".to_string()], "r1 and r3 are gone, r2 stays");
-        assert_eq!(timeline(&c).len(), 1, "a batch delete is a single undo entry");
+        assert_eq!(
+            remaining,
+            vec!["r2".to_string()],
+            "r1 and r3 are gone, r2 stays"
+        );
+        assert_eq!(
+            timeline(&c).len(),
+            1,
+            "a batch delete is a single undo entry"
+        );
 
         c.undo().expect("undo");
         let restored: Vec<String> = c
@@ -2805,16 +3475,27 @@ mod tests {
         assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/edited");
 
         let step = c.undo().expect("undo");
-        assert!(step.mock_changed, "a mock undo must signal the caller to re-persist");
+        assert!(
+            step.mock_changed,
+            "a mock undo must signal the caller to re-persist"
+        );
         {
             let history = c.shared.history.lock().expect("history");
             assert!(!history.can_undo() && history.can_redo());
         }
-        assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/seq", "undo restores the prior url");
+        assert_eq!(
+            c.get_rule("r1").expect("rule").matcher.url,
+            "/seq",
+            "undo restores the prior url"
+        );
 
         let step = c.redo().expect("redo");
         assert!(step.mock_changed);
-        assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/edited", "redo re-applies the edit");
+        assert_eq!(
+            c.get_rule("r1").expect("rule").matcher.url,
+            "/edited",
+            "redo re-applies the edit"
+        );
     }
 
     #[test]
@@ -2853,7 +3534,10 @@ mod tests {
             ctrl.update_rule("A", respond_rule("r1"))
         })
         .expect("update");
-        assert!(timeline(&c).is_empty(), "an identical update records nothing");
+        assert!(
+            timeline(&c).is_empty(),
+            "an identical update records nothing"
+        );
 
         // Failed update (missing scenario) → nothing recorded.
         let failed = c.with_history(HistoryTag::new("fail", None), |ctrl| {
@@ -2862,6 +3546,191 @@ mod tests {
         assert!(failed.is_err());
         assert!(timeline(&c).is_empty(), "a failed mutation records nothing");
         assert!(c.undo().is_none(), "nothing to undo");
+    }
+
+    #[test]
+    fn failure_after_a_live_mutation_restores_the_before_snapshot() {
+        let c = controller();
+        seed_one_rule(&c);
+
+        let failed = c.with_history(HistoryTag::new("persisted edit", None), |ctrl| {
+            ctrl.update_rule("A", rule_with_url("/memory-only"))
+                .expect("live mutation succeeds");
+            Err::<(), _>("database write failed")
+        });
+
+        assert_eq!(failed, Err("database write failed"));
+        assert_eq!(
+            c.get_rule("r1").expect("rule").matcher.url,
+            "/seq",
+            "a rejected command must not leave a memory-only autoresponder change"
+        );
+        assert!(timeline(&c).is_empty());
+    }
+
+    #[test]
+    fn failure_after_rule_deletion_restores_its_runtime_cursor() {
+        let c = controller();
+        seed_one_rule(&c);
+        fire_active_once(&c);
+        assert_eq!(c.rule_hits().get("r1"), Some(&1));
+
+        let failed = c.with_history(HistoryTag::new("Delete rule", None), |ctrl| {
+            ctrl.delete_rule("A", "r1").expect("live delete succeeds");
+            Err::<(), _>("database write failed")
+        });
+
+        assert_eq!(failed, Err("database write failed"));
+        assert!(c.get_rule("r1").is_some());
+        assert_eq!(
+            c.rule_hits().get("r1"),
+            Some(&1),
+            "a rejected delete must not reset the restored rule's fire limit"
+        );
+    }
+
+    #[test]
+    fn failed_undo_or_redo_callback_restores_state_and_history_cursor() {
+        let c = controller();
+        seed_one_rule(&c);
+        c.with_history(HistoryTag::new("Edit rule", None), |ctrl| {
+            ctrl.update_rule("A", rule_with_url("/edited"))
+        })
+        .expect("edit");
+
+        let undo_error = c.undo_and_then(|ctrl, _| {
+            assert_eq!(ctrl.get_rule("r1").expect("rule").matcher.url, "/seq");
+            Err::<(), _>("database write failed")
+        });
+        assert!(matches!(undo_error, Err("database write failed")));
+        assert_eq!(
+            c.get_rule("r1").expect("rule").matcher.url,
+            "/edited",
+            "failed undo persistence restores the edited live state"
+        );
+        {
+            let history = c.shared.history.lock().expect("history");
+            assert!(history.can_undo() && !history.can_redo());
+        }
+
+        c.undo().expect("undo remains available");
+        let redo_error = c.redo_and_then(|ctrl, _| {
+            assert_eq!(ctrl.get_rule("r1").expect("rule").matcher.url, "/edited");
+            Err::<(), _>("database write failed")
+        });
+        assert!(matches!(redo_error, Err("database write failed")));
+        assert_eq!(
+            c.get_rule("r1").expect("rule").matcher.url,
+            "/seq",
+            "failed redo persistence restores the undone live state"
+        );
+        {
+            let history = c.shared.history.lock().expect("history");
+            assert!(!history.can_undo() && history.can_redo());
+        }
+        c.redo().expect("redo remains available");
+        assert_eq!(c.get_rule("r1").expect("rule").matcher.url, "/edited");
+    }
+
+    #[test]
+    fn failed_undo_or_redo_callback_restores_runtime_rule_cursors() {
+        let c = controller();
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![
+                scenario("A", vec![respond_rule("a-rule")]),
+                scenario("B", vec![respond_rule("b-rule")]),
+            ],
+            active_scenario_id: Some("A".into()),
+            general_active: true,
+        });
+        c.with_history(HistoryTag::new("Activate B", None), |ctrl| {
+            ctrl.set_active_scenario(Some("B"))
+        })
+        .expect("activate B");
+        fire_active_once(&c);
+        assert_eq!(c.rule_hits().get("b-rule"), Some(&1));
+
+        let undo_error = c.undo_and_then(|_, _| Err::<(), _>("database write failed"));
+        assert!(matches!(undo_error, Err("database write failed")));
+        assert_eq!(
+            c.get_autoresponder().active_scenario_id.as_deref(),
+            Some("B")
+        );
+        assert_eq!(c.rule_hits().get("b-rule"), Some(&1));
+
+        c.undo().expect("undo remains available");
+        fire_active_once(&c);
+        assert_eq!(c.rule_hits().get("a-rule"), Some(&1));
+        let redo_error = c.redo_and_then(|_, _| Err::<(), _>("database write failed"));
+        assert!(matches!(redo_error, Err("database write failed")));
+        assert_eq!(
+            c.get_autoresponder().active_scenario_id.as_deref(),
+            Some("A")
+        );
+        assert_eq!(c.rule_hits().get("a-rule"), Some(&1));
+    }
+
+    #[test]
+    fn concurrent_history_mutations_are_serialized_as_complete_transactions() {
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+
+        let c = Arc::new(controller());
+        c.set_autoresponder(AutoResponder {
+            scenarios: vec![scenario("S", vec![])],
+            active_scenario_id: Some("S".into()),
+            general_active: true,
+        });
+
+        let (a_entered_tx, a_entered_rx) = mpsc::channel();
+        let (release_a_tx, release_a_rx) = mpsc::channel();
+        let a_controller = Arc::clone(&c);
+        let a = std::thread::spawn(move || {
+            a_controller
+                .with_history(HistoryTag::new("A", None), |ctrl| {
+                    a_entered_tx.send(()).expect("signal A");
+                    release_a_rx.recv().expect("release A");
+                    let mut ar = ctrl.get_autoresponder();
+                    ar.scenarios[0].name = "A".into();
+                    ctrl.set_autoresponder(ar);
+                    Ok::<_, ()>(())
+                })
+                .expect("A mutation");
+        });
+        a_entered_rx.recv().expect("A entered transaction");
+
+        let (b_entered_tx, b_entered_rx) = mpsc::channel();
+        let b_controller = Arc::clone(&c);
+        let b = std::thread::spawn(move || {
+            b_controller
+                .with_history(HistoryTag::new("B", None), |ctrl| {
+                    b_entered_tx.send(()).expect("signal B");
+                    let mut ar = ctrl.get_autoresponder();
+                    ar.scenarios[0].name = "B".into();
+                    ctrl.set_autoresponder(ar);
+                    Ok::<_, ()>(())
+                })
+                .expect("B mutation");
+        });
+
+        assert!(
+            b_entered_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "B must not enter while A still owns its before/mutate/after transaction"
+        );
+        release_a_tx.send(()).expect("release A");
+        a.join().expect("join A");
+        b_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("B enters after A");
+        b.join().expect("join B");
+
+        assert_eq!(c.get_autoresponder().scenarios[0].name, "B");
+        c.undo().expect("undo B");
+        assert_eq!(c.get_autoresponder().scenarios[0].name, "A");
+        c.undo().expect("undo A");
+        assert_eq!(c.get_autoresponder().scenarios[0].name, "S");
     }
 
     #[test]
@@ -2877,7 +3746,10 @@ mod tests {
             ctrl.set_active_scenario(Some("B"))
         })
         .expect("activate");
-        assert_eq!(c.get_autoresponder().active_scenario_id.as_deref(), Some("B"));
+        assert_eq!(
+            c.get_autoresponder().active_scenario_id.as_deref(),
+            Some("B")
+        );
 
         c.undo().expect("undo");
         assert_eq!(
@@ -2900,7 +3772,10 @@ mod tests {
         );
 
         let step = c.undo().expect("undo restores flows");
-        assert!(!step.mock_changed, "a traffic undo never touches the autoresponder");
+        assert!(
+            !step.mock_changed,
+            "a traffic undo never touches the autoresponder"
+        );
         {
             let store = c.shared.store.lock().expect("store");
             assert_eq!(
@@ -2908,7 +3783,13 @@ mod tests {
                 ["a", "b", "c", "d"].map(str::to_string).to_vec(),
                 "undo restores the exact capture order"
             );
-            let body = &store.get("b").expect("flow b is back").response.as_ref().expect("resp").body;
+            let body = &store
+                .get("b")
+                .expect("flow b is back")
+                .response
+                .as_ref()
+                .expect("resp")
+                .body;
             assert_eq!(
                 String::from_utf8_lossy(body),
                 "response-b",
@@ -2942,13 +3823,40 @@ mod tests {
     }
 
     #[test]
+    fn redoing_clear_preserves_traffic_that_arrived_after_the_clear() {
+        let c = controller();
+        for id in ["a", "b"] {
+            c.shared.record_imported(completed_flow(id));
+        }
+        c.clear_flows_tracked();
+
+        // This request was never part of the clear operation. It must survive
+        // both undo and redo of that older history entry.
+        c.shared.record_imported(completed_flow("later"));
+        c.undo()
+            .expect("undo restores the originally-cleared flows");
+        assert_eq!(
+            c.shared.store.lock().expect("store").ids(),
+            ["a", "b", "later"].map(str::to_string).to_vec()
+        );
+
+        c.redo().expect("redo removes the originally-cleared flows");
+        assert_eq!(
+            c.shared.store.lock().expect("store").ids(),
+            vec!["later".to_string()],
+            "redo must not clear traffic that arrived after the original action"
+        );
+    }
+
+    #[test]
     fn jump_to_walks_multiple_steps_in_both_directions() {
         let c = controller();
         seed_one_rule(&c);
         for (i, url) in ["/one", "/two", "/three"].iter().enumerate() {
-            c.with_history(HistoryTag::new(format!("edit {i}"), Some(format!("k{i}"))), |ctrl| {
-                ctrl.update_rule("A", rule_with_url(url))
-            })
+            c.with_history(
+                HistoryTag::new(format!("edit {i}"), Some(format!("k{i}"))),
+                |ctrl| ctrl.update_rule("A", rule_with_url(url)),
+            )
             .expect("update");
         }
         let ids = timeline(&c);
@@ -3023,7 +3931,8 @@ mod tests {
             "a request header value is found on the Request side"
         );
         assert!(
-            c.search_headers("zzz", SearchSide::Response, false, None).is_empty(),
+            c.search_headers("zzz", SearchSide::Response, false, None)
+                .is_empty(),
             "a request-only value must not match the Response side"
         );
         assert_eq!(
@@ -3071,7 +3980,8 @@ mod tests {
             "a valid regex matches the rendered header line"
         );
         assert!(
-            c.search_headers("x-tr(", SearchSide::Request, true, None).is_empty(),
+            c.search_headers("x-tr(", SearchSide::Request, true, None)
+                .is_empty(),
             "an invalid regex yields an empty result"
         );
     }
@@ -3106,7 +4016,10 @@ mod tests {
         c.shared.record_new(flow_with_headers(
             "png",
             vec![],
-            vec![("content-type", "image/png"), ("x-trace", "needle-in-header")],
+            vec![
+                ("content-type", "image/png"),
+                ("x-trace", "needle-in-header"),
+            ],
             b"needle-in-body",
         ));
 
@@ -3133,7 +4046,8 @@ mod tests {
             "body search still matches the decoded text/plain response body"
         );
         assert!(
-            c.search_bodies("response-alpha", SearchSide::Request, false, None).is_empty(),
+            c.search_bodies("response-alpha", SearchSide::Request, false, None)
+                .is_empty(),
             "a response-body match must not be reported on the Request side"
         );
     }
@@ -3162,7 +4076,10 @@ mod tests {
                 Some(String::from_utf8_lossy(body).into_owned())
             },
         );
-        assert!(probed.load(Ordering::Relaxed), "the scan must actually have run");
+        assert!(
+            probed.load(Ordering::Relaxed),
+            "the scan must actually have run"
+        );
         assert_eq!(ids, vec!["alpha".to_string()], "scan results are unchanged");
     }
 
@@ -3188,7 +4105,11 @@ mod tests {
                 calls.fetch_add(1, Ordering::Relaxed);
             },
         );
-        assert_eq!(calls.load(Ordering::Relaxed), 2, "one progress tick per requested id");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            2,
+            "one progress tick per requested id"
+        );
         assert_eq!(batch.rules.len(), 2, "both flows produced a rule");
     }
 
@@ -3196,7 +4117,10 @@ mod tests {
     fn search_rules_empty_pattern_returns_all_ids() {
         let c = controller();
         c.set_autoresponder(AutoResponder {
-            scenarios: vec![scenario("S", vec![respond_rule("one"), respond_rule("two")])],
+            scenarios: vec![scenario(
+                "S",
+                vec![respond_rule("one"), respond_rule("two")],
+            )],
             active_scenario_id: Some("S".to_string()),
             general_active: true,
         });
@@ -3254,6 +4178,7 @@ mod tests {
             status: 503,
             headers: vec![],
             body: String::new(),
+            body_base64: None,
             content_type: None,
             content_encoding: None,
         };
@@ -3289,6 +4214,7 @@ mod tests {
             status: 200,
             headers: vec![],
             body: "needle-XYZ in the body".to_string(),
+            body_base64: None,
             content_type: Some("text/plain".to_string()),
             content_encoding: None,
         };
@@ -3313,6 +4239,7 @@ mod tests {
             status: 200,
             headers: vec![("x-a".to_string(), "val1".to_string())],
             body: String::new(),
+            body_base64: None,
             content_type: Some("application/json".to_string()),
             content_encoding: None,
         };
@@ -3359,6 +4286,7 @@ mod tests {
             status: 200,
             headers: vec![],
             body: "only-in-body-needle".to_string(),
+            body_base64: None,
             content_type: None,
             content_encoding: None,
         };
@@ -3385,7 +4313,8 @@ mod tests {
         });
 
         assert!(
-            c.search_rules("ghost", "a", RuleSearchScope::Url).is_empty(),
+            c.search_rules("ghost", "a", RuleSearchScope::Url)
+                .is_empty(),
             "searching a non-existent scenario returns empty",
         );
         assert!(
@@ -3406,7 +4335,8 @@ mod tests {
         });
 
         assert!(
-            c.search_rules("S", "x-a.*", RuleSearchScope::Url).is_empty(),
+            c.search_rules("S", "x-a.*", RuleSearchScope::Url)
+                .is_empty(),
             "rule search is plain substring, so a regex metacharacter pattern does not match",
         );
         assert_eq!(
@@ -3422,7 +4352,8 @@ mod tests {
         c.shared.record_new(flow("bare"));
 
         assert!(
-            c.search_headers("anything", SearchSide::Either, false, None).is_empty(),
+            c.search_headers("anything", SearchSide::Either, false, None)
+                .is_empty(),
             "a flow with empty request headers and no response yields no header match",
         );
     }
@@ -3518,6 +4449,7 @@ mod tests {
             status: 200,
             headers: vec![("x-flavor".to_string(), "sprinkles".to_string())],
             body: String::new(),
+            body_base64: None,
             content_type: None,
             content_encoding: None,
         };
@@ -3538,9 +4470,27 @@ mod tests {
     fn controller_seeds_general_by_default() {
         let c = controller();
         let ar = c.get_autoresponder();
-        assert!(ar.general().is_some(), "a fresh controller has the built-in General scenario");
+        assert!(
+            ar.general().is_some(),
+            "a fresh controller has the built-in General scenario"
+        );
         assert_eq!(ar.scenarios[0].id, GENERAL_SCENARIO_ID, "General is first");
         assert!(ar.general_active, "General is on by default");
+    }
+
+    #[test]
+    fn generated_scenario_names_ignore_general_and_do_not_reuse_existing_numbers() {
+        let c = controller();
+        let mut initial = AutoResponder::default();
+        initial.ensure_general();
+        c.set_autoresponder(initial);
+
+        let first = c.create_scenario(None).expect("create first scenario");
+        assert_eq!(first.name, "Scenario 1");
+        c.rename_scenario(&first.id, "Scenario 7".to_string())
+            .expect("seed a higher generated number");
+        let next = c.create_scenario(None).expect("create next scenario");
+        assert_eq!(next.name, "Scenario 8");
     }
 
     #[test]
@@ -3555,7 +4505,8 @@ mod tests {
             "General cannot be deleted"
         );
         assert!(
-            c.rename_scenario(GENERAL_SCENARIO_ID, "Nope".to_string()).is_err(),
+            c.rename_scenario(GENERAL_SCENARIO_ID, "Nope".to_string())
+                .is_err(),
             "General cannot be renamed"
         );
         assert!(

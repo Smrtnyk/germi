@@ -1,23 +1,61 @@
 import type { FlowDetail } from "./types";
+import { flowDetailUrl } from "./flowUrl";
 
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-const SKIP_HEADERS = new Set(["content-length", "host", "connection", "proxy-connection"]);
+const SKIP_HEADERS = new Set([
+  "connection",
+  "content-length",
+  "host",
+  "keep-alive",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
 
-/** Reconstruct an approximate `curl` invocation for a captured request. */
+/** Reconstruct a byte-faithful POSIX-shell `curl` invocation. */
 export function toCurl(detail: FlowDetail): string {
-  const url = `${detail.scheme}://${detail.host}${detail.path}`;
+  const url = flowDetailUrl(detail);
   const parts = [`curl ${shellQuote(url)}`];
-  const method = detail.method.toUpperCase();
-  const body = detail.request.size > 0 ? detail.request.bodyText : "";
-  if (method !== "GET" || body) parts.push(`-X ${method}`);
+  // HTTP methods are case-sensitive. Preserve a captured extension method
+  // exactly; only the canonical uppercase GET/HEAD forms get curl shortcuts.
+  const method = detail.method;
+  const hasBody = detail.request.size > 0;
+  if (method === "HEAD" && !hasBody) {
+    // `-X HEAD` only changes the method string: curl still waits for a response
+    // body promised by Content-Length. `--head` also enables HEAD semantics.
+    parts.push("--head");
+  } else if (method !== "GET" || hasBody) {
+    // HTTP methods are tokens, not shell identifiers (`'`, `$` and backticks
+    // are legal token characters). Quote captured input just like URL/headers.
+    parts.push(`-X ${shellQuote(method)}`);
+  }
+  const connectionHeaders = new Set(
+    detail.request.headers
+      .filter(([name]) => name.toLowerCase() === "connection")
+      .flatMap(([, value]) => value.split(","))
+      .map((name) => name.trim().toLowerCase())
+      .filter(Boolean),
+  );
   for (const [k, v] of detail.request.headers) {
-    if (SKIP_HEADERS.has(k.toLowerCase())) continue;
+    const lower = k.toLowerCase();
+    if (SKIP_HEADERS.has(lower) || connectionHeaders.has(lower)) continue;
+    // A decoded inspector detail carries identity body bytes. Keeping the
+    // original Content-Encoding beside those bytes would make the replay lie.
+    if (lower === "content-encoding" && detail.request.decoded) continue;
     parts.push(`-H ${shellQuote(`${k}: ${v}`)}`);
   }
-  if (body) parts.push(`--data-raw ${shellQuote(body)}`);
+  if (hasBody && detail.request.bodyBase64) {
+    parts.push("--data-binary @-");
+    return `printf %s ${shellQuote(detail.request.bodyBase64)} | base64 --decode | ${parts.join(
+      " \\\n  ",
+    )}`;
+  }
+  if (hasBody) parts.push(`--data-binary ${shellQuote(detail.request.bodyText)}`);
   return parts.join(" \\\n  ");
 }
 

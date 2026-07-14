@@ -10,15 +10,17 @@
 //! force the user to re-trust it every launch and invalidate cached leaf certs.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use hudsucker::certificate_authority::RcgenAuthority;
 use hudsucker::rcgen::{
     date_time_ymd, BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose,
+    KeyUsagePurpose, PublicKeyData,
 };
 use hudsucker::rustls::crypto::aws_lc_rs;
+use hudsucker::rustls::pki_types::{pem::PemObject, CertificateDer};
 
 /// In-memory handle to the root CA material.
 #[derive(Clone)]
@@ -59,32 +61,41 @@ impl CertAuthority {
 
     /// Load the CA from `dir`, generating + persisting it on first run.
     pub fn load_or_generate(dir: &Path) -> Result<Self> {
-        let cert_path = dir.join("germi-ca.pem");
-        let key_path = dir.join("germi-ca.key");
-        let der_path = dir.join("germi-ca.der");
-
-        if cert_path.exists() && key_path.exists() && der_path.exists() {
+        if let Some(candidate) = Self::load(dir)? {
             // Re-assert owner-only perms so a key written by an older,
             // world-readable build is repaired in place on this upgraded load
             // (not only when the key is freshly written).
-            repair_key_perms(&key_path);
-            let candidate = Self {
-                cert_pem: fs::read_to_string(&cert_path).context("read CA cert")?,
-                key_pem: fs::read_to_string(&key_path).context("read CA key")?,
-                cert_der: fs::read(&der_path).context("read CA der")?,
-            };
-            // Only reuse material that actually parses into a usable authority.
-            // A corrupt/mismatched set (e.g. a pre-atomic-write crash left a mixed
-            // pem/key pair) would otherwise load "successfully" and then fail every
-            // TLS handshake at runtime with no error surfaced — regenerate instead.
-            if candidate.to_authority().is_ok() {
-                return Ok(candidate);
-            }
+            repair_key_perms(&dir.join("germi-ca.key"));
+            return Ok(candidate);
         }
 
         let ca = Self::generate()?;
         ca.save(dir)?;
         Ok(ca)
+    }
+
+    /// Read an existing, internally-consistent CA without creating, repairing,
+    /// or replacing anything. Viewer processes use this path because they share
+    /// the main process's app-data directory but must remain strictly read-only.
+    pub fn load(dir: &Path) -> Result<Option<Self>> {
+        let cert_path = dir.join("germi-ca.pem");
+        let key_path = dir.join("germi-ca.key");
+        let der_path = dir.join("germi-ca.der");
+
+        if !(cert_path.exists() && key_path.exists() && der_path.exists()) {
+            return Ok(None);
+        }
+        let candidate = Self {
+            cert_pem: fs::read_to_string(&cert_path).context("read CA cert")?,
+            key_pem: fs::read_to_string(&key_path).context("read CA key")?,
+            cert_der: fs::read(&der_path).context("read CA der")?,
+        };
+        // Only reuse one internally-consistent identity. Constructing an
+        // `Issuer` does not verify that the private key belongs to the PEM
+        // certificate, and it does not inspect our separately exported DER.
+        // A partially replaced set could therefore appear usable here but
+        // mint leaf certificates no client trusts (or export stale DER).
+        Ok(candidate.material_is_consistent().then_some(candidate))
     }
 
     /// Persist the CA material (cert PEM, key PEM, cert DER) under `dir`. Each file
@@ -97,20 +108,49 @@ impl CertAuthority {
         let cert = dir.join("germi-ca.pem");
         let key = dir.join("germi-ca.key");
         let der = dir.join("germi-ca.der");
-        let cert_tmp = dir.join("germi-ca.pem.tmp");
-        let key_tmp = dir.join("germi-ca.key.tmp");
-        let der_tmp = dir.join("germi-ca.der.tmp");
-
-        fs::write(&cert_tmp, &self.cert_pem).context("write CA cert")?;
-        write_key_private(&key_tmp, &self.key_pem).context("write CA key")?;
-        fs::write(&der_tmp, &self.cert_der).context("write CA der")?;
+        let cert_tmp = stage_file(dir, self.cert_pem.as_bytes(), false).context("write CA cert")?;
+        let key_tmp = stage_file(dir, self.key_pem.as_bytes(), true).context("write CA key")?;
+        let der_tmp = stage_file(dir, &self.cert_der, false).context("write CA der")?;
 
         // Renames are fast metadata ops, so the window where the three files could
         // disagree is far narrower than writing full contents between each.
-        fs::rename(&cert_tmp, &cert).context("commit CA cert")?;
-        fs::rename(&key_tmp, &key).context("commit CA key")?;
-        fs::rename(&der_tmp, &der).context("commit CA der")?;
+        // `persist` performs a replacing move on Windows too; `fs::rename` cannot
+        // replace an existing destination there, so every regeneration failed.
+        cert_tmp
+            .persist(&cert)
+            .map_err(|error| error.error)
+            .context("commit CA cert")?;
+        key_tmp
+            .persist(&key)
+            .map_err(|error| error.error)
+            .context("commit CA key")?;
+        der_tmp
+            .persist(&der)
+            .map_err(|error| error.error)
+            .context("commit CA der")?;
         Ok(())
+    }
+
+    /// The PEM certificate, exported DER, and signing key must all describe the
+    /// same CA. `Issuer::from_ca_cert_pem` parses them but does not prove the
+    /// certificate's public key matches the supplied private key.
+    fn material_is_consistent(&self) -> bool {
+        let Ok(pem_der) = CertificateDer::from_pem_slice(self.cert_pem.as_bytes()) else {
+            return false;
+        };
+        if pem_der.as_ref() != self.cert_der {
+            return false;
+        }
+        let Ok(key_pair) = KeyPair::from_pem(&self.key_pem) else {
+            return false;
+        };
+        let Ok((remaining, certificate)) = x509_parser::parse_x509_certificate(&self.cert_der)
+        else {
+            return false;
+        };
+        remaining.is_empty()
+            && certificate.public_key().raw == key_pair.subject_public_key_info()
+            && self.to_authority().is_ok()
     }
 
     /// Build the hudsucker authority that mints per-host leaf certs.
@@ -127,29 +167,32 @@ impl CertAuthority {
     }
 }
 
-/// Write the CA *private key* with owner-only permissions. The root key signs
-/// every leaf cert the proxy mints, so on a shared host it must not be readable
-/// by other users (whoever reads it can MITM anyone who trusts the Germi CA).
+/// Stage one CA artifact beside its destination, fsyncing before commit. The
+/// private key is explicitly owner-only on Unix; Windows relies on the per-user
+/// app-data ACL (and `NamedTempFile`'s restrictive creation mode).
+fn stage_file(
+    dir: &Path,
+    contents: &[u8],
+    private: bool,
+) -> std::io::Result<tempfile::NamedTempFile> {
+    let mut staged = tempfile::NamedTempFile::new_in(dir)?;
+    if private {
+        tighten_key_perms(staged.path())?;
+    }
+    staged.write_all(contents)?;
+    staged.as_file().sync_all()?;
+    Ok(staged)
+}
+
 #[cfg(unix)]
-fn write_key_private(path: &Path, contents: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(contents.as_bytes())?;
-    // `mode` only applies on creation; tighten explicitly so a key written by an
-    // older (world-readable) build is repaired in place too.
+fn tighten_key_perms(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(not(unix))]
-fn write_key_private(path: &Path, contents: &str) -> std::io::Result<()> {
-    // On Windows the per-user app-data dir ACL protects the key.
-    fs::write(path, contents)
+fn tighten_key_perms(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Create the CA directory owner-only (`0700`) from the start — closing the
@@ -159,7 +202,10 @@ fn write_key_private(path: &Path, contents: &str) -> std::io::Result<()> {
 #[cfg(unix)]
 fn create_ca_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
@@ -231,6 +277,56 @@ mod tests {
         let b = CertAuthority::load_or_generate(&dir).unwrap();
         // Second load returns the same persisted material.
         assert_eq!(a.cert_pem, b.cert_pem);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_replaces_an_existing_ca_identity() {
+        let dir = std::env::temp_dir().join(format!("germi-ca-replace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let first = CertAuthority::generate().unwrap();
+        first.save(&dir).unwrap();
+        let second = CertAuthority::generate().unwrap();
+        second
+            .save(&dir)
+            .expect("an existing CA must be replaceable");
+
+        let loaded = CertAuthority::load_or_generate(&dir).unwrap();
+        assert_eq!(loaded.cert_der, second.cert_der);
+        assert_eq!(loaded.key_pem, second.key_pem);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_regenerates_a_mismatched_certificate_and_key() {
+        let dir =
+            std::env::temp_dir().join(format!("germi-ca-mismatched-key-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let certificate = CertAuthority::generate().unwrap();
+        certificate.save(&dir).unwrap();
+        let other_key = CertAuthority::generate().unwrap();
+        fs::write(dir.join("germi-ca.key"), &other_key.key_pem).unwrap();
+
+        let loaded = CertAuthority::load_or_generate(&dir).unwrap();
+        assert!(loaded.material_is_consistent());
+        assert_ne!(
+            loaded.cert_der, certificate.cert_der,
+            "the mismatched on-disk identity must not be reused"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_regenerates_a_stale_der_export() {
+        let dir = std::env::temp_dir().join(format!("germi-ca-stale-der-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let original = CertAuthority::generate().unwrap();
+        original.save(&dir).unwrap();
+        fs::write(dir.join("germi-ca.der"), b"not the PEM certificate").unwrap();
+
+        let loaded = CertAuthority::load_or_generate(&dir).unwrap();
+        assert!(loaded.material_is_consistent());
+        assert_ne!(loaded.cert_der, b"not the PEM certificate");
         let _ = fs::remove_dir_all(&dir);
     }
 }

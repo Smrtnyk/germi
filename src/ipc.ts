@@ -22,6 +22,7 @@ import type {
   Script,
   ScriptDiagnostic,
   SettingsSectionSummary,
+  SystemProxyStatus,
   TestInput,
   TestResult,
 } from "./types";
@@ -140,20 +141,25 @@ export const api = {
   exportCa: () => invoke<boolean>("export_ca"),
   regenerateCa: () => invoke<void>("regenerate_ca"),
   setSystemProxy: (port: number) => invoke<void>("set_system_proxy", { port }),
+  systemProxyStatus: () => invoke<SystemProxyStatus>("system_proxy_status"),
   clearSystemProxy: () => invoke<void>("clear_system_proxy"),
 };
 
 /**
  * Open the live flow stream. The backend pushes batches of events (~every 60ms
- * or 200 events) over a single long-lived channel. Returns the channel so the
- * caller can null its `onmessage` on unmount (see the Tauri channel leak note).
+ * or 200 events) over a single long-lived channel. Returns both the channel
+ * (for cleanup) and a promise that resolves only after the backend installed
+ * the subscriber, closing the startup snapshot/event gap.
  */
 export function subscribeFlows(
   onBatch: (events: FlowEvent[]) => void,
   onError?: (message: string) => void,
-): Channel<FlowEvent[]> {
+): { channel: Channel<FlowEvent[]>; ready: Promise<void> } {
   const channel = new Channel<FlowEvent[]>();
   channel.onmessage = onBatch;
-  invoke("subscribe_flows", { channel }).catch((e) => onError?.(String(e)));
-  return channel;
+  const ready = invoke<void>("subscribe_flows", { channel }).catch((error) => {
+    onError?.(String(error));
+    throw error;
+  });
+  return { channel, ready };
 }

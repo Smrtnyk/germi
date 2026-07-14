@@ -82,6 +82,22 @@ describe("autoresponder summary updates", () => {
     expect(second.scenarios).toHaveLength(1);
     expect(ids(second)).toEqual(["a", "b", "c"]);
   });
+
+  it("keeps the active scenario when a bulk drop appends to General", () => {
+    const initial: AutoResponderSummary = {
+      scenarios: [
+        { id: GENERAL_SCENARIO_ID, name: "General rules", rules: [rule("g1")] },
+        { id: "active", name: "Active", rules: [] },
+      ],
+      activeScenarioId: "active",
+      generalActive: true,
+    };
+
+    const next = appendBulkRuleSummaries(initial, GENERAL_SCENARIO_ID, [rule("g2")]);
+
+    expect(next.activeScenarioId).toBe("active");
+    expect(next.scenarios[0].rules.map((candidate) => candidate.id)).toEqual(["g1", "g2"]);
+  });
 });
 
 describe("selectedTabEnabled (Off/On button state)", () => {
@@ -150,6 +166,18 @@ describe("popOutOpener (detached rule window)", () => {
     const open = vi.fn();
     popOutOpener("viewed", { rule: { id: "other" }, flush: () => Promise.resolve() }, open)("r1");
     expect(open).toHaveBeenCalledWith("viewed", "r1");
+  });
+
+  it("does not open a second editor when the current edit cannot be flushed", async () => {
+    const open = vi.fn();
+    popOutOpener(
+      "viewed",
+      { rule: { id: "r1" }, flush: () => Promise.reject(new Error("read-only")) },
+      open,
+    )("r1");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(open).not.toHaveBeenCalled();
   });
 });
 

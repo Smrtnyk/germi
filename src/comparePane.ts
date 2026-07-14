@@ -118,6 +118,23 @@ export function selectMany(ids: string[]): PaneSelection {
   return { selectedIds: new Set(ids), focusedId: ids[0], anchorId: ids[0] };
 }
 
+/** Keep filter changes from leaving keyboard/diff/move actions pointed at a
+ * hidden row. Preserve visible selected rows; otherwise select the first visible
+ * row, or clear the selection when the filter has no results. */
+export function retainVisibleSelection(
+  selection: PaneSelection,
+  visibleIds: string[],
+): PaneSelection {
+  const visible = new Set(visibleIds);
+  const selectedIds = new Set([...selection.selectedIds].filter((id) => visible.has(id)));
+  const focusedId = visible.has(selection.focusedId ?? "")
+    ? selection.focusedId
+    : (selectedIds.values().next().value ?? visibleIds[0] ?? null);
+  if (focusedId !== null) selectedIds.add(focusedId);
+  const anchorId = visible.has(selection.anchorId ?? "") ? selection.anchorId : focusedId;
+  return { selectedIds, focusedId, anchorId };
+}
+
 /** Ctrl/⌘+A over a pane: select every visible row, focusing the last and
  *  anchoring the first — mirrors the main traffic list's select-all. An empty
  *  list is a no-op (the current selection stands). */
@@ -195,6 +212,33 @@ export function paneData(flows: FlowSummary[]): PaneData {
   return { flows, sel: selectOnly(flows[0]?.id ?? null), query: emptyPaneQuery() };
 }
 
+function selectionAfterArrival(
+  pane: PaneData,
+  flows: FlowSummary[],
+  arrivedIds: Set<string>,
+  matches: Map<string, number> | null,
+): PaneSelection {
+  const visibleIds = visiblePaneFlows(flows, pane.query, matches).map((flow) => flow.id);
+  const visibleArrivals = visibleIds.filter((id) => arrivedIds.has(id));
+  return visibleArrivals.length > 0
+    ? selectMany(visibleArrivals)
+    : retainVisibleSelection(pane.sel, visibleIds);
+}
+
+/** Append imported rows without pointing the pane at an arrival hidden by its
+ * current filter. Visible arrivals become the new selection; otherwise the
+ * existing visible selection is retained. */
+export function appendPaneFlows(
+  pane: PaneData,
+  added: FlowSummary[],
+  matches: Map<string, number> | null,
+): PaneData {
+  if (added.length === 0) return pane;
+  const flows = [...pane.flows, ...added];
+  const arrivedIds = new Set(added.map((flow) => flow.id));
+  return { ...pane, flows, sel: selectionAfterArrival(pane, flows, arrivedIds, matches) };
+}
+
 /** Move rows across panes: `ids`, or the source's visible selection when null.
  *  The source focuses the row taking the first moved one's place; the moved
  *  rows arrive at the destination's tail as its new selection. */
@@ -203,16 +247,28 @@ export function movePaneFlows(
   to: PaneData,
   fromVisibleIds: string[],
   ids: Set<string> | null,
+  toMatches: Map<string, number> | null = null,
 ): { from: PaneData; to: PaneData } | null {
   const wanted = ids ?? new Set(fromVisibleIds.filter((id) => from.sel.selectedIds.has(id)));
   const extraction = extractFlows(from.flows, wanted);
   if (!extraction) return null;
+  // Focus follows the *visible* list, not the unfiltered backing list. Using
+  // `extraction.nextFocus` here can point keyboard/diff actions at a row the
+  // active filter hides after the selected row is moved away.
+  const firstVisibleIndex = fromVisibleIds.findIndex((id) => wanted.has(id));
+  const remainingVisibleIds = fromVisibleIds.filter((id) => !wanted.has(id));
+  const nextVisible =
+    firstVisibleIndex === -1
+      ? (remainingVisibleIds[0] ?? null)
+      : (remainingVisibleIds[Math.min(firstVisibleIndex, remainingVisibleIds.length - 1)] ?? null);
+  const destinationFlows = [...to.flows, ...extraction.moved];
+  const movedIds = new Set(extraction.moved.map((flow) => flow.id));
   return {
-    from: { ...from, flows: extraction.rest, sel: selectOnly(extraction.nextFocus) },
+    from: { ...from, flows: extraction.rest, sel: selectOnly(nextVisible) },
     to: {
       ...to,
-      flows: [...to.flows, ...extraction.moved],
-      sel: selectMany(extraction.moved.map((f) => f.id)),
+      flows: destinationFlows,
+      sel: selectionAfterArrival(to, destinationFlows, movedIds, toMatches),
     },
   };
 }

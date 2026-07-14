@@ -104,7 +104,7 @@ describe("RuleListItem", () => {
     expect(onOpen).toHaveBeenCalledOnce();
   });
 
-  it("marks a popped-out rule and doesn't toggle selection from the checkbox", async () => {
+  it("marks a popped-out rule and disables its stale inline toggle", async () => {
     const onSelect = vi.fn();
     const onToggle = vi.fn();
     const screen = await render(
@@ -123,8 +123,8 @@ describe("RuleListItem", () => {
     await expect
       .element(screen.getByTitle("Open in a separate window", { exact: true }))
       .toBeVisible();
-    await screen.getByRole("checkbox").click();
-    expect(onToggle).toHaveBeenCalledWith(false);
+    await expect.element(screen.getByRole("checkbox")).toBeDisabled();
+    expect(onToggle).not.toHaveBeenCalled();
     expect(onSelect).not.toHaveBeenCalled();
   });
 });

@@ -86,6 +86,11 @@ export interface FlowDetail {
   timestampMs: number;
 }
 
+export interface SystemProxyStatus {
+  active: boolean;
+  port: number | null;
+}
+
 /** Body-equality verdict for the compare view (mirrors `BodyComparison` in
  *  `flow.rs`): computed backend-side on the decoded bodies so large payloads
  *  never cross IPC just to answer "same or different?". */
@@ -126,6 +131,8 @@ export type Action =
       status: number;
       headers: [string, string][];
       body: string;
+      /** Exact bytes for a binary mock; takes precedence over the text preview. */
+      bodyBase64?: string | null;
       contentType: string | null;
       /**
        * Optional Content-Encoding applied to the served body on the wire

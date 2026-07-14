@@ -15,7 +15,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use rhai::{Dynamic, Engine, ImmutableString, Scope, AST};
+use hudsucker::hyper::header::{HeaderName, HeaderValue};
+use rhai::{Dynamic, Engine, EvalAltResult, ImmutableString, Position, Scope, AST};
 use serde::{Deserialize, Serialize};
 
 use crate::flow::{CapturedRequest, CapturedResponse};
@@ -90,6 +91,7 @@ struct HttpMessage {
     state: Arc<Mutex<MsgState>>,
 }
 
+#[derive(Clone)]
 struct MsgState {
     method: String,
     url: String,
@@ -99,16 +101,19 @@ struct MsgState {
     status: u16,
     headers: Vec<(String, String)>,
     body: bytes::Bytes,
+    body_complete: bool,
     ops: Vec<HeaderOp>,
     status_override: Option<u16>,
 }
 
 impl HttpMessage {
     fn new(state: MsgState) -> Self {
-        Self { state: Arc::new(Mutex::new(state)) }
+        Self {
+            state: Arc::new(Mutex::new(state)),
+        }
     }
 
-    fn from_request(req: &CapturedRequest) -> Self {
+    fn from_request(req: &CapturedRequest, body_complete: bool) -> Self {
         let (path, query) = split_path(&req.path);
         Self::new(MsgState {
             method: req.method.clone(),
@@ -119,12 +124,13 @@ impl HttpMessage {
             status: 0,
             headers: req.headers.clone(),
             body: req.body.clone(),
+            body_complete,
             ops: Vec::new(),
             status_override: None,
         })
     }
 
-    fn from_response(res: &CapturedResponse) -> Self {
+    fn from_response(res: &CapturedResponse, body_complete: bool) -> Self {
         Self::new(MsgState {
             method: String::new(),
             url: String::new(),
@@ -134,6 +140,7 @@ impl HttpMessage {
             status: res.status,
             headers: res.headers.clone(),
             body: res.body.clone(),
+            body_complete,
             ops: Vec::new(),
             status_override: None,
         })
@@ -151,6 +158,7 @@ impl HttpMessage {
             status: 0,
             headers: Vec::new(),
             body: bytes::Bytes::new(),
+            body_complete: true,
             ops: Vec::new(),
             status_override: None,
         })
@@ -158,35 +166,86 @@ impl HttpMessage {
 
     fn effects(&self) -> Effects {
         match self.state.lock() {
-            Ok(s) => Effects { header_ops: s.ops.clone(), status: s.status_override },
+            Ok(s) => Effects {
+                header_ops: s.ops.clone(),
+                status: s.status_override,
+            },
             Err(_) => Effects::default(),
         }
     }
 
+    fn snapshot(&self) -> Option<MsgState> {
+        self.state.lock().ok().map(|state| state.clone())
+    }
+
+    fn restore(&self, snapshot: Option<MsgState>) {
+        if let (Some(snapshot), Ok(mut state)) = (snapshot, self.state.lock()) {
+            *state = snapshot;
+        }
+    }
+
     fn get_method(&self) -> ImmutableString {
-        self.state.lock().map(|s| s.method.clone()).unwrap_or_default().into()
+        self.state
+            .lock()
+            .map(|s| s.method.clone())
+            .unwrap_or_default()
+            .into()
     }
     fn get_url(&self) -> ImmutableString {
-        self.state.lock().map(|s| s.url.clone()).unwrap_or_default().into()
+        self.state
+            .lock()
+            .map(|s| s.url.clone())
+            .unwrap_or_default()
+            .into()
     }
     fn get_host(&self) -> ImmutableString {
-        self.state.lock().map(|s| s.host.clone()).unwrap_or_default().into()
+        self.state
+            .lock()
+            .map(|s| s.host.clone())
+            .unwrap_or_default()
+            .into()
     }
     fn get_path(&self) -> ImmutableString {
-        self.state.lock().map(|s| s.path.clone()).unwrap_or_default().into()
+        self.state
+            .lock()
+            .map(|s| s.path.clone())
+            .unwrap_or_default()
+            .into()
     }
     fn get_query(&self) -> ImmutableString {
-        self.state.lock().map(|s| s.query.clone()).unwrap_or_default().into()
+        self.state
+            .lock()
+            .map(|s| s.query.clone())
+            .unwrap_or_default()
+            .into()
     }
     fn get_status(&self) -> i64 {
         self.state.lock().map_or(0, |s| i64::from(s.status))
     }
-    fn get_body(&self) -> ImmutableString {
-        self.state
-            .lock()
-            .map(|s| String::from_utf8_lossy(&s.body).into_owned())
-            .unwrap_or_default()
-            .into()
+    fn get_body(&self) -> Result<ImmutableString, Box<EvalAltResult>> {
+        let Ok(state) = self.state.lock() else {
+            return Ok(ImmutableString::new());
+        };
+        if !state.body_complete {
+            return Err(EvalAltResult::ErrorRuntime(
+                "message body exceeds the capture limit or ended incomplete; check body_complete before reading body"
+                    .into(),
+                Position::NONE,
+            )
+            .into());
+        }
+        let body = std::str::from_utf8(&state.body).map_err(|_| {
+            Box::new(EvalAltResult::ErrorRuntime(
+                "message body is not valid UTF-8; inspect body_complete and content-type before reading body"
+                    .into(),
+                Position::NONE,
+            ))
+        })?;
+        Ok(body.to_owned().into())
+    }
+
+    fn get_body_complete(&self) -> bool {
+        self.state.lock().is_ok_and(|state| state.body_complete)
     }
 
     fn header(&self, name: &str) -> ImmutableString {
@@ -210,21 +269,32 @@ impl HttpMessage {
     }
 
     fn set_header(&self, name: &str, value: &str) {
+        if !valid_header(name, value) {
+            return;
+        }
         if let Ok(mut s) = self.state.lock() {
             s.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(name));
             s.headers.push((name.to_string(), value.to_string()));
-            s.ops.push(HeaderOp::Set(name.to_string(), value.to_string()));
+            s.ops
+                .push(HeaderOp::Set(name.to_string(), value.to_string()));
         }
     }
 
     fn add_header(&self, name: &str, value: &str) {
+        if !valid_header(name, value) {
+            return;
+        }
         if let Ok(mut s) = self.state.lock() {
             s.headers.push((name.to_string(), value.to_string()));
-            s.ops.push(HeaderOp::Add(name.to_string(), value.to_string()));
+            s.ops
+                .push(HeaderOp::Add(name.to_string(), value.to_string()));
         }
     }
 
     fn remove_header(&self, name: &str) {
+        if HeaderName::from_bytes(name.as_bytes()).is_err() {
+            return;
+        }
         if let Ok(mut s) = self.state.lock() {
             s.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(name));
             s.ops.push(HeaderOp::Remove(name.to_string()));
@@ -238,6 +308,11 @@ impl HttpMessage {
             s.status_override = Some(code);
         }
     }
+}
+
+fn valid_header(name: &str, value: &str) -> bool {
+    HeaderName::from_bytes(name.as_bytes()).is_ok()
+        && HeaderValue::from_bytes(value.as_bytes()).is_ok()
 }
 
 /// Split a captured `path` (which is stored as path + query) into the two parts,
@@ -271,7 +346,10 @@ pub struct ScriptEngine {
 
 impl ScriptEngine {
     pub fn new() -> Self {
-        Self { engine: build_engine(), scripts: Vec::new() }
+        Self {
+            engine: build_engine(),
+            scripts: Vec::new(),
+        }
     }
 
     /// Replace the whole set, compiling each script. Returns a diagnostic per
@@ -280,7 +358,8 @@ impl ScriptEngine {
         let mut diagnostics = Vec::with_capacity(scripts.len());
         let mut compiled = Vec::with_capacity(scripts.len());
         for script in scripts {
-            let (ast, error, has_request, has_response) = match self.engine.compile(&script.source) {
+            let (ast, error, has_request, has_response) = match self.engine.compile(&script.source)
+            {
                 Ok(ast) => {
                     let has_request = ast.iter_functions().any(|f| f.name == "on_request");
                     let has_response = ast.iter_functions().any(|f| f.name == "on_response");
@@ -293,7 +372,12 @@ impl ScriptEngine {
                 name: script.name.clone(),
                 error,
             });
-            compiled.push(CompiledScript { script, ast, has_request, has_response });
+            compiled.push(CompiledScript {
+                script,
+                ast,
+                has_request,
+                has_response,
+            });
         }
         self.scripts = compiled;
         diagnostics
@@ -328,18 +412,29 @@ impl ScriptEngine {
     /// Run every enabled `on_request` hook, in order, over `req`. Each script sees
     /// the mutations of the ones before it. A script that errors (syntax-clean but
     /// throws, or blows the op cap) is logged and skipped — the rest still run.
-    pub fn run_request(&self, req: &CapturedRequest) -> Effects {
-        let req_msg = HttpMessage::from_request(req);
+    #[cfg(test)]
+    fn run_request(&self, req: &CapturedRequest) -> Effects {
+        self.run_request_with_body_state(req, true)
+    }
+
+    pub(crate) fn run_request_with_body_state(
+        &self,
+        req: &CapturedRequest,
+        body_complete: bool,
+    ) -> Effects {
+        let req_msg = HttpMessage::from_request(req, body_complete);
         for compiled in &self.scripts {
             if !compiled.script.enabled || !compiled.has_request {
                 continue;
             }
             let Some(ast) = &compiled.ast else { continue };
+            let before = req_msg.snapshot();
             let mut scope = Scope::new();
             if let Err(err) =
                 self.engine
                     .call_fn::<Dynamic>(&mut scope, ast, "on_request", (req_msg.clone(),))
             {
+                req_msg.restore(before);
                 tracing::warn!("script '{}' on_request failed: {err}", compiled.script.name);
             }
         }
@@ -350,14 +445,29 @@ impl ScriptEngine {
     /// originating `req` for context). Same isolation as [`run_request`].
     ///
     /// [`run_request`]: Self::run_request
-    pub fn run_response(&self, req: Option<&CapturedRequest>, res: &CapturedResponse) -> Effects {
-        let request = req.map_or_else(HttpMessage::empty, HttpMessage::from_request);
-        let response = HttpMessage::from_response(res);
+    #[cfg(test)]
+    fn run_response(&self, req: Option<&CapturedRequest>, res: &CapturedResponse) -> Effects {
+        self.run_response_with_body_state(req, res, true, true)
+    }
+
+    pub(crate) fn run_response_with_body_state(
+        &self,
+        req: Option<&CapturedRequest>,
+        res: &CapturedResponse,
+        request_body_complete: bool,
+        response_body_complete: bool,
+    ) -> Effects {
+        let request = req.map_or_else(HttpMessage::empty, |req| {
+            HttpMessage::from_request(req, request_body_complete)
+        });
+        let response = HttpMessage::from_response(res, response_body_complete);
         for compiled in &self.scripts {
             if !compiled.script.enabled || !compiled.has_response {
                 continue;
             }
             let Some(ast) = &compiled.ast else { continue };
+            let request_before = request.snapshot();
+            let response_before = response.snapshot();
             let mut scope = Scope::new();
             if let Err(err) = self.engine.call_fn::<Dynamic>(
                 &mut scope,
@@ -365,7 +475,12 @@ impl ScriptEngine {
                 "on_response",
                 (request.clone(), response.clone()),
             ) {
-                tracing::warn!("script '{}' on_response failed: {err}", compiled.script.name);
+                request.restore(request_before);
+                response.restore(response_before);
+                tracing::warn!(
+                    "script '{}' on_response failed: {err}",
+                    compiled.script.name
+                );
             }
         }
         response.effects()
@@ -400,10 +515,14 @@ fn build_engine() -> Engine {
     engine.register_get("query", |m: &mut HttpMessage| m.get_query());
     engine.register_get("status", |m: &mut HttpMessage| m.get_status());
     engine.register_get("body", |m: &mut HttpMessage| m.get_body());
-    engine.register_fn("header", |m: &mut HttpMessage, name: ImmutableString| m.header(&name));
-    engine.register_fn("has_header", |m: &mut HttpMessage, name: ImmutableString| {
-        m.has_header(&name)
+    engine.register_get("body_complete", |m: &mut HttpMessage| m.get_body_complete());
+    engine.register_fn("header", |m: &mut HttpMessage, name: ImmutableString| {
+        m.header(&name)
     });
+    engine.register_fn(
+        "has_header",
+        |m: &mut HttpMessage, name: ImmutableString| m.has_header(&name),
+    );
     engine.register_fn(
         "set_header",
         |m: &mut HttpMessage, name: ImmutableString, value: ImmutableString| {
@@ -416,10 +535,15 @@ fn build_engine() -> Engine {
             m.add_header(&name, &value);
         },
     );
-    engine.register_fn("remove_header", |m: &mut HttpMessage, name: ImmutableString| {
-        m.remove_header(&name);
+    engine.register_fn(
+        "remove_header",
+        |m: &mut HttpMessage, name: ImmutableString| {
+            m.remove_header(&name);
+        },
+    );
+    engine.register_fn("set_status", |m: &mut HttpMessage, code: i64| {
+        m.set_status(code);
     });
-    engine.register_fn("set_status", |m: &mut HttpMessage, code: i64| m.set_status(code));
     engine
 }
 
@@ -491,6 +615,71 @@ mod tests {
     }
 
     #[test]
+    fn credentialed_cors_example_echoes_preflight_values_and_returns_204() {
+        let engine = engine_with(
+            r#"
+            fn on_response(req, res) {
+                let origin = req.header("Origin");
+                if origin != "" {
+                    res.set_header("Access-Control-Allow-Origin", origin);
+                    res.set_header("Access-Control-Allow-Credentials", "true");
+                    res.add_header("Vary", "Origin");
+                    let requested_method = req.header("Access-Control-Request-Method");
+                    if requested_method != "" {
+                        res.add_header("Vary", "Access-Control-Request-Method");
+                        res.set_header("Access-Control-Allow-Methods", requested_method);
+                        let requested_headers = req.header("Access-Control-Request-Headers");
+                        if requested_headers != "" {
+                            res.add_header("Vary", "Access-Control-Request-Headers");
+                            res.set_header("Access-Control-Allow-Headers", requested_headers);
+                        }
+                        if req.method == "OPTIONS" { res.set_status(204); }
+                    }
+                }
+            }
+        "#,
+        );
+        let mut req = request();
+        req.method = "OPTIONS".into();
+        req.headers = vec![
+            ("Origin".into(), "https://app.example".into()),
+            ("Access-Control-Request-Method".into(), "PATCH".into()),
+            (
+                "Access-Control-Request-Headers".into(),
+                "x-token, content-type".into(),
+            ),
+        ];
+        let effects = engine.run_response(Some(&req), &response());
+        assert_eq!(effects.status, Some(204));
+        assert!(effects.header_ops.contains(&HeaderOp::Set(
+            "Access-Control-Allow-Origin".into(),
+            "https://app.example".into(),
+        )));
+        assert!(effects.header_ops.contains(&HeaderOp::Set(
+            "Access-Control-Allow-Methods".into(),
+            "PATCH".into(),
+        )));
+        assert!(effects.header_ops.contains(&HeaderOp::Set(
+            "Access-Control-Allow-Headers".into(),
+            "x-token, content-type".into(),
+        )));
+        for value in [
+            "Origin",
+            "Access-Control-Request-Method",
+            "Access-Control-Request-Headers",
+        ] {
+            assert!(effects
+                .header_ops
+                .contains(&HeaderOp::Add("Vary".into(), value.into())));
+        }
+        assert!(effects.header_ops.iter().all(|op| !matches!(
+            op,
+            HeaderOp::Set(name, value)
+                if name.starts_with("Access-Control-Allow-") && value == "*"
+        )));
+    }
+
+    #[test]
     fn set_header_replaces_and_remove_drops() {
         let engine = engine_with(
             r#"
@@ -531,11 +720,40 @@ mod tests {
     }
 
     #[test]
+    fn invalid_header_operations_are_noops_for_later_script_reads() {
+        let engine = engine_with(
+            r#"
+            fn on_response(req, res) {
+                res.set_header("content-type", "bad\nvalue");
+                res.add_header("bad header", "value");
+                res.remove_header("bad header");
+                if res.header("content-type") == "application/json" {
+                    res.set_header("x-consistent", "yes");
+                }
+            }
+        "#,
+        );
+
+        assert_eq!(
+            engine
+                .run_response(Some(&request()), &response())
+                .header_ops,
+            vec![HeaderOp::Set("x-consistent".into(), "yes".into())]
+        );
+    }
+
+    #[test]
     fn set_status_is_reported_and_clamped() {
         let engine = engine_with("fn on_response(req, res) { res.set_status(503); }");
-        assert_eq!(engine.run_response(Some(&request()), &response()).status, Some(503));
+        assert_eq!(
+            engine.run_response(Some(&request()), &response()).status,
+            Some(503)
+        );
         let clamped = engine_with("fn on_response(req, res) { res.set_status(9000); }");
-        assert_eq!(clamped.run_response(Some(&request()), &response()).status, Some(599));
+        assert_eq!(
+            clamped.run_response(Some(&request()), &response()).status,
+            Some(599)
+        );
     }
 
     #[test]
@@ -543,7 +761,10 @@ mod tests {
         let engine = engine_with(r#"fn on_request(req) { req.set_header("x-germi", "1"); }"#);
         assert!(engine.wants_request());
         let effects = engine.run_request(&request());
-        assert_eq!(effects.header_ops, vec![HeaderOp::Set("x-germi".into(), "1".into())]);
+        assert_eq!(
+            effects.header_ops,
+            vec![HeaderOp::Set("x-germi".into(), "1".into())]
+        );
     }
 
     #[test]
@@ -558,7 +779,10 @@ mod tests {
         "#,
         );
         let effects = engine.run_response(Some(&request()), &response());
-        assert_eq!(effects.header_ops, vec![HeaderOp::Set("x-matched".into(), "page=2".into())]);
+        assert_eq!(
+            effects.header_ops,
+            vec![HeaderOp::Set("x-matched".into(), "page=2".into())]
+        );
     }
 
     #[test]
@@ -616,7 +840,10 @@ mod tests {
             source: CORS.into(),
         }]);
         assert!(!engine.wants_response());
-        assert_eq!(engine.run_response(Some(&request()), &response()), Effects::default());
+        assert_eq!(
+            engine.run_response(Some(&request()), &response()),
+            Effects::default()
+        );
     }
 
     #[test]
@@ -624,7 +851,10 @@ mod tests {
         let engine = engine_with("fn helper() { 1 + 1 }");
         assert!(!engine.wants_request());
         assert!(!engine.wants_response());
-        assert_eq!(engine.run_response(Some(&request()), &response()), Effects::default());
+        assert_eq!(
+            engine.run_response(Some(&request()), &response()),
+            Effects::default()
+        );
     }
 
     #[test]
@@ -637,9 +867,18 @@ mod tests {
             source: "fn on_response(req, res) { this is not valid".into(),
         }]);
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].error.is_some(), "the syntax error is surfaced");
-        assert!(!engine.wants_response(), "an uncompilable script never runs");
-        assert_eq!(engine.run_response(Some(&request()), &response()), Effects::default());
+        assert!(
+            diagnostics[0].error.is_some(),
+            "the syntax error is surfaced"
+        );
+        assert!(
+            !engine.wants_response(),
+            "an uncompilable script never runs"
+        );
+        assert_eq!(
+            engine.run_response(Some(&request()), &response()),
+            Effects::default()
+        );
     }
 
     #[test]
@@ -661,7 +900,144 @@ mod tests {
             },
         ]);
         let effects = engine.run_response(Some(&request()), &response());
-        assert_eq!(effects.header_ops, vec![HeaderOp::Set("x-ok".into(), "1".into())]);
+        assert_eq!(
+            effects.header_ops,
+            vec![HeaderOp::Set("x-ok".into(), "1".into())]
+        );
+    }
+
+    #[test]
+    fn a_runtime_error_rolls_back_mutations_before_the_failure() {
+        let mut engine = ScriptEngine::new();
+        engine.set_scripts(vec![
+            Script {
+                id: "bad".into(),
+                name: "bad".into(),
+                enabled: true,
+                source: r#"fn on_response(req, res) { res.set_header("x-leaked", "1"); res.set_status(503); nope(); }"#.into(),
+            },
+            Script {
+                id: "observer".into(),
+                name: "observer".into(),
+                enabled: true,
+                source: r#"fn on_response(req, res) { if !res.has_header("x-leaked") && res.status == 200 { res.set_header("x-clean", "1"); } }"#.into(),
+            },
+        ]);
+        let effects = engine.run_response(Some(&request()), &response());
+        assert_eq!(effects.status, None);
+        assert_eq!(
+            effects.header_ops,
+            vec![HeaderOp::Set("x-clean".into(), "1".into())]
+        );
+    }
+
+    #[test]
+    fn a_failed_request_script_rolls_back_before_later_scripts() {
+        let mut engine = ScriptEngine::new();
+        engine.set_scripts(vec![
+            Script {
+                id: "bad".into(),
+                name: "bad".into(),
+                enabled: true,
+                source: r#"fn on_request(req) { req.set_header("x-leaked", "1"); nope(); }"#.into(),
+            },
+            Script {
+                id: "ok".into(),
+                name: "ok".into(),
+                enabled: true,
+                source: r#"fn on_request(req) { if !req.has_header("x-leaked") { req.set_header("x-clean", "1"); } }"#.into(),
+            },
+        ]);
+        assert_eq!(
+            engine.run_request(&request()).header_ops,
+            vec![HeaderOp::Set("x-clean".into(), "1".into())]
+        );
+    }
+
+    #[test]
+    fn incomplete_request_body_cannot_be_mistaken_for_complete_content() {
+        let mut engine = ScriptEngine::new();
+        engine.set_scripts(vec![
+            Script {
+                id: "reader".into(),
+                name: "reader".into(),
+                enabled: true,
+                source: r#"fn on_request(req) { req.set_header("x-leaked", "1"); let body = req.body; }"#
+                    .into(),
+            },
+            Script {
+                id: "metadata".into(),
+                name: "metadata".into(),
+                enabled: true,
+                source: r#"fn on_request(req) { if !req.body_complete && !req.has_header("x-leaked") { req.set_header("x-incomplete", "1"); } }"#
+                    .into(),
+            },
+        ]);
+
+        assert_eq!(
+            engine
+                .run_request_with_body_state(&request(), false)
+                .header_ops,
+            vec![HeaderOp::Set("x-incomplete".into(), "1".into())],
+            "reading a partial body aborts and rolls back that script, while metadata-only scripts still run"
+        );
+    }
+
+    #[test]
+    fn incomplete_response_body_cannot_drive_header_or_status_changes() {
+        let mut engine = ScriptEngine::new();
+        engine.set_scripts(vec![
+            Script {
+                id: "reader".into(),
+                name: "reader".into(),
+                enabled: true,
+                source: r#"fn on_response(req, res) { res.set_header("x-leaked", "1"); res.set_status(503); let body = res.body; }"#
+                    .into(),
+            },
+            Script {
+                id: "metadata".into(),
+                name: "metadata".into(),
+                enabled: true,
+                source: r#"fn on_response(req, res) { if !res.body_complete && !res.has_header("x-leaked") && res.status == 200 { res.set_header("x-incomplete", "1"); } }"#
+                    .into(),
+            },
+        ]);
+
+        let effects =
+            engine.run_response_with_body_state(Some(&request()), &response(), true, false);
+        assert_eq!(effects.status, None);
+        assert_eq!(
+            effects.header_ops,
+            vec![HeaderOp::Set("x-incomplete".into(), "1".into())]
+        );
+    }
+
+    #[test]
+    fn binary_body_reads_fail_without_leaking_partial_script_mutations() {
+        let mut engine = ScriptEngine::new();
+        engine.set_scripts(vec![
+            Script {
+                id: "reader".into(),
+                name: "reader".into(),
+                enabled: true,
+                source: r#"fn on_response(req, res) { res.set_header("x-leaked", "1"); let body = res.body; }"#
+                    .into(),
+            },
+            Script {
+                id: "metadata".into(),
+                name: "metadata".into(),
+                enabled: true,
+                source: r#"fn on_response(req, res) { if res.body_complete && !res.has_header("x-leaked") { res.set_header("x-binary", "1"); } }"#
+                    .into(),
+            },
+        ]);
+        let mut res = response();
+        res.body = vec![0xff, 0xfe, 0xfd].into();
+
+        assert_eq!(
+            engine.run_response(Some(&request()), &res).header_ops,
+            vec![HeaderOp::Set("x-binary".into(), "1".into())]
+        );
     }
 
     #[test]
@@ -669,18 +1045,25 @@ mod tests {
         // If the operation cap were not enforced this test would never return.
         let engine = engine_with("fn on_response(req, res) { let i = 0; while true { i += 1; } }");
         let effects = engine.run_response(Some(&request()), &response());
-        assert_eq!(effects, Effects::default(), "the aborted script leaves no changes");
+        assert_eq!(
+            effects,
+            Effects::default(),
+            "the aborted script leaves no changes"
+        );
     }
 
     #[test]
     fn a_string_doubling_bomb_is_bounded_not_oom() {
         // Doubling blows the string-size cap within ~23 iterations; without it
         // the op cap would permit multi-gigabyte allocations first.
-        let engine = engine_with(
-            r#"fn on_request(req) { let s = "0123456789abcdef"; loop { s += s; } }"#,
-        );
+        let engine =
+            engine_with(r#"fn on_request(req) { let s = "0123456789abcdef"; loop { s += s; } }"#);
         let effects = engine.run_request(&request());
-        assert_eq!(effects, Effects::default(), "the aborted script leaves no changes");
+        assert_eq!(
+            effects,
+            Effects::default(),
+            "the aborted script leaves no changes"
+        );
     }
 
     #[test]
@@ -736,7 +1119,10 @@ mod tests {
             source: "fn on_response(req, res) {}".into(),
         };
         let json = serde_json::to_string(&script).expect("serialize");
-        assert_eq!(serde_json::from_str::<Script>(&json).expect("round trip"), script);
+        assert_eq!(
+            serde_json::from_str::<Script>(&json).expect("round trip"),
+            script
+        );
         // Every field is #[serde(default)], so an older/blank object still loads.
         let blank: Script = serde_json::from_str("{}").expect("legacy load");
         assert_eq!(blank, Script::default_for_test());
@@ -744,7 +1130,12 @@ mod tests {
 
     impl Script {
         fn default_for_test() -> Self {
-            Self { id: String::new(), name: String::new(), enabled: false, source: String::new() }
+            Self {
+                id: String::new(),
+                name: String::new(),
+                enabled: false,
+                source: String::new(),
+            }
         }
     }
 }

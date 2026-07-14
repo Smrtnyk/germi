@@ -1,4 +1,5 @@
 import { headersToText } from "./curl";
+import { flowDetailUrl } from "./flowUrl";
 import type { FlowDetail } from "./types";
 
 const REASONS: Record<number, string> = {
@@ -62,7 +63,7 @@ export function reasonPhrase(status: number): string {
 
 /** Fiddler-style request line: `METHOD absolute-uri HTTP/x.y`. */
 export function requestLine(detail: FlowDetail): string {
-  const target = `${detail.scheme}://${detail.host}${detail.path}`;
+  const target = flowDetailUrl(detail);
   return `${detail.method} ${target} ${detail.reqVersion}`;
 }
 
@@ -85,5 +86,5 @@ export function rawMessage(
   bodyText: string,
 ): string {
   const head = headers.length ? `${startLine}\n${headersToText(headers)}` : startLine;
-  return bodyText ? `${head}\n\n${bodyText}` : `${head}\n`;
+  return bodyText ? `${head}\n\n${bodyText}` : `${head}\n\n`;
 }

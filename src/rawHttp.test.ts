@@ -18,7 +18,15 @@ describe("reasonPhrase", () => {
 describe("requestLine", () => {
   it("builds an absolute-URI request line from scheme/host/path", () => {
     expect(
-      requestLine(detail({ method: "POST", scheme: "https", host: "api.test", path: "/v1/x?a=1" })),
+      requestLine(
+        detail({
+          method: "POST",
+          uri: "/v1/x?a=1",
+          scheme: "https",
+          host: "api.test",
+          path: "/v1/x?a=1",
+        }),
+      ),
     ).toBe("POST https://api.test/v1/x?a=1 HTTP/1.1");
   });
 
@@ -26,6 +34,19 @@ describe("requestLine", () => {
     expect(requestLine(detail({ method: "get", reqVersion: "HTTP/2.0" }))).toBe(
       "get https://example.com/ HTTP/2.0",
     );
+  });
+
+  it("uses an absolute captured URI when it contains a non-default port", () => {
+    expect(
+      requestLine(
+        detail({
+          uri: "http://localhost:4317/v1/traces",
+          scheme: "http",
+          host: "localhost",
+          path: "/v1/traces",
+        }),
+      ),
+    ).toBe("GET http://localhost:4317/v1/traces HTTP/1.1");
   });
 });
 
@@ -60,7 +81,7 @@ describe("rawMessage", () => {
         ],
         "",
       ),
-    ).toBe("GET https://example.com/ HTTP/1.1\nHost: example.com\nAccept: */*\n");
+    ).toBe("GET https://example.com/ HTTP/1.1\nHost: example.com\nAccept: */*\n\n");
   });
 
   it("separates the header block from the body with one blank line", () => {
@@ -70,7 +91,7 @@ describe("rawMessage", () => {
   });
 
   it("handles a message with no headers", () => {
-    expect(rawMessage("HTTP/1.1 204 No Content", [], "")).toBe("HTTP/1.1 204 No Content\n");
+    expect(rawMessage("HTTP/1.1 204 No Content", [], "")).toBe("HTTP/1.1 204 No Content\n\n");
     expect(rawMessage("HTTP/1.1 200 OK", [], "body")).toBe("HTTP/1.1 200 OK\n\nbody");
   });
 });

@@ -8,11 +8,17 @@ import { Button } from "./ui/Button";
 // Keep CodeMirror out of the startup bundle (same boundary as the mock editor).
 const BodyEditor = lazy(() => import("./BodyEditor").then((m) => ({ default: m.BodyEditor })));
 
-export interface ScriptsPanelProps {
+export interface ScriptsPanelModel {
   scripts: Script[];
   selectedId: string | null;
   /** Script id -> compile error message, for scripts that don't compile. */
   errors: Map<string, string>;
+  /** Persistence failure for the current snapshot. */
+  saveError?: string | null;
+  poppedOut?: boolean;
+}
+
+export interface ScriptsPanelActions {
   onSelect: (id: string) => void;
   onAdd: () => void;
   onInsertExample: (example: ScriptExample) => void;
@@ -22,28 +28,30 @@ export interface ScriptsPanelProps {
   onSourceChange: (id: string, source: string) => void;
   /** Optional "open in a window" action (present in the docked panel only). */
   onPopOut?: () => void;
-  poppedOut?: boolean;
   onFocusWindow?: () => void;
+}
+
+export interface ScriptsPanelProps {
+  model: ScriptsPanelModel;
+  actions: ScriptsPanelActions;
 }
 
 /** Presentational (IPC-free) editor for user request/response scripts: a list of
  *  scripts with enable toggles, a code editor for the selected one, and a built-in
  *  guide (how it works + API reference + insertable examples). */
-export function ScriptsPanel({
-  scripts,
-  selectedId,
-  errors,
-  onSelect,
-  onAdd,
-  onInsertExample,
-  onDelete,
-  onToggle,
-  onRename,
-  onSourceChange,
-  onPopOut,
-  poppedOut,
-  onFocusWindow,
-}: ScriptsPanelProps) {
+export function ScriptsPanel({ model, actions }: ScriptsPanelProps) {
+  const { scripts, selectedId, errors, saveError, poppedOut } = model;
+  const {
+    onSelect,
+    onAdd,
+    onInsertExample,
+    onDelete,
+    onToggle,
+    onRename,
+    onSourceChange,
+    onPopOut,
+    onFocusWindow,
+  } = actions;
   const [showGuide, setShowGuide] = useState(false);
   const selected = scripts.find((script) => script.id === selectedId) ?? null;
   // The guide doubles as the empty state, so it also shows when nothing's picked.
@@ -68,6 +76,12 @@ export function ScriptsPanel({
         }}
         onPopOut={onPopOut}
       />
+
+      {saveError && (
+        <div className="warn-text small" role="alert">
+          <IconWarn /> Scripts were not saved: {saveError}
+        </div>
+      )}
 
       <ScriptsList
         scripts={scripts}
@@ -288,10 +302,14 @@ function ScriptsGuide({ onInsert }: { onInsert: (example: ScriptExample) => void
       <ul className="scripts-api">
         <li>
           <code>.method</code> <code>.url</code> <code>.host</code> <code>.path</code>{" "}
-          <code>.query</code> <code>.status</code> <code>.body</code>
+          <code>.query</code> <code>.status</code> <code>.body_complete</code> <code>.body</code>
         </li>
         <li>
           <code>.header(name)</code> — value or <code>""</code>; <code>.has_header(name)</code>
+        </li>
+        <li>
+          Check <code>.body_complete</code> before reading <code>.body</code>; oversized,
+          incomplete, or non-UTF-8 bodies deliberately reject body reads.
         </li>
       </ul>
 

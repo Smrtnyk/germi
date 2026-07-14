@@ -26,7 +26,11 @@ fn status_icon(app: &AppHandle, on: bool) -> (Vec<u8>, u32, u32) {
         Some(img) => (img.rgba().to_vec(), img.width(), img.height()),
         None => (vec![0u8; 32 * 32 * 4], 32, 32),
     };
-    let dot = if on { [45u8, 212, 191] } else { [239u8, 68, 68] };
+    let dot = if on {
+        [45u8, 212, 191]
+    } else {
+        [239u8, 68, 68]
+    };
     let center_x = f64::from(width) * 0.72;
     let center_y = f64::from(height) * 0.72;
     let radius = f64::from(width.min(height)) * 0.28;
@@ -39,7 +43,11 @@ fn status_icon(app: &AppHandle, on: bool) -> (Vec<u8>, u32, u32) {
             if dist > radius {
                 continue;
             }
-            let color = if dist > radius - ring { [255, 255, 255] } else { dot };
+            let color = if dist > radius - ring {
+                [255, 255, 255]
+            } else {
+                dot
+            };
             let idx = ((row * width + col) * 4) as usize;
             rgba[idx] = color[0];
             rgba[idx + 1] = color[1];

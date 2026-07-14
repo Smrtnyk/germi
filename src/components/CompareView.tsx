@@ -15,12 +15,13 @@ import { nextSort } from "../sort";
 import { toggledSet } from "../selection";
 import { handleCompareKeys, type CompareKeyActions } from "../compareKeys";
 import {
+  appendPaneFlows,
   copyPaneFilter,
   linkSourceSide,
   movePaneFlows,
   paneData,
+  retainVisibleSelection,
   selectAll,
-  selectOnly,
   selectRow,
   stepSelection,
   visiblePaneFlows,
@@ -122,12 +123,21 @@ function useComparePanes(initialLeft: FlowSummary[], initialRight: FlowSummary[]
 
   /** Write a side's query; while linked, mirror the filter half across. */
   function applyQuery(side: Side, query: PaneQuery) {
-    setters[side]((cur) => ({ ...cur, query }));
+    const matches = side === "left" ? leftMatches : rightMatches;
+    setters[side]((cur) => {
+      const visibleIds = visiblePaneFlows(cur.flows, query, matches).map((flow) => flow.id);
+      return { ...cur, query, sel: retainVisibleSelection(cur.sel, visibleIds) };
+    });
     if (linked) copyFilterTo(otherSide(side), query);
   }
 
   function copyFilterTo(side: Side, source: PaneQuery) {
-    setters[side]((cur) => ({ ...cur, query: copyPaneFilter(source, cur.query) }));
+    const matches = side === "left" ? leftMatches : rightMatches;
+    setters[side]((cur) => {
+      const query = copyPaneFilter(source, cur.query);
+      const visibleIds = visiblePaneFlows(cur.flows, query, matches).map((flow) => flow.id);
+      return { ...cur, query, sel: retainVisibleSelection(cur.sel, visibleIds) };
+    });
   }
 
   function copyFilter(from: Side) {
@@ -176,6 +186,7 @@ function useComparePanes(initialLeft: FlowSummary[], initialRight: FlowSummary[]
       target.data,
       source.visible.map((f) => f.id),
       ids,
+      target.matches,
     );
     if (!moved) return;
     if (to === "right") {
@@ -204,11 +215,7 @@ function useComparePanes(initialLeft: FlowSummary[], initialRight: FlowSummary[]
   }
 
   function appendRight(added: FlowSummary[]) {
-    setRight((cur) => ({
-      ...cur,
-      flows: [...cur.flows, ...added],
-      sel: cur.sel.focusedId === null ? selectOnly(added[0].id) : cur.sel,
-    }));
+    setRight((cur) => appendPaneFlows(cur, added, rightMatches));
   }
 
   return {

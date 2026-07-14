@@ -1,4 +1,4 @@
-import type { FlowSummary } from "./types";
+import type { FlowDetail, FlowSummary } from "./types";
 
 /**
  * Reconstruct a flow's absolute URL from its summary parts. `path` already
@@ -8,4 +8,13 @@ import type { FlowSummary } from "./types";
  */
 export function flowUrl(f: Pick<FlowSummary, "scheme" | "host" | "path">): string {
   return `${f.scheme}://${f.host}${f.path}`;
+}
+
+/** Prefer the captured absolute request target when available. Older/imported
+ * details may carry only an origin-form URI, so retain the parts fallback. */
+export function flowDetailUrl(
+  detail: Pick<FlowDetail, "uri" | "scheme" | "host" | "path">,
+): string {
+  const uri = detail.uri.trim();
+  return /^https?:\/\//i.test(uri) ? uri : flowUrl(detail);
 }

@@ -85,8 +85,7 @@ impl FlowStore {
             })
             .or_else(|| {
                 self.order.iter().find(|id| {
-                    id.as_str() != protect
-                        && self.flows.get(*id).is_some_and(|f| !f.imported)
+                    id.as_str() != protect && self.flows.get(*id).is_some_and(|f| !f.imported)
                 })
             })
             .cloned();
@@ -149,8 +148,11 @@ impl FlowStore {
             .filter_map(|id| self.flows.get(id))
             .map(|f| {
                 let mut s = f.summary();
-                s.extra =
-                    crate::flow::extract_header_columns(&f.request, f.response.as_ref(), header_cols);
+                s.extra = crate::flow::extract_header_columns(
+                    &f.request,
+                    f.response.as_ref(),
+                    header_cols,
+                );
                 s
             })
             .collect()
@@ -294,11 +296,14 @@ mod tests {
         store.insert(flow("a")); // in-flight (oldest)
         store.insert(flow("b"));
         store.set_response("b", response(), 1, None, None); // completed
-        // Inserting a third flow at cap 2 must evict the completed "b", not the
-        // still-pending oldest "a" whose response hasn't arrived yet.
+                                                            // Inserting a third flow at cap 2 must evict the completed "b", not the
+                                                            // still-pending oldest "a" whose response hasn't arrived yet.
         store.insert(flow("c"));
         assert!(store.get("a").is_some(), "in-flight flow must be retained");
-        assert!(store.get("b").is_none(), "the completed flow is evicted instead");
+        assert!(
+            store.get("b").is_none(),
+            "the completed flow is evicted instead"
+        );
         assert!(store.get("c").is_some());
         assert_eq!(store.len(), 2);
     }
@@ -350,7 +355,10 @@ mod tests {
         }
         let captured = store.remove_capturing(&["b".to_string(), "d".to_string()]);
         assert_eq!(
-            captured.iter().map(|(i, f)| (*i, f.id.clone())).collect::<Vec<_>>(),
+            captured
+                .iter()
+                .map(|(i, f)| (*i, f.id.clone()))
+                .collect::<Vec<_>>(),
             vec![(1, "b".to_string()), (3, "d".to_string())],
             "removed flows carry their original capture positions, ascending"
         );
@@ -405,7 +413,10 @@ mod tests {
     #[test]
     fn insert_returns_the_ids_it_evicted() {
         let mut store = FlowStore::new(2);
-        assert!(store.insert(completed("a")).is_empty(), "under cap: nothing evicted");
+        assert!(
+            store.insert(completed("a")).is_empty(),
+            "under cap: nothing evicted"
+        );
         assert!(store.insert(completed("b")).is_empty());
         // At cap 2, inserting "c" evicts the oldest completed flow and reports it.
         assert_eq!(store.insert(completed("c")), vec!["a".to_string()]);
@@ -420,7 +431,10 @@ mod tests {
         // At cap, further captures evict the captured flows, never the imported one.
         assert_eq!(store.insert(completed("b")), vec!["a".to_string()]);
         assert_eq!(store.insert(completed("c")), vec!["b".to_string()]);
-        assert!(store.get("imp").is_some(), "imported flow is protected from cap eviction");
+        assert!(
+            store.get("imp").is_some(),
+            "imported flow is protected from cap eviction"
+        );
         assert_eq!(store.ids(), vec!["imp".to_string(), "c".to_string()]);
     }
 
@@ -430,9 +444,16 @@ mod tests {
         // store keeps them all and the eviction loop must still terminate (no spin).
         let mut store = FlowStore::new(1);
         for id in ["a", "b", "c"] {
-            assert!(store.insert(imported(id)).is_empty(), "imported inserts evict nothing");
+            assert!(
+                store.insert(imported(id)).is_empty(),
+                "imported inserts evict nothing"
+            );
         }
-        assert_eq!(store.len(), 3, "all imported flows are retained despite cap 1");
+        assert_eq!(
+            store.len(),
+            3,
+            "all imported flows are retained despite cap 1"
+        );
     }
 
     #[test]
@@ -446,14 +467,25 @@ mod tests {
         store.insert(imported("i2"));
 
         let evicted = store.insert(flow("live")); // pending, non-imported
-        assert!(evicted.is_empty(), "the just-inserted flow must never evict itself");
+        assert!(
+            evicted.is_empty(),
+            "the just-inserted flow must never evict itself"
+        );
         assert!(store.get("live").is_some(), "the new live flow is retained");
-        assert_eq!(store.len(), 3, "over cap by the un-evictable imports plus the new flow");
+        assert_eq!(
+            store.len(),
+            3,
+            "over cap by the un-evictable imports plus the new flow"
+        );
 
         // Eviction still works: the NOW-older live flow is evictable on the next
         // insert (only the freshly-inserted one is ever protected).
         let evicted2 = store.insert(flow("live2"));
-        assert_eq!(evicted2, vec!["live".to_string()], "the previous live flow is evicted");
+        assert_eq!(
+            evicted2,
+            vec!["live".to_string()],
+            "the previous live flow is evicted"
+        );
         assert!(store.get("live2").is_some());
     }
 
@@ -467,7 +499,10 @@ mod tests {
         // Shrinking the cap evicts only captured flows (oldest first) and reports the
         // ids so the caller can emit a matching `Removed`.
         assert_eq!(store.set_max(2), vec!["a".to_string(), "b".to_string()]);
-        assert!(store.get("imp").is_some(), "imported reference survives a cap shrink");
+        assert!(
+            store.get("imp").is_some(),
+            "imported reference survives a cap shrink"
+        );
         assert_eq!(store.ids(), vec!["imp".to_string(), "c".to_string()]);
     }
 }

@@ -18,10 +18,15 @@ import { openOrFocusWindow } from "./windows";
  *    it from its "open" set and unlocks the inline editor for that rule.
  *  - `RULE_WINDOW_RESIZED` — a detail window was resized; the main window persists
  *    its size so subsequent windows open at that remembered size.
+ *  - `RULE_WINDOWS_FLUSH_REQUESTED` / `RULE_WINDOW_FLUSH_FINISHED` — the main
+ *    window's shutdown barrier; every detached editor acknowledges only after
+ *    its latest rule snapshot reaches durable storage.
  */
 const RULES_CHANGED = "germi://rules-changed";
 const RULE_WINDOW_CLOSED = "germi://rule-window-closed";
 const RULE_WINDOW_RESIZED = "germi://rule-window-resized";
+const RULE_WINDOWS_FLUSH_REQUESTED = "germi://rule-windows-flush-requested";
+const RULE_WINDOW_FLUSH_FINISHED = "germi://rule-window-flush-finished";
 
 const SIZE_KEY = "germi.ruleWindowSize";
 const DEFAULT_SIZE = { width: 560, height: 720 };
@@ -77,6 +82,20 @@ export interface RuleWindowClosedPayload {
   ruleId: string;
 }
 
+interface RuleWindowsFlushRequestPayload {
+  requestId: string;
+  /** Process shutdown closes the detached writer immediately after its save,
+   * eliminating the post-acknowledgement edit gap. Other barriers only flush. */
+  closeAfterFlush?: boolean;
+}
+
+interface RuleWindowFlushResultPayload {
+  requestId: string;
+  ruleId: string;
+  ok: boolean;
+  error?: string;
+}
+
 const LABEL_PREFIX = "rule-";
 
 /** Tauri window labels allow [a-zA-Z0-9-/:_]; UUID rule ids already qualify. */
@@ -88,7 +107,7 @@ function isRuleWindowLabel(label: string): boolean {
   return label.startsWith(LABEL_PREFIX);
 }
 
-export function currentWindowLabel(): string {
+export function currentRuleWindowLabel(): string {
   return getCurrentWindow().label;
 }
 
@@ -125,10 +144,6 @@ export function emitRulesChanged(source: string, ruleId: string | null = null): 
   void emit(RULES_CHANGED, { source, ruleId } satisfies RulesChangedPayload);
 }
 
-export function emitRuleWindowClosed(ruleId: string): void {
-  void emit(RULE_WINDOW_CLOSED, { ruleId } satisfies RuleWindowClosedPayload);
-}
-
 /** A detail window broadcasts its new size; the main window persists it (this
  *  avoids relying on cross-window localStorage sharing). */
 export function emitRuleWindowResized(size: RuleWindowSize): void {
@@ -147,4 +162,113 @@ export function onRuleWindowClosed(
   handler: (p: RuleWindowClosedPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<RuleWindowClosedPayload>(RULE_WINDOW_CLOSED, (e) => handler(e.payload));
+}
+
+/** Register one detached editor in the main-window shutdown handshake. */
+export function onRuleWindowsFlushRequested(
+  ruleId: string,
+  handler: (closeAfterFlush: boolean) => Promise<void>,
+): Promise<UnlistenFn> {
+  return listen<RuleWindowsFlushRequestPayload>(RULE_WINDOWS_FLUSH_REQUESTED, (event) => {
+    void Promise.resolve()
+      .then(() => handler(event.payload.closeAfterFlush === true))
+      .then(
+        () =>
+          emit(RULE_WINDOW_FLUSH_FINISHED, {
+            requestId: event.payload.requestId,
+            ruleId,
+            ok: true,
+          } satisfies RuleWindowFlushResultPayload),
+        (error: unknown) =>
+          emit(RULE_WINDOW_FLUSH_FINISHED, {
+            requestId: event.payload.requestId,
+            ruleId,
+            ok: false,
+            error: String(error),
+          } satisfies RuleWindowFlushResultPayload),
+      )
+      .catch(() => {});
+  });
+}
+
+function flushRequestId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+}
+
+/** Wait for every currently-open detached rule editor to persist before the
+ * main window destroys the process. A closing window counts as success because
+ * its own close path already requires a successful flush before destruction. */
+export async function flushDetachedRuleWindows(
+  timeoutMs = 5_000,
+  closeAfterFlush = false,
+): Promise<void> {
+  const pending = new Set(await listOpenRuleIds());
+  if (pending.size === 0) return;
+
+  const requestId = flushRequestId();
+  let settle!: (error?: Error) => void;
+  const result = new Promise<Error | undefined>((resolve) => {
+    settle = resolve;
+  });
+  let firstError: Error | undefined;
+  let settled = false;
+  let ready = false;
+  const finishRule = (ruleId: string, error?: Error) => {
+    if (!pending.delete(ruleId)) return;
+    firstError ??= error;
+    if (ready && pending.size === 0 && !settled) {
+      settled = true;
+      settle(firstError);
+    }
+  };
+
+  let unlistenResult: UnlistenFn | undefined;
+  let unlistenClosed: UnlistenFn | undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    unlistenResult = await listen<RuleWindowFlushResultPayload>(
+      RULE_WINDOW_FLUSH_FINISHED,
+      (event) => {
+        if (event.payload.requestId !== requestId) return;
+        finishRule(
+          event.payload.ruleId,
+          event.payload.ok
+            ? undefined
+            : new Error(event.payload.error || `Rule ${event.payload.ruleId} could not be saved.`),
+        );
+      },
+    );
+    unlistenClosed = await onRuleWindowClosed(({ ruleId }) => finishRule(ruleId));
+
+    // Drop windows that closed while the listeners were being installed. New
+    // windows cannot normally be opened during shutdown, but include one if it
+    // did appear before the request was emitted.
+    const stillOpen = new Set(await listOpenRuleIds());
+    for (const ruleId of pending) {
+      if (!stillOpen.has(ruleId)) finishRule(ruleId);
+    }
+    for (const ruleId of stillOpen) pending.add(ruleId);
+    ready = true;
+    if (pending.size === 0) return;
+
+    timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      settle(
+        new Error(
+          `Timed out waiting for ${pending.size} detached rule editor${pending.size === 1 ? "" : "s"} to save.`,
+        ),
+      );
+    }, timeoutMs);
+    await emit(RULE_WINDOWS_FLUSH_REQUESTED, {
+      requestId,
+      closeAfterFlush,
+    } satisfies RuleWindowsFlushRequestPayload);
+    const error = await result;
+    if (error) throw error;
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    unlistenResult?.();
+    unlistenClosed?.();
+  }
 }

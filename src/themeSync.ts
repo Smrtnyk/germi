@@ -11,13 +11,16 @@ import { applyHighlightColors } from "./theme";
  * pattern as `compareWindow.ts`'s seed event.
  */
 const SETTINGS_CHANGED = "germi://settings-changed";
+let refreshGeneration = 0;
 
 export function emitSettingsChanged(): void {
   void emit(SETTINGS_CHANGED, null);
 }
 
 async function refreshHighlightColors(): Promise<void> {
-  applyHighlightColors((await api.getSettings()).highlightColors);
+  const generation = ++refreshGeneration;
+  const colors = (await api.getSettings()).highlightColors;
+  if (generation === refreshGeneration) applyHighlightColors(colors);
 }
 
 /** Apply this window's overrides on boot and follow later settings saves.

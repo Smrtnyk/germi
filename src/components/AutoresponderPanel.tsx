@@ -11,11 +11,14 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactElement,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { debounce, isEqual } from "es-toolkit";
+import { isEqual } from "es-toolkit";
 
 import { api } from "../ipc";
+import { EditorFlushRegistry } from "../editorFlushRegistry";
+import { LatestSaveQueue } from "../latestSaveQueue";
 import { GENERAL_SCENARIO_ID } from "../types";
 import {
   popOutOpener,
@@ -97,8 +100,8 @@ interface ScenarioActions {
   activate: (scenarioId: string | null) => void;
   setGeneralActive: (active: boolean) => void;
   create: () => Promise<ScenarioSummary | null>;
-  rename: (scenarioId: string, name: string) => void;
-  delete: (scenarioId: string) => void;
+  rename: (scenarioId: string, name: string) => Promise<void>;
+  delete: (scenarioId: string) => Promise<void>;
   resetState: (scenarioId: string | null) => void;
 }
 
@@ -123,14 +126,20 @@ interface RuleSeedProps {
   onRuleSeedConsumed?: () => void;
 }
 
-export interface AutoresponderPanelProps {
+interface AutoresponderPanelData {
   ar: AutoResponderSummary;
+  ruleHits: Record<string, number>;
+  bulkMockProgress: BulkMockEvent | null;
+}
+
+interface AutoresponderPanelActions {
   scenarioActions: ScenarioActions;
   ruleActions: RuleActions;
   transferActions: TransferActions;
+}
+
+interface AutoresponderEditorConfig {
   seed: RuleSeedProps;
-  ruleHits: Record<string, number>;
-  bulkMockProgress: BulkMockEvent | null;
   /** Bumped on every undo/redo so the open rule re-fetches its reverted value. */
   reloadToken?: number;
   /** Where the rule detail sits relative to the list (Settings → Autoresponder). */
@@ -139,6 +148,14 @@ export interface AutoresponderPanelProps {
   openWindowRuleIds: Set<string>;
   /** Open (or focus) a rule's detached editor window under the viewed scenario. */
   onOpenRuleWindow: (scenarioId: string, ruleId: string) => void;
+}
+
+export interface AutoresponderPanelProps {
+  data: AutoresponderPanelData;
+  actions: AutoresponderPanelActions;
+  editor: AutoresponderEditorConfig;
+  /** Lets the main window wait for the current inline rule edit before exit. */
+  flushRef?: RefObject<() => Promise<void>>;
 }
 
 const ACTION_KINDS: { value: ActionKind; label: string }[] = [
@@ -161,6 +178,7 @@ function defaultAction(kind: ActionKind): Action {
         status: 200,
         headers: [],
         body: '{\n  "mocked": true\n}',
+        bodyBase64: null,
         contentType: "application/json",
         contentEncoding: null,
       };
@@ -429,6 +447,7 @@ export function RuleListItem({
       <input
         type="checkbox"
         checked={rule.enabled}
+        disabled={poppedOut}
         onClick={(e) => e.stopPropagation()}
         onChange={(e) => onToggle(e.target.checked)}
       />
@@ -466,13 +485,30 @@ export function useSelectedRule(
   const [rule, setRule] = useState<Rule | null>(null);
   const [loading, setLoading] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
-  const saveTimer = useRef<number | null>(null);
-  const pendingRule = useRef<Rule | null>(null);
   const loadGeneration = useRef(0);
-  const loadRuleRef = useRef(onLoadRule);
-  const updateRuleRef = useRef(onUpdateRule);
-  loadRuleRef.current = onLoadRule;
-  updateRuleRef.current = onUpdateRule;
+  const callbacksRef = useRef({ onLoadRule, onUpdateRule });
+  callbacksRef.current = { onLoadRule, onUpdateRule };
+  type Save = {
+    scenarioId: string;
+    rule: Rule;
+    tag?: HistoryTag;
+    /** Snapshot immediately before a discrete action (for example Format).
+     * Persisting it first keeps that action as its own undo step. */
+    prelude?: Rule;
+  };
+  const saveRef = useRef<(save: Save) => Promise<void>>(async () => {});
+  saveRef.current = async (save) => {
+    if (save.prelude) {
+      const prelude = await callbacksRef.current.onUpdateRule(save.scenarioId, save.prelude);
+      if (!prelude) throw new Error("Rule changes could not be saved");
+    }
+    const summary = await callbacksRef.current.onUpdateRule(save.scenarioId, save.rule, save.tag);
+    if (!summary) throw new Error("Rule changes could not be saved");
+    setSaveState("saved");
+  };
+  const queueRef = useRef<LatestSaveQueue<Save> | null>(null);
+  queueRef.current ??= new LatestSaveQueue((save) => saveRef.current(save), 300);
+  const queue = queueRef.current;
   const prevDeps = useRef({ scenarioId, selectedRuleId, reloadToken });
 
   useEffect(() => {
@@ -491,31 +527,43 @@ export function useSelectedRule(
       setLoading(false);
       return;
     }
+    // Do not leave the previously selected rule editable while its save drains
+    // and the next rule loads. A patch during that gap would appear under the
+    // new selection while still mutating the old rule snapshot.
+    setRule(null);
     setLoading(true);
     const load = async () => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = null;
-      const pending = pendingRule.current;
-      pendingRule.current = null;
-      if (pending && !externalReload) await updateRuleRef.current(scenarioId, pending);
-      return loadRuleRef.current(selectedRuleId);
-    };
-    void load().then((loaded) => {
-      if (loadGeneration.current === generation) {
-        setRule(loaded);
-        setLoading(false);
-        setSaveState("idle");
+      if (externalReload) {
+        // The remote mutation supersedes a local debounce. A write already in
+        // flight cannot be aborted, so wait for it before reading the final
+        // backend value; cancellation prevents a failure resurrecting it.
+        queue.cancelPending();
+        await queue.flush().catch(() => {});
+      } else {
+        // Never load another rule over an unsaved edit. A failed queue retains
+        // its latest snapshot so a later explicit flush can retry it.
+        await queue.flush();
       }
-    });
-  }, [scenarioId, selectedRuleId, reloadToken]);
+      return callbacksRef.current.onLoadRule(selectedRuleId);
+    };
+    void load()
+      .then((loaded) => {
+        if (loadGeneration.current === generation) {
+          setRule(loaded);
+          setLoading(false);
+          setSaveState("idle");
+        }
+      })
+      .catch(() => {
+        if (loadGeneration.current === generation) setLoading(false);
+      });
+  }, [queue, scenarioId, selectedRuleId, reloadToken]);
 
   useEffect(() => {
     return () => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      const pending = pendingRule.current;
-      if (pending) void updateRuleRef.current(scenarioId, pending);
+      void queue.flush().catch(() => {});
     };
-  }, [scenarioId]);
+  }, [queue]);
 
   function patch(changes: Partial<Rule>, tag?: HistoryTag) {
     if (!rule) return;
@@ -523,50 +571,34 @@ export function useSelectedRule(
     setRule(next);
     setSaveState("saving");
     if (tag) {
-      void commitDiscrete(next, tag);
+      void queue.saveNow({ scenarioId, rule: next, tag, prelude: rule }).catch(() => {});
       return;
     }
-    pendingRule.current = next;
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => {
-      const pending = pendingRule.current;
-      pendingRule.current = null;
-      saveTimer.current = null;
-      if (!pending) return;
-      void updateRuleRef.current(scenarioId, pending).then((summary) => {
-        if (summary) setSaveState("saved");
-      });
-    }, 300);
-  }
-
-  // Seal any pending typing as its own (rule-keyed) step, then record `next`
-  // under its own history key — so e.g. Format is a separate, single undo entry
-  // instead of folding into the surrounding edits.
-  async function commitDiscrete(next: Rule, tag: HistoryTag) {
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = null;
-    const pending = pendingRule.current;
-    pendingRule.current = null;
-    if (pending) await updateRuleRef.current(scenarioId, pending);
-    const summary = await updateRuleRef.current(scenarioId, next, tag);
-    if (summary) setSaveState("saved");
+    queue.schedule({ scenarioId, rule: next });
   }
 
   function clearPending() {
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = null;
-    pendingRule.current = null;
+    queue.cancelPending();
   }
 
-  async function flush() {
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = null;
-    const pending = pendingRule.current;
-    pendingRule.current = null;
-    if (pending) await updateRuleRef.current(scenarioId, pending);
-  }
+  const flush = useCallback(() => queue.flush(), [queue]);
 
-  return { rule, loading, saveState, patch, clearPending, flush };
+  // Selection changes render before the effect above gets a chance to clear
+  // local state. Never expose that one-render-old snapshot under the newly
+  // selected row: an input event in that gap could otherwise edit/save rule A
+  // while the UI claims rule B is selected.
+  const selectedRule = rule?.id === selectedRuleId ? rule : null;
+  const selectedLoading =
+    selectedRuleId !== null && (loading || (rule !== null && selectedRule === null));
+
+  return {
+    rule: selectedRule,
+    loading: selectedLoading,
+    saveState,
+    patch,
+    clearPending,
+    flush,
+  };
 }
 
 /** Rule-list selection (issue #106). `selectedRuleId` is the single "active" row
@@ -766,6 +798,7 @@ function ruleMenuItems(
   canReorder: boolean,
   actions: RuleMenuActions,
   selectedCount: number,
+  mutationLocked: boolean,
 ): MenuItem[] {
   // With several rules selected the single-rule actions (move/duplicate/toggle)
   // don't apply — offer only the bulk delete so the menu can't lie about scope.
@@ -775,6 +808,7 @@ function ruleMenuItems(
         label: `Delete ${selectedCount} rules`,
         onClick: () => actions.onDeleteSelected(),
         danger: true,
+        disabled: mutationLocked,
       },
     ];
   }
@@ -787,13 +821,23 @@ function ruleMenuItems(
     );
   }
   items.push(
-    { label: "Duplicate rule", onClick: () => actions.onDuplicate(rule.id) },
+    {
+      label: "Duplicate rule",
+      onClick: () => actions.onDuplicate(rule.id),
+      disabled: mutationLocked,
+    },
     {
       label: rule.enabled ? "Disable rule" : "Enable rule",
       onClick: () => actions.onToggle(rule.id, !rule.enabled),
+      disabled: mutationLocked,
     },
     { label: "", sep: true, onClick: () => {} },
-    { label: "Delete rule", onClick: () => actions.onDelete(rule.id), danger: true },
+    {
+      label: "Delete rule",
+      onClick: () => actions.onDelete(rule.id),
+      danger: true,
+      disabled: mutationLocked,
+    },
   );
   return items;
 }
@@ -802,6 +846,7 @@ function useRuleMenu(
   canReorder: boolean,
   actions: RuleMenuActions,
   selection: { selectedIds: Set<string>; ensureSelected: (id: string) => void },
+  openWindowRuleIds: Set<string>,
 ): {
   openMenu: (event: ReactMouseEvent, rule: RuleSummary) => void;
   menuElement: ReactElement | null;
@@ -821,11 +866,17 @@ function useRuleMenu(
       ? selection.selectedIds.size
       : 1
     : 0;
+  const selectedForMenu = menu
+    ? selection.selectedIds.has(menu.rule.id)
+      ? selection.selectedIds
+      : new Set([menu.rule.id])
+    : new Set<string>();
+  const mutationLocked = [...selectedForMenu].some((id) => openWindowRuleIds.has(id));
   const menuElement = menu ? (
     <ContextMenu
       x={menu.x}
       y={menu.y}
-      items={ruleMenuItems(menu.rule, canReorder, actions, count)}
+      items={ruleMenuItems(menu.rule, canReorder, actions, count, mutationLocked)}
       onClose={() => setMenu(null)}
     />
   ) : null;
@@ -1016,6 +1067,7 @@ export function VirtualRuleList({
     canReorder,
     { onMoveToTop, onMoveToBottom, onDuplicate, onToggle, onDelete, onDeleteSelected },
     { selectedIds, ensureSelected },
+    openWindowRuleIds,
   );
   const scrollRef = useRef<HTMLDivElement>(null);
   const single = selectedIds.size <= 1;
@@ -1105,6 +1157,7 @@ interface RuleEditorPaneProps {
   onDeleteRule: (id: string) => void;
   onDeleteSelected: () => void;
   onClearSelection: () => void;
+  deleteSelectedDisabled: boolean;
 }
 
 function RuleDetailHead({
@@ -1164,10 +1217,12 @@ export function RuleBulkSelection({
   count,
   onDelete,
   onClear,
+  deleteDisabled = false,
 }: {
   count: number;
   onDelete: () => void;
   onClear: () => void;
+  deleteDisabled?: boolean;
 }) {
   return (
     <div className="rule-detail-body">
@@ -1178,7 +1233,7 @@ export function RuleBulkSelection({
           adjust the selection, Del to delete, or Esc to clear.
         </p>
         <div className="row">
-          <Button danger onClick={onDelete}>
+          <Button danger disabled={deleteDisabled} onClick={onDelete}>
             Delete {count} rules
           </Button>
           <Button onClick={onClear}>Clear selection</Button>
@@ -1199,7 +1254,13 @@ function RuleDetailBody({
   onDeleteRule,
 }: Omit<
   RuleEditorPaneProps,
-  "layout" | "onCollapse" | "poppedOut" | "selectedCount" | "onDeleteSelected" | "onClearSelection"
+  | "layout"
+  | "onCollapse"
+  | "poppedOut"
+  | "selectedCount"
+  | "onDeleteSelected"
+  | "onClearSelection"
+  | "deleteSelectedDisabled"
 > & { locked: boolean }) {
   if (locked && selectedRule) {
     return (
@@ -1249,6 +1310,7 @@ function RuleEditorPane(props: RuleEditorPaneProps) {
           count={selectedCount}
           onDelete={props.onDeleteSelected}
           onClear={props.onClearSelection}
+          deleteDisabled={props.deleteSelectedDisabled}
         />
       ) : (
         <RuleDetailBody
@@ -1281,38 +1343,41 @@ function RuleDetailRail({ layout, onExpand }: { layout: AutoLayout; onExpand: ()
 
 function useScenarioName(
   scenario: ScenarioSummary,
-  onRenameScenario: (scenarioId: string, name: string) => void,
+  onRenameScenario: (scenarioId: string, name: string) => Promise<void>,
 ) {
   const [name, setName] = useState(scenario.name);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const renameRef = useRef(onRenameScenario);
   renameRef.current = onRenameScenario;
 
-  const save = useMemo(
-    () =>
-      debounce((id: string, next: string) => {
-        renameRef.current(id, next);
-        setSaveState("saved");
-      }, 300),
-    [],
-  );
+  const saveRef = useRef<(value: { id: string; name: string }) => Promise<void>>(async () => {});
+  saveRef.current = async ({ id, name: next }) => {
+    await renameRef.current(id, next);
+    setSaveState("saved");
+  };
+  const queueRef = useRef<LatestSaveQueue<{ id: string; name: string }> | null>(null);
+  queueRef.current ??= new LatestSaveQueue((value) => saveRef.current(value), 300);
+  const queue = queueRef.current;
 
   useEffect(() => {
     setName(scenario.name);
     setSaveState("idle");
   }, [scenario.id, scenario.name]);
 
-  useEffect(() => () => save.flush(), [scenario.id, save]);
+  useEffect(
+    () => () => {
+      void queue.flush().catch(() => {});
+    },
+    [queue],
+  );
 
   function change(next: string) {
     setName(next);
     setSaveState("saving");
-    save(scenario.id, next);
+    queue.schedule({ id: scenario.id, name: next });
   }
 
-  function flush() {
-    save.flush();
-  }
+  const flush = useCallback(() => queue.flush(), [queue]);
 
   return { name, change, saveState, flush };
 }
@@ -1425,10 +1490,10 @@ function ruleMutations(
   }
 
   async function toggleRule(id: string, enabled: boolean) {
-    // If the rule is open in a detached window its inline copy here is locked and
-    // stale; toggling via editor.patch would save that stale body and clobber the
-    // window's edits. Apply the toggle to a fresh backend copy in that case.
-    if (editor.rule?.id === id && !openWindowRuleIds.has(id)) {
+    // A detached editor can still have an unsaved snapshot, so even loading a
+    // fresh durable copy and toggling it here would race that pending write.
+    if (openWindowRuleIds.has(id)) return;
+    if (editor.rule?.id === id) {
       editor.patch({ enabled });
       return;
     }
@@ -1437,12 +1502,20 @@ function ruleMutations(
   }
 
   async function duplicateRule(id: string) {
-    if (editor.rule?.id === id) await editor.flush();
+    if (openWindowRuleIds.has(id)) return;
+    if (editor.rule?.id === id) {
+      try {
+        await editor.flush();
+      } catch {
+        return;
+      }
+    }
     const created = await ruleActions.duplicate(active.id, id);
     if (created) selection.selectOne(created.id);
   }
 
   function deleteRule(id: string) {
+    if (openWindowRuleIds.has(id)) return;
     if (selection.selectedRuleId === id) {
       editor.clearPending();
       selection.selectOne(null);
@@ -1453,6 +1526,7 @@ function ruleMutations(
   function deleteSelected() {
     const ids = [...selection.selectedIds];
     if (ids.length === 0) return;
+    if (ids.some((id) => openWindowRuleIds.has(id))) return;
     // Cancel any in-flight debounced save for a rule about to vanish, then clear
     // the selection before the delete so the editor can't flash a dead rule.
     editor.clearPending();
@@ -1727,6 +1801,9 @@ function ScenarioRuleWorkspace({
             onDeleteRule={workspace.deleteRule}
             onDeleteSelected={workspace.deleteSelected}
             onClearSelection={selection.clearSelection}
+            deleteSelectedDisabled={[...selection.selectedIds].some((id) =>
+              openWindowRuleIds.has(id),
+            )}
           />
         </>
       )}
@@ -1734,47 +1811,61 @@ function ScenarioRuleWorkspace({
   );
 }
 
-function ScenarioView({
-  active,
-  isGeneral,
-  generalActive,
-  onRequestDelete,
-  seed,
-  reloadToken,
-  ruleHits,
-  drop,
-  scenarioActions,
-  ruleActions,
-  onExport,
-  layout,
-  collapsed,
-  onToggleCollapse,
-  openWindowRuleIds,
-  onOpenRuleWindow,
-}: {
-  active: ScenarioSummary;
-  isGeneral: boolean;
-  generalActive: boolean;
-  onRequestDelete: () => void;
-  seed: RuleSeedProps;
-  reloadToken?: number;
-  ruleHits: Record<string, number>;
+interface ScenarioViewProps {
+  scenario: {
+    active: ScenarioSummary;
+    isGeneral: boolean;
+    generalActive: boolean;
+  };
   drop: { active: boolean; props: FlowDropZone };
-  scenarioActions: ScenarioActions;
-  ruleActions: RuleActions;
-  onExport: () => void;
-  layout: AutoLayout;
-  collapsed: boolean;
-  onToggleCollapse: () => void;
-  openWindowRuleIds: Set<string>;
-  onOpenRuleWindow: (scenarioId: string, ruleId: string) => void;
-}) {
+  actions: {
+    scenarioActions: ScenarioActions;
+    onRequestDelete: () => void;
+    onExport: () => void;
+  };
+  editor: {
+    seed: RuleSeedProps;
+    reloadToken?: number;
+    ruleHits: Record<string, number>;
+    ruleActions: RuleActions;
+    layout: AutoLayout;
+    collapsed: boolean;
+    onToggleCollapse: () => void;
+    openWindowRuleIds: Set<string>;
+    onOpenRuleWindow: (scenarioId: string, ruleId: string) => void;
+    registerFlush: (flush: () => Promise<void>) => () => void;
+  };
+}
+
+function ScenarioView({ scenario, drop, actions, editor }: ScenarioViewProps) {
+  const { active, isGeneral, generalActive } = scenario;
+  const { scenarioActions, onRequestDelete, onExport } = actions;
+  const {
+    seed,
+    reloadToken,
+    ruleHits,
+    ruleActions,
+    layout,
+    collapsed,
+    onToggleCollapse,
+    openWindowRuleIds,
+    onOpenRuleWindow,
+    registerFlush,
+  } = editor;
   const workspace = useScenarioWorkspace(active, seed, ruleActions, openWindowRuleIds, reloadToken);
   // The General layer is not renamable; `rename` is never called for it.
   const nameEditor = useScenarioName(active, scenarioActions.rename);
+  const flushName = nameEditor.flush;
+  const flushRule = workspace.editor.flush;
+  const flushAll = useCallback(async () => {
+    await flushName();
+    await flushRule();
+  }, [flushName, flushRule]);
+  useEffect(() => registerFlush(flushAll), [flushAll, registerFlush]);
   const exportScenario = () => {
-    nameEditor.flush();
-    void workspace.editor.flush().then(onExport);
+    void flushAll()
+      .then(onExport)
+      .catch(() => {});
   };
   const resetState = () => scenarioActions.resetState(active.id);
 
@@ -1936,23 +2027,23 @@ function ScenarioTabs({
   );
 }
 
-export function AutoresponderPanel({
-  ar,
-  scenarioActions,
-  ruleActions,
-  transferActions,
-  seed,
-  ruleHits,
-  bulkMockProgress,
-  reloadToken,
-  layout,
-  openWindowRuleIds,
-  onOpenRuleWindow,
-}: AutoresponderPanelProps) {
+export function AutoresponderPanel({ data, actions, editor, flushRef }: AutoresponderPanelProps) {
+  const { ar, ruleHits, bulkMockProgress } = data;
+  const { scenarioActions, ruleActions, transferActions } = actions;
+  const { seed, reloadToken, layout, openWindowRuleIds, onOpenRuleWindow } = editor;
   const [pendingDelete, setPendingDelete] = useState<ScenarioSummary | null>(null);
   const [pendingReplace, setPendingReplace] = useState(false);
   const [collapsed, setCollapsed] = useDetailCollapsed();
   const { zone, zoneProps } = useFlowDrop(transferActions.dropMock);
+  const flushRegistryRef = useRef<EditorFlushRegistry | null>(null);
+  flushRegistryRef.current ??= new EditorFlushRegistry();
+  const flushRegistry = flushRegistryRef.current;
+  const registerFlush = useCallback(
+    (flush: () => Promise<void>) => flushRegistry.register(flush),
+    [flushRegistry],
+  );
+  const flushAllEditors = useCallback(() => flushRegistry.flushAll(), [flushRegistry]);
+  if (flushRef) flushRef.current = flushAllEditors;
 
   // Which scenario's rules are shown/edited. Distinct from the *active* scenario
   // because the General layer is editable without ever being active. Follows the
@@ -2013,7 +2104,11 @@ export function AutoresponderPanel({
         onAdd={createAndFocus}
         onImport={() => transferActions.importRules(false)}
         onReplace={() => setPendingReplace(true)}
-        onExportAll={() => transferActions.exportRules(null)}
+        onExportAll={() => {
+          void flushAllEditors()
+            .then(() => transferActions.exportRules(null))
+            .catch(() => {});
+        }}
       />
 
       <BulkMockProgress event={bulkMockProgress} />
@@ -2021,22 +2116,25 @@ export function AutoresponderPanel({
       {viewed ? (
         <ScenarioView
           key={viewed.id}
-          active={viewed}
-          isGeneral={isGeneral}
-          generalActive={ar.generalActive}
-          onRequestDelete={() => setPendingDelete(viewed)}
-          seed={seed}
-          reloadToken={reloadToken}
-          ruleHits={ruleHits}
+          scenario={{ active: viewed, isGeneral, generalActive: ar.generalActive }}
           drop={{ active: zone === "__body__", props: zoneProps("__body__", viewed.id) }}
-          scenarioActions={scenarioActions}
-          ruleActions={ruleActions}
-          onExport={() => transferActions.exportRules(viewed.id)}
-          layout={layout}
-          collapsed={collapsed}
-          onToggleCollapse={() => setCollapsed((c) => !c)}
-          openWindowRuleIds={openWindowRuleIds}
-          onOpenRuleWindow={onOpenRuleWindow}
+          actions={{
+            scenarioActions,
+            onRequestDelete: () => setPendingDelete(viewed),
+            onExport: () => transferActions.exportRules(viewed.id),
+          }}
+          editor={{
+            seed,
+            reloadToken,
+            ruleHits,
+            ruleActions,
+            layout,
+            collapsed,
+            onToggleCollapse: () => setCollapsed((c) => !c),
+            openWindowRuleIds,
+            onOpenRuleWindow,
+            registerFlush,
+          }}
         />
       ) : (
         <AutoresponderOffState
@@ -2053,13 +2151,20 @@ export function AutoresponderPanel({
         pendingReplace={pendingReplace}
         onCancelDelete={() => setPendingDelete(null)}
         onConfirmDelete={() => {
-          if (pendingDelete) scenarioActions.delete(pendingDelete.id);
+          const scenario = pendingDelete;
           setPendingDelete(null);
+          if (scenario) {
+            void flushAllEditors()
+              .then(() => scenarioActions.delete(scenario.id))
+              .catch(() => {});
+          }
         }}
         onCancelReplace={() => setPendingReplace(false)}
         onConfirmReplace={() => {
           setPendingReplace(false);
-          transferActions.importRules(true);
+          void flushAllEditors()
+            .then(() => transferActions.importRules(true))
+            .catch(() => {});
         }}
       />
     </div>
@@ -2636,7 +2741,7 @@ function RespondFields({
       <BodyEditor
         value={action.body}
         contentType={contentType}
-        onChange={(b) => setAction({ body: b })}
+        onChange={(b) => setAction({ body: b, bodyBase64: null })}
         fill={fill}
         wrap={wrap}
       />
@@ -2668,7 +2773,11 @@ function RespondFields({
               title="Pretty-print JSON"
               onClick={() => {
                 const f = formatJson(action.body);
-                if (f !== null) setAction({ body: f }, { label: "Format body", coalesceKey: null });
+                if (f !== null)
+                  setAction(
+                    { body: f, bodyBase64: null },
+                    { label: "Format body", coalesceKey: null },
+                  );
               }}
             >
               Format

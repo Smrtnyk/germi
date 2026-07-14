@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
 use hudsucker::hyper::body::{Body as HttpBody, Bytes, Frame, SizeHint};
-use hudsucker::hyper::header::{HeaderName, HeaderValue, CONTENT_LENGTH, HOST, UPGRADE};
+use hudsucker::hyper::header::{
+    HeaderName, HeaderValue, CONTENT_LENGTH, HOST, TRAILER, TRANSFER_ENCODING, UPGRADE,
+};
 use hudsucker::hyper::{HeaderMap, Method, Request, Response, Uri};
 use hudsucker::tokio_tungstenite::tungstenite::Message;
 use hudsucker::{
@@ -53,6 +55,31 @@ struct Inflight {
     /// Content-Length restore must still see the request. Lives only for the
     /// request's duration, so the clone is cheap relative to the store copy.
     request: CapturedRequest,
+    /// False when the captured request holds only an empty/truncated prefix.
+    /// Response scripts may still inspect request metadata, but reading
+    /// `req.body` must fail rather than masquerade as a complete body.
+    request_body_complete: bool,
+}
+
+struct PreparedRequest {
+    parts: hudsucker::hyper::http::request::Parts,
+    body_bytes: Bytes,
+    stream_forward: Option<Body>,
+    original_headers: HeaderMap,
+    preserve_trailers: bool,
+    id: String,
+    start: Instant,
+    request: CapturedRequest,
+    request_body_complete: bool,
+}
+
+struct UpstreamRequest {
+    target: Option<String>,
+    parts: hudsucker::hyper::http::request::Parts,
+    set_headers: Vec<(String, String)>,
+    body: Body,
+    original_headers: HeaderMap,
+    preserve_trailers: bool,
 }
 
 impl CaptureHandler {
@@ -93,41 +120,15 @@ impl HttpHandler for CaptureHandler {
             return Request::from_parts(parts, body).into();
         }
 
-        // Large declared bodies are forwarded unbuffered (rewrite rules can't
-        // apply to them); everything else is captured up to MAX_CAPTURE_BODY and,
-        // if larger, still forwarded in full (prefix + remaining stream).
-        let oversized = declared_len(&parts.headers).is_some_and(|n| n > MAX_CAPTURE_BODY);
-        let (body_bytes, stream_forward): (Bytes, Option<Body>) = if oversized {
-            (Bytes::new(), Some(body))
-        } else {
-            let (bytes, forward, _complete) = buffer_capped(body, MAX_CAPTURE_BODY as usize).await;
-            (bytes, forward)
-        };
-
-        let scheme = parts
-            .uri
-            .scheme_str()
-            .unwrap_or("https") // intercepted CONNECT traffic is https
-            .to_string();
-        let path = parts
-            .uri
-            .path_and_query().map_or_else(|| parts.uri.path().to_string(), |p| p.as_str().to_string());
-
-        let mut captured = CapturedRequest {
-            method: parts.method.as_str().to_string(),
-            uri: parts.uri.to_string(),
-            scheme,
-            host,
-            path,
-            version: format!("{:?}", parts.version),
-            headers: header_pairs(&parts.headers),
-            body: body_bytes.clone(),
-            timestamp_ms: now_ms(),
-        };
+        let (body_bytes, stream_forward, request_body_complete) =
+            capture_request_body(&parts.headers, body).await;
+        let mut captured = captured_request(&parts, host, body_bytes.clone());
+        let original_request_headers = parts.headers.clone();
+        let original_request_pairs = captured.headers.clone();
 
         // User scripts run before the autoresponder, so a script may rewrite the
         // request the rules match on (and what's recorded/forwarded).
-        self.run_request_scripts(&mut parts.headers, &mut captured);
+        self.run_request_scripts(&mut parts.headers, &mut captured, request_body_complete);
 
         let outcome = {
             let ar = self.shared.autoresponder.read();
@@ -140,6 +141,38 @@ impl HttpHandler for CaptureHandler {
             }
         };
 
+        let forwards_upstream = matches!(
+            &outcome,
+            RequestOutcome::Continue { .. } | RequestOutcome::MapRemote { .. }
+        );
+        let set_headers = match &outcome {
+            RequestOutcome::Continue { set_headers }
+            | RequestOutcome::Respond { set_headers, .. }
+            | RequestOutcome::Block { set_headers, .. }
+            | RequestOutcome::MapRemote { set_headers, .. } => set_headers,
+        };
+        if !set_headers.is_empty() {
+            // Rule edits are part of the effective request just like script
+            // edits. Keep the inspector and downstream response rules/scripts
+            // in sync with the effective request, including when a later rule
+            // short-circuits. A Map Remote URL itself intentionally remains the
+            // client's URL in the captured copy.
+            apply_set_header_pairs(&mut captured.headers, set_headers);
+        }
+        let preserves_trailers = stream_forward.is_some();
+        if forwards_upstream {
+            // Request scripts/rules only edit metadata; they never replace the
+            // body. Letting them alter framing around unchanged (especially
+            // streamed) bytes can truncate an upload or make upstream wait
+            // forever. A fully-buffered rebuild has already consumed trailers,
+            // so do not keep advertising trailers that can no longer be sent.
+            restore_message_framing(
+                &mut captured.headers,
+                &original_request_pairs,
+                preserves_trailers,
+            );
+        }
+
         let id = self.shared.next_id();
         let start = Instant::now();
 
@@ -149,9 +182,9 @@ impl HttpHandler for CaptureHandler {
         let request = captured.clone();
 
         // Emit the request immediately (response pending).
-        self.shared.record_new(Flow {
+        self.shared.record_captured(Flow {
             id: id.clone(),
-            seq: self.shared.next_seq(),
+            seq: 0,
             request: captured,
             response: None,
             matched_rule: None,
@@ -162,51 +195,24 @@ impl HttpHandler for CaptureHandler {
             imported: false,
         });
 
-        match outcome {
-            RequestOutcome::Respond { rule, response, .. } => {
-                let out = self.serve_synthetic(&id, &rule, response, &request).await;
-                self.inflight = None;
-                out.into()
-            }
-            RequestOutcome::Block { rule, .. } => {
-                let synthetic = SyntheticResponse {
-                    status: 403,
-                    headers: vec![("content-type".to_string(), "text/plain".to_string())],
-                    body: Bytes::from_static(b"Blocked by Germi"),
-                };
-                let out = self.serve_synthetic(&id, &rule, synthetic, &request).await;
-                self.inflight = None;
-                out.into()
-            }
-            RequestOutcome::Continue { set_headers } => {
-                // Forward the streaming remainder (oversized/truncated) or a body
-                // rebuilt from the captured bytes.
-                let forward = stream_forward.unwrap_or_else(|| Body::from(body_bytes));
-                let inflight = Inflight { id, start, rule: None, request };
-                self.forward_upstream(inflight, None, parts, &set_headers, forward)
-            }
-            // Map Remote: same forwarding as Continue, but pointed at the
-            // rule's rewritten URL. The flow keeps the ORIGINAL request (what
-            // the client asked for); the rule label lands in "Mocked-by" when
-            // the mapped response completes.
-            RequestOutcome::MapRemote {
-                rule,
-                url,
-                set_headers,
-                ..
-            } => {
-                let forward = stream_forward.unwrap_or_else(|| Body::from(body_bytes));
-                let inflight = Inflight { id, start, rule: Some(rule), request };
-                self.forward_upstream(inflight, Some(url), parts, &set_headers, forward)
-            }
-        }
+        self.dispatch_request(
+            outcome,
+            PreparedRequest {
+                parts,
+                body_bytes,
+                stream_forward,
+                original_headers: original_request_headers,
+                preserve_trailers: preserves_trailers,
+                id,
+                start,
+                request,
+                request_body_complete,
+            },
+        )
+        .await
     }
 
-    async fn handle_response(
-        &mut self,
-        _ctx: &HttpContext,
-        res: Response<Body>,
-    ) -> Response<Body> {
+    async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
         self.process_response(res).await
     }
 
@@ -248,6 +254,98 @@ impl HttpHandler for CaptureHandler {
 }
 
 impl CaptureHandler {
+    async fn dispatch_request(
+        &mut self,
+        outcome: RequestOutcome,
+        prepared: PreparedRequest,
+    ) -> RequestOrResponse {
+        let PreparedRequest {
+            parts,
+            body_bytes,
+            stream_forward,
+            original_headers,
+            preserve_trailers,
+            id,
+            start,
+            request,
+            request_body_complete,
+        } = prepared;
+
+        match outcome {
+            RequestOutcome::Respond { rule, response, .. } => {
+                let out = self
+                    .serve_synthetic(&id, &rule, response, &request, request_body_complete)
+                    .await;
+                self.inflight = None;
+                out.into()
+            }
+            RequestOutcome::Block { rule, .. } => {
+                let synthetic = SyntheticResponse {
+                    status: 403,
+                    headers: vec![("content-type".to_string(), "text/plain".to_string())],
+                    body: Bytes::from_static(b"Blocked by Germi"),
+                };
+                let out = self
+                    .serve_synthetic(&id, &rule, synthetic, &request, request_body_complete)
+                    .await;
+                self.inflight = None;
+                out.into()
+            }
+            RequestOutcome::Continue { set_headers } => {
+                // Forward the streaming remainder (oversized/truncated) or a body
+                // rebuilt from the captured bytes.
+                let forward = stream_forward.unwrap_or_else(|| Body::from(body_bytes));
+                let inflight = Inflight {
+                    id,
+                    start,
+                    rule: None,
+                    request,
+                    request_body_complete,
+                };
+                self.forward_upstream(
+                    inflight,
+                    UpstreamRequest {
+                        target: None,
+                        parts,
+                        set_headers,
+                        body: forward,
+                        original_headers,
+                        preserve_trailers,
+                    },
+                )
+            }
+            // Map Remote: same forwarding as Continue, but pointed at the
+            // rule's rewritten URL. The flow keeps the ORIGINAL request (what
+            // the client asked for); the rule label lands in "Mocked-by" when
+            // the mapped response completes.
+            RequestOutcome::MapRemote {
+                rule,
+                url,
+                set_headers,
+                ..
+            } => {
+                let forward = stream_forward.unwrap_or_else(|| Body::from(body_bytes));
+                let inflight = Inflight {
+                    id,
+                    start,
+                    rule: Some(rule),
+                    request,
+                    request_body_complete,
+                };
+                self.forward_upstream(
+                    inflight,
+                    UpstreamRequest {
+                        target: Some(url),
+                        parts,
+                        set_headers,
+                        body: forward,
+                        original_headers,
+                        preserve_trailers,
+                    },
+                )
+            }
+        }
+    }
     /// Apply the configured response-delay throttle (simulate a slow response),
     /// after recording so the captured duration stays real. Skipped for bypassed
     /// traffic (which returns before reaching here).
@@ -279,7 +377,6 @@ impl CaptureHandler {
         // Large declared response bodies stream straight through to the client
         // without buffering; only a body-less placeholder is captured.
         if declared_len(&parts.headers).is_some_and(|n| n > MAX_CAPTURE_BODY) {
-            let duration = inflight.start.elapsed().as_millis() as u64;
             let captured = CapturedResponse {
                 status: parts.status.as_u16(),
                 version: format!("{:?}", parts.version),
@@ -287,10 +384,9 @@ impl CaptureHandler {
                 body: Bytes::new(),
                 timestamp_ms: now_ms(),
             };
-            self.shared
-                .record_complete(&inflight.id, captured, duration, ttfb, inflight.rule.clone());
-            self.throttle().await;
-            return Response::from_parts(parts, body);
+            return self
+                .finish_streaming_response(parts, body, captured, inflight, ttfb)
+                .await;
         }
 
         let (body_bytes, stream_forward, _complete) =
@@ -302,7 +398,6 @@ impl CaptureHandler {
         // then a propagated error so a truncated transfer is never presented to
         // the client as a clean, complete response — with the ORIGINAL headers.
         if let Some(forward) = stream_forward {
-            let duration = inflight.start.elapsed().as_millis() as u64;
             let captured = CapturedResponse {
                 status: parts.status.as_u16(),
                 version: format!("{:?}", parts.version),
@@ -310,10 +405,9 @@ impl CaptureHandler {
                 body: body_bytes,
                 timestamp_ms: now_ms(),
             };
-            self.shared
-                .record_complete(&inflight.id, captured, duration, ttfb, inflight.rule.clone());
-            self.throttle().await;
-            return Response::from_parts(parts, forward);
+            return self
+                .finish_streaming_response(parts, forward, captured, inflight, ttfb)
+                .await;
         }
 
         let mut captured = CapturedResponse {
@@ -332,41 +426,41 @@ impl CaptureHandler {
         // evicted the pending flow, and response rules / scripts / the
         // Content-Length restore must still see the request.
         let req = &inflight.request;
-        let mut matched = None;
-        // Lock order autoresponder→cursors matches handle_request, so the two
-        // never deadlock; held only for this synchronous rewrite (no .await).
-        if let (Ok(ar), Ok(mut cursors)) =
-            (self.shared.autoresponder.read(), self.shared.cursors.lock())
-        {
-            matched = ar.apply_response_stateful(req, &mut captured, &mut cursors);
-        }
-
-        // User scripts get the last word on the response the client sees.
-        let script_res_effects = match self.shared.scripts.read() {
-            Ok(engine) if engine.wants_response() => {
-                Some(engine.run_response(Some(req), &captured))
-            }
-            _ => None,
-        };
-        if let Some(effects) = script_res_effects {
-            apply_response_effects(&mut captured, effects);
-        }
+        let matched =
+            self.apply_response_mutations(req, &mut captured, true, inflight.request_body_complete);
 
         // Rules/scripts may have set an out-of-range status; sanitize before the
         // wire response is built AND before recording, so both stay in agreement.
         captured.status = sanitize_status(captured.status);
+        let representation_len = captured.body.len();
+        let bodyless = response_has_no_body(&req.method, captured.status);
+        if bodyless {
+            captured.body = Bytes::new();
+        }
+        let resource_length = resource_content_length(
+            &parts.headers,
+            &req.method,
+            parts.status.as_u16(),
+            captured.status,
+            Some(representation_len),
+        );
+        let content_length = if bodyless {
+            normalize_bodyless_framing(&mut captured.headers, resource_length.as_ref());
+            resource_length
+        } else {
+            // `buffer_capped` consumes trailer frames while collecting the body;
+            // the rebuilt body cannot emit them. It also has a known final size,
+            // so replace any now-stale upstream/script framing in both the wire
+            // response and inspector record.
+            Some(normalize_buffered_framing(
+                &mut captured.headers,
+                representation_len,
+            ))
+        };
         let mut out = build_wire_response(&parts.headers, &original_pairs, &captured);
 
-        // A HEAD response (and a 304) legitimately declares a Content-Length that
-        // describes the resource, not the (absent) body. `build_parts` drops it so
-        // hyper recomputes the length from the body — which is empty here, giving a
-        // wrong `content-length: 0`. Restore the upstream value for these.
-        let bodyless =
-            parts.status.as_u16() == 304 || req.method.eq_ignore_ascii_case("HEAD");
-        if bodyless {
-            if let Some(cl) = parts.headers.get(CONTENT_LENGTH) {
-                out.headers_mut().insert(CONTENT_LENGTH, cl.clone());
-            }
+        if let Some(length) = content_length {
+            out.headers_mut().insert(CONTENT_LENGTH, length);
         }
 
         let duration = inflight.start.elapsed().as_millis() as u64;
@@ -381,9 +475,116 @@ impl CaptureHandler {
         out
     }
 
+    /// Finish a response whose body cannot be fully buffered. Header/status/CORS
+    /// rules and scripts remain safe and useful; body rewrites are deliberately
+    /// skipped, and the original stream/framing is preserved unless the final
+    /// status forbids a body.
+    async fn finish_streaming_response(
+        &self,
+        parts: hudsucker::hyper::http::response::Parts,
+        forward: Body,
+        mut captured: CapturedResponse,
+        inflight: Inflight,
+        ttfb: Option<u64>,
+    ) -> Response<Body> {
+        let original_status = parts.status.as_u16();
+        let original_pairs = captured.headers.clone();
+        let matched = self.apply_response_mutations(
+            &inflight.request,
+            &mut captured,
+            false,
+            inflight.request_body_complete,
+        );
+        captured.status = sanitize_status(captured.status);
+
+        let bodyless = response_has_no_body(&inflight.request.method, captured.status);
+        if bodyless {
+            captured.body = Bytes::new();
+        }
+        let preserve_framing = !bodyless && !status_forbids_body(original_status);
+        if preserve_framing {
+            // The bytes still come from the untouched upstream stream. A
+            // metadata rule/script may edit Content-Length or Transfer-Encoding,
+            // but applying that edit to an unchanged stream can truncate the
+            // response or leave the client waiting forever. Keep the upstream
+            // framing on both the wire and the recorded response.
+            restore_message_framing(&mut captured.headers, &original_pairs, true);
+        } else if !bodyless {
+            // A response that originally forbade a body (304/204/1xx) may be
+            // changed to a body-allowed status by a metadata rule. Its original
+            // framing no longer describes the forwarded message, and the wire
+            // builder drops it below; drop it from the inspector copy too.
+            captured
+                .headers
+                .retain(|(name, _)| !is_framing_header(name));
+        }
+        let resource_length = resource_content_length(
+            &parts.headers,
+            &inflight.request.method,
+            original_status,
+            captured.status,
+            None,
+        );
+        if bodyless {
+            normalize_bodyless_framing(&mut captured.headers, resource_length.as_ref());
+        }
+        let body = if bodyless { Body::empty() } else { forward };
+        let mut out = build_wire_response_with_body(
+            &parts.headers,
+            &original_pairs,
+            &captured,
+            body,
+            preserve_framing,
+        );
+        if let Some(length) = resource_length {
+            out.headers_mut().insert(CONTENT_LENGTH, length);
+        }
+
+        let duration = inflight.start.elapsed().as_millis() as u64;
+        self.shared.record_complete(
+            &inflight.id,
+            captured,
+            duration,
+            ttfb,
+            inflight.rule.or(matched),
+        );
+        self.throttle().await;
+        out
+    }
+
+    fn apply_response_mutations(
+        &self,
+        req: &CapturedRequest,
+        captured: &mut CapturedResponse,
+        allow_body_rewrite: bool,
+        request_body_complete: bool,
+    ) -> Option<String> {
+        let matched = if let (Ok(ar), Ok(mut cursors)) =
+            (self.shared.autoresponder.read(), self.shared.cursors.lock())
+        {
+            ar.apply_response_stateful_mode(req, captured, &mut cursors, allow_body_rewrite)
+        } else {
+            None
+        };
+
+        let effects = match self.shared.scripts.read() {
+            Ok(engine) if engine.wants_response() => Some(engine.run_response_with_body_state(
+                Some(req),
+                captured,
+                request_body_complete,
+                allow_body_rewrite,
+            )),
+            _ => None,
+        };
+        if let Some(effects) = effects {
+            apply_response_effects(captured, effects);
+        }
+        matched
+    }
+
     /// Record a tentative 101 for a forwarded WebSocket upgrade so its row isn't
     /// left forever-pending (a real response overwrites it by the same id).
-    fn record_ws_upgrade(&self, id: &str) {
+    fn record_ws_upgrade(&self, id: &str, matched_rule: Option<String>) {
         let captured = CapturedResponse {
             status: 101,
             version: "HTTP/1.1".to_string(),
@@ -391,7 +592,8 @@ impl CaptureHandler {
             body: Bytes::new(),
             timestamp_ms: now_ms(),
         };
-        self.shared.record_complete(id, captured, 0, Some(0), None);
+        self.shared
+            .record_complete(id, captured, 0, Some(0), matched_rule);
     }
 
     fn complete_synthetic(&self, id: &str, rule: &str, response: SyntheticResponse) {
@@ -410,7 +612,12 @@ impl CaptureHandler {
     /// a mock gets the same treatment (e.g. CORS headers) as a real upstream one —
     /// the second call site that makes the response hook truly global, since mocks
     /// never reach `handle_response`.
-    fn run_scripts_on_synthetic(&self, req: &CapturedRequest, synthetic: &mut SyntheticResponse) {
+    fn run_scripts_on_synthetic(
+        &self,
+        req: &CapturedRequest,
+        synthetic: &mut SyntheticResponse,
+        request_body_complete: bool,
+    ) {
         let Ok(engine) = self.shared.scripts.read() else {
             return;
         };
@@ -424,7 +631,8 @@ impl CaptureHandler {
             body: std::mem::take(&mut synthetic.body),
             timestamp_ms: now_ms(),
         };
-        let effects = engine.run_response(Some(req), &captured);
+        let effects =
+            engine.run_response_with_body_state(Some(req), &captured, request_body_complete, true);
         drop(engine);
         apply_response_effects(&mut captured, effects);
         synthetic.status = captured.status;
@@ -434,9 +642,16 @@ impl CaptureHandler {
 
     /// Run request-phase scripts over `captured`, replaying their header effects
     /// onto the forwarded wire headers and the captured copy.
-    fn run_request_scripts(&self, wire: &mut HeaderMap, captured: &mut CapturedRequest) {
+    fn run_request_scripts(
+        &self,
+        wire: &mut HeaderMap,
+        captured: &mut CapturedRequest,
+        body_complete: bool,
+    ) {
         let effects = match self.shared.scripts.read() {
-            Ok(engine) if engine.wants_request() => engine.run_request(captured),
+            Ok(engine) if engine.wants_request() => {
+                engine.run_request_with_body_state(captured, body_complete)
+            }
             _ => return,
         };
         apply_request_effects(wire, &mut captured.headers, effects);
@@ -476,17 +691,23 @@ impl CaptureHandler {
     fn forward_upstream(
         &mut self,
         inflight: Inflight,
-        target: Option<String>,
-        mut parts: hudsucker::hyper::http::request::Parts,
-        set_headers: &[(String, String)],
-        body: Body,
+        upstream: UpstreamRequest,
     ) -> RequestOrResponse {
-        apply_set_headers(&mut parts.headers, set_headers);
+        let UpstreamRequest {
+            target,
+            mut parts,
+            set_headers,
+            body,
+            original_headers,
+            preserve_trailers,
+        } = upstream;
+        apply_set_headers(&mut parts.headers, &set_headers);
+        restore_wire_framing(&mut parts.headers, &original_headers, preserve_trailers);
         if let Some(target) = target {
             remap_request_target(&mut parts, &target);
         }
         if is_websocket_upgrade(&parts.headers) {
-            self.record_ws_upgrade(&inflight.id);
+            self.record_ws_upgrade(&inflight.id, inflight.rule.clone());
         }
         self.inflight = Some(inflight);
         Request::from_parts(parts, body).into()
@@ -502,13 +723,41 @@ impl CaptureHandler {
         rule: &str,
         mut response: SyntheticResponse,
         req: &CapturedRequest,
+        request_body_complete: bool,
     ) -> Response<Body> {
         self.run_rules_on_synthetic(req, &mut response);
-        self.run_scripts_on_synthetic(req, &mut response);
+        self.run_scripts_on_synthetic(req, &mut response, request_body_complete);
         // Sanitize the (rule/script-supplied) status before the wire response is
         // built AND before recording, so both stay in agreement.
         response.status = sanitize_status(response.status);
-        let out = build_response(&response);
+        response.headers.retain(|(name, value)| {
+            HeaderName::from_bytes(name.as_bytes()).is_ok()
+                && HeaderValue::from_bytes(value.as_bytes()).is_ok()
+        });
+        let representation_len = response.body.len();
+        let bodyless = response_has_no_body(&req.method, response.status);
+        if bodyless {
+            response.body = Bytes::new();
+        }
+        let resource_length = (response.status == 304
+            || (req.method.eq_ignore_ascii_case("HEAD")
+                && !status_forbids_metadata(response.status)))
+        .then(|| HeaderValue::from_str(&representation_len.to_string()).ok())
+        .flatten();
+        let content_length = if bodyless {
+            normalize_bodyless_framing(&mut response.headers, resource_length.as_ref());
+            resource_length
+        } else {
+            // Synthetic bodies have a fixed known size and no trailer-frame API.
+            Some(normalize_buffered_framing(
+                &mut response.headers,
+                representation_len,
+            ))
+        };
+        let mut out = build_response(&response);
+        if let Some(length) = content_length {
+            out.headers_mut().insert(CONTENT_LENGTH, length);
+        }
         self.complete_synthetic(id, rule, response);
         self.throttle().await;
         out
@@ -528,8 +777,8 @@ impl WebSocketHandler for CaptureHandler {
 /// the request is really sent. Intercepted HTTPS has a relative URI (no
 /// authority), so it falls back to the Host header.
 fn request_host(uri: &Uri, headers: &HeaderMap) -> String {
-    uri.host()
-        .map(|s| s.to_string())
+    uri.authority()
+        .map(|authority| authority.as_str().to_string())
         .or_else(|| {
             headers
                 .get(HOST)
@@ -543,8 +792,12 @@ fn request_host(uri: &Uri, headers: &HeaderMap) -> String {
 fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
     headers
         .get(UPGRADE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|u| u.to_ascii_lowercase().contains("websocket"))
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|protocol| protocol.trim().eq_ignore_ascii_case("websocket"))
+        })
 }
 
 /// The declared `Content-Length` of a message, if present and parseable.
@@ -558,11 +811,98 @@ fn declared_len(headers: &HeaderMap) -> Option<u64> {
         .ok()
 }
 
+/// Capture a request body when it is safe to buffer. Declared-large and
+/// unexpectedly over-cap bodies are still forwarded in full, but are marked
+/// incomplete so scripts cannot mistake an empty/truncated capture for the
+/// complete request content.
+async fn capture_request_body(headers: &HeaderMap, body: Body) -> (Bytes, Option<Body>, bool) {
+    if declared_len(headers).is_some_and(|length| length > MAX_CAPTURE_BODY) {
+        return (Bytes::new(), Some(body), false);
+    }
+    let (bytes, forward, stream_complete) = buffer_capped(body, MAX_CAPTURE_BODY as usize).await;
+    let body_complete = stream_complete && forward.is_none();
+    (bytes, forward, body_complete)
+}
+
+fn captured_request(
+    parts: &hudsucker::hyper::http::request::Parts,
+    host: String,
+    body: Bytes,
+) -> CapturedRequest {
+    let scheme = parts
+        .uri
+        .scheme_str()
+        .unwrap_or("https") // intercepted CONNECT traffic is https
+        .to_string();
+    let path = parts.uri.path_and_query().map_or_else(
+        || parts.uri.path().to_string(),
+        |value| value.as_str().to_string(),
+    );
+    // Plain HTTP proxy requests normally arrive in absolute form, while a
+    // decrypted HTTPS request arrives in origin form (`/path?query`). Keep the
+    // captured model consistent and self-contained in both cases: HAR export,
+    // scripts' `req.url`, and other consumers all require an absolute URL.
+    let uri = if parts.uri.scheme().is_some() && parts.uri.authority().is_some() {
+        parts.uri.to_string()
+    } else {
+        format!("{scheme}://{host}{path}")
+    };
+    CapturedRequest {
+        method: parts.method.as_str().to_string(),
+        uri,
+        scheme,
+        host,
+        path,
+        version: format!("{:?}", parts.version),
+        headers: header_pairs(&parts.headers),
+        body,
+        timestamp_ms: now_ms(),
+    }
+}
+
+fn status_forbids_body(status: u16) -> bool {
+    (100..200).contains(&status) || matches!(status, 204 | 205 | 304)
+}
+
+fn status_forbids_metadata(status: u16) -> bool {
+    (100..200).contains(&status) || matches!(status, 204 | 205)
+}
+
+fn response_has_no_body(method: &str, status: u16) -> bool {
+    method.eq_ignore_ascii_case("HEAD") || status_forbids_body(status)
+}
+
+/// HEAD and 304 may carry the selected representation's length despite having
+/// no wire body. Prefer the upstream declaration when it already described a
+/// bodyless response; otherwise use the fully-mutated buffered body's length.
+fn resource_content_length(
+    original_headers: &HeaderMap,
+    method: &str,
+    original_status: u16,
+    final_status: u16,
+    representation_len: Option<usize>,
+) -> Option<HeaderValue> {
+    let eligible = final_status == 304
+        || (method.eq_ignore_ascii_case("HEAD") && !status_forbids_metadata(final_status));
+    if !eligible {
+        return None;
+    }
+    if method.eq_ignore_ascii_case("HEAD") || original_status == 304 {
+        if let Some(value) = original_headers.get(CONTENT_LENGTH) {
+            return Some(value.clone());
+        }
+    }
+    representation_len
+        .and_then(|length| HeaderValue::from_str(&length.to_string()).ok())
+        .or_else(|| original_headers.get(CONTENT_LENGTH).cloned())
+}
+
 /// A body that emits a buffered `prefix` first, then streams the remainder of an
 /// inner body. Lets us forward a large body in full (so the wire is never
 /// truncated) while having captured only a capped prefix of it.
 struct PrefixThenBody {
     prefix: Option<Bytes>,
+    overflow: Option<Bytes>,
     inner: Body,
 }
 
@@ -578,11 +918,14 @@ impl HttpBody for PrefixThenBody {
         if let Some(prefix) = me.prefix.take() {
             return Poll::Ready(Some(Ok(Frame::data(prefix))));
         }
+        if let Some(overflow) = me.overflow.take() {
+            return Poll::Ready(Some(Ok(Frame::data(overflow))));
+        }
         Pin::new(&mut me.inner).poll_frame(cx)
     }
 
     fn is_end_stream(&self) -> bool {
-        self.prefix.is_none() && self.inner.is_end_stream()
+        self.prefix.is_none() && self.overflow.is_none() && self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> SizeHint {
@@ -643,16 +986,23 @@ async fn buffer_capped(body: Body, cap: usize) -> (Bytes, Option<Body>, bool) {
         match body.frame().await {
             Some(Ok(frame)) => {
                 if let Ok(data) = frame.into_data() {
-                    buf.extend_from_slice(&data);
-                    if buf.len() >= cap {
-                        let prefix = Bytes::from(buf);
-                        let captured = prefix.slice(..cap);
+                    let remaining = cap.saturating_sub(buf.len());
+                    if data.len() > remaining {
+                        // Copy only the bytes the capture can retain. Keep the
+                        // rest as a zero-copy Bytes slice for forwarding; a
+                        // single hostile frame must not make the capture buffer
+                        // grow past `cap` before we notice the overflow.
+                        buf.extend_from_slice(&data[..remaining]);
+                        let captured = Bytes::from(buf);
+                        let overflow = data.slice(remaining..);
                         let forward = Body::from(BoxBody::new(PrefixThenBody {
-                            prefix: Some(prefix),
+                            prefix: Some(captured.clone()),
+                            overflow: Some(overflow),
                             inner: body,
                         }));
                         return (captured, Some(forward), true);
                     }
+                    buf.extend_from_slice(&data);
                 }
             }
             // Upstream errored mid-body: forward the prefix then propagate the
@@ -699,18 +1049,36 @@ fn build_response(synthetic: &SyntheticResponse) -> Response<Body> {
 /// per name (case-insensitive, multi-value aware) against the pre-rules
 /// snapshot: an unchanged name keeps its original `HeaderValue` entries
 /// byte-for-byte; a changed/added name is built from the new strings; a
-/// removed name is dropped. Length/encoding headers are dropped either way so
-/// hyper recomputes them from the (possibly rewritten) body.
+/// removed name is dropped. Framing headers are dropped here and the caller
+/// supplies the normalized length for the (possibly rewritten) body.
 fn build_wire_response(
     original: &HeaderMap,
     original_pairs: &[(String, String)],
     captured: &CapturedResponse,
 ) -> Response<Body> {
-    let mut builder = Response::builder().status(captured.status);
+    build_wire_response_with_body(
+        original,
+        original_pairs,
+        captured,
+        Body::from(captured.body.clone()),
+        false,
+    )
+}
+
+fn build_wire_response_with_body(
+    original: &HeaderMap,
+    original_pairs: &[(String, String)],
+    captured: &CapturedResponse,
+    body: Body,
+    preserve_framing: bool,
+) -> Response<Body> {
+    let mut out = Response::new(body);
+    if let Ok(status) = hudsucker::hyper::StatusCode::from_u16(captured.status) {
+        *out.status_mut() = status;
+    }
     let mut seen: Vec<&str> = Vec::new();
     for (name, _) in &captured.headers {
-        if name.eq_ignore_ascii_case("content-length")
-            || name.eq_ignore_ascii_case("transfer-encoding")
+        if (!preserve_framing && is_framing_header(name))
             || seen.iter().any(|s| s.eq_ignore_ascii_case(name))
         {
             continue;
@@ -721,19 +1089,44 @@ fn build_wire_response(
         };
         if header_values(&captured.headers, name) == header_values(original_pairs, name) {
             for val in original.get_all(&header_name) {
-                builder = builder.header(header_name.clone(), val.clone());
+                out.headers_mut().append(header_name.clone(), val.clone());
             }
         } else {
-            for val in header_values(&captured.headers, name) {
-                if let Ok(val) = HeaderValue::from_bytes(val.as_bytes()) {
-                    builder = builder.header(header_name.clone(), val);
-                }
-            }
+            append_changed_header_values(
+                out.headers_mut(),
+                &header_name,
+                original,
+                &captured.headers,
+            );
         }
     }
-    builder
-        .body(Body::from(captured.body.clone()))
-        .unwrap_or_else(|_| Response::new(Body::from(captured.body.clone())))
+    out
+}
+
+/// Rebuild a changed multi-value header without corrupting untouched obs-text
+/// values that remain beside an appended value. Captured header strings are a
+/// lossy display projection, so parsing every value back would turn a raw byte
+/// such as `0xe9` into UTF-8 replacement bytes. Reuse each matching original
+/// value once; genuinely new/replaced values are built from their final text.
+fn append_changed_header_values(
+    destination: &mut HeaderMap,
+    name: &HeaderName,
+    original: &HeaderMap,
+    captured: &[(String, String)],
+) {
+    let originals: Vec<&HeaderValue> = original.get_all(name).iter().collect();
+    let mut reused = vec![false; originals.len()];
+    for value in header_values(captured, name.as_str()) {
+        let matching = originals.iter().enumerate().position(|(index, original)| {
+            !reused[index] && String::from_utf8_lossy(original.as_bytes()) == value
+        });
+        if let Some(index) = matching {
+            reused[index] = true;
+            destination.append(name.clone(), originals[index].clone());
+        } else if let Ok(value) = HeaderValue::from_bytes(value.as_bytes()) {
+            destination.append(name.clone(), value);
+        }
+    }
 }
 
 /// The ordered value list a display-header vec holds for `name`.
@@ -761,10 +1154,9 @@ fn sanitize_status(status: u16) -> u16 {
 fn build_parts(status: u16, headers: &[(String, String)], body: &Bytes) -> Response<Body> {
     let mut builder = Response::builder().status(status);
     for (k, v) in headers {
-        // Drop length/encoding headers; hyper recomputes content-length from the
-        // (possibly rewritten) body, avoiding mismatches.
-        if k.eq_ignore_ascii_case("content-length") || k.eq_ignore_ascii_case("transfer-encoding")
-        {
+        // Drop caller-supplied framing headers; the caller installs the known
+        // body length after building the response, avoiding mismatches.
+        if is_framing_header(k) {
             continue;
         }
         // from_bytes (not from_str) so obs-text values captured via the lossy
@@ -793,29 +1185,32 @@ fn apply_request_effects(
     for op in effects.header_ops {
         match op {
             HeaderOp::Set(name, value) => {
-                remove_header_ci(captured, &name);
-                captured.push((name.clone(), value.clone()));
-                if let (Ok(n), Ok(v)) = (
+                let (Ok(n), Ok(v)) = (
                     HeaderName::from_bytes(name.as_bytes()),
                     HeaderValue::from_bytes(value.as_bytes()),
-                ) {
-                    wire.insert(n, v);
-                }
+                ) else {
+                    continue;
+                };
+                remove_header_ci(captured, &name);
+                captured.push((name.clone(), value.clone()));
+                wire.insert(n, v);
             }
             HeaderOp::Add(name, value) => {
-                captured.push((name.clone(), value.clone()));
-                if let (Ok(n), Ok(v)) = (
+                let (Ok(n), Ok(v)) = (
                     HeaderName::from_bytes(name.as_bytes()),
                     HeaderValue::from_bytes(value.as_bytes()),
-                ) {
-                    wire.append(n, v);
-                }
+                ) else {
+                    continue;
+                };
+                captured.push((name.clone(), value.clone()));
+                wire.append(n, v);
             }
             HeaderOp::Remove(name) => {
+                let Ok(n) = HeaderName::from_bytes(name.as_bytes()) else {
+                    continue;
+                };
                 remove_header_ci(captured, &name);
-                if let Ok(n) = HeaderName::from_bytes(name.as_bytes()) {
-                    wire.remove(&n);
-                }
+                wire.remove(&n);
             }
         }
     }
@@ -828,11 +1223,26 @@ fn apply_response_effects(captured: &mut CapturedResponse, effects: Effects) {
     for op in effects.header_ops {
         match op {
             HeaderOp::Set(name, value) => {
+                if HeaderName::from_bytes(name.as_bytes()).is_err()
+                    || HeaderValue::from_bytes(value.as_bytes()).is_err()
+                {
+                    continue;
+                }
                 remove_header_ci(&mut captured.headers, &name);
                 captured.headers.push((name, value));
             }
-            HeaderOp::Add(name, value) => captured.headers.push((name, value)),
-            HeaderOp::Remove(name) => remove_header_ci(&mut captured.headers, &name),
+            HeaderOp::Add(name, value) => {
+                if HeaderName::from_bytes(name.as_bytes()).is_ok()
+                    && HeaderValue::from_bytes(value.as_bytes()).is_ok()
+                {
+                    captured.headers.push((name, value));
+                }
+            }
+            HeaderOp::Remove(name) => {
+                if HeaderName::from_bytes(name.as_bytes()).is_ok() {
+                    remove_header_ci(&mut captured.headers, &name);
+                }
+            }
         }
     }
     if let Some(status) = effects.status {
@@ -842,6 +1252,66 @@ fn apply_response_effects(captured: &mut CapturedResponse, effects: Effects) {
 
 fn remove_header_ci(headers: &mut Vec<(String, String)>, name: &str) {
     headers.retain(|(k, _)| !k.eq_ignore_ascii_case(name));
+}
+
+fn is_framing_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("content-length")
+        || name.eq_ignore_ascii_case("transfer-encoding")
+        || name.eq_ignore_ascii_case("trailer")
+}
+
+fn restore_message_framing(
+    headers: &mut Vec<(String, String)>,
+    original: &[(String, String)],
+    preserve_trailers: bool,
+) {
+    headers.retain(|(name, _)| !is_framing_header(name));
+    headers.extend(
+        original
+            .iter()
+            .filter(|(name, _)| {
+                name.eq_ignore_ascii_case("content-length")
+                    || name.eq_ignore_ascii_case("transfer-encoding")
+                    || (preserve_trailers && name.eq_ignore_ascii_case("trailer"))
+            })
+            .cloned(),
+    );
+}
+
+fn restore_wire_framing(headers: &mut HeaderMap, original: &HeaderMap, preserve_trailers: bool) {
+    headers.remove(CONTENT_LENGTH);
+    headers.remove(TRANSFER_ENCODING);
+    headers.remove(TRAILER);
+    for value in original.get_all(CONTENT_LENGTH) {
+        headers.append(CONTENT_LENGTH, value.clone());
+    }
+    for value in original.get_all(TRANSFER_ENCODING) {
+        headers.append(TRANSFER_ENCODING, value.clone());
+    }
+    if preserve_trailers {
+        for value in original.get_all(TRAILER) {
+            headers.append(TRAILER, value.clone());
+        }
+    }
+}
+
+fn normalize_bodyless_framing(
+    headers: &mut Vec<(String, String)>,
+    content_length: Option<&HeaderValue>,
+) {
+    headers.retain(|(name, _)| !is_framing_header(name));
+    if let Some(value) = content_length.and_then(|value| value.to_str().ok()) {
+        headers.push(("content-length".into(), value.into()));
+    }
+}
+
+fn normalize_buffered_framing(headers: &mut Vec<(String, String)>, body_len: usize) -> HeaderValue {
+    headers.retain(|(name, _)| !is_framing_header(name));
+    let text = body_len.to_string();
+    let value = HeaderValue::from_str(&text)
+        .expect("a decimal usize is always a valid Content-Length header");
+    headers.push(("content-length".into(), text));
+    value
 }
 
 /// Point a request at a Map Remote target: swap in the rewritten absolute URI
@@ -866,11 +1336,19 @@ fn remap_request_target(parts: &mut hudsucker::hyper::http::request::Parts, targ
 /// Apply rule-supplied `set_headers` (a request-phase rewrite) to the wire request.
 fn apply_set_headers(headers: &mut HeaderMap, set_headers: &[(String, String)]) {
     for (k, v) in set_headers {
-        if let (Ok(name), Ok(val)) =
-            (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v))
-        {
+        if let (Ok(name), Ok(val)) = (
+            HeaderName::from_bytes(k.as_bytes()),
+            HeaderValue::from_str(v),
+        ) {
             headers.insert(name, val);
         }
+    }
+}
+
+fn apply_set_header_pairs(headers: &mut Vec<(String, String)>, set_headers: &[(String, String)]) {
+    for (name, value) in set_headers {
+        remove_header_ci(headers, name);
+        headers.push((name.clone(), value.clone()));
     }
 }
 
@@ -878,6 +1356,30 @@ fn apply_set_headers(headers: &mut HeaderMap, set_headers: &[(String, String)]) 
 mod tests {
     use super::*;
     use http_body_util::BodyExt;
+
+    #[test]
+    fn rule_request_header_edits_are_reflected_in_the_captured_copy() {
+        let mut headers = vec![
+            ("X-Test".into(), "old-a".into()),
+            ("x-test".into(), "old-b".into()),
+            ("x-keep".into(), "yes".into()),
+        ];
+        apply_set_header_pairs(
+            &mut headers,
+            &[
+                ("X-Test".into(), "new".into()),
+                ("X-Added".into(), "1".into()),
+            ],
+        );
+        assert_eq!(
+            headers,
+            vec![
+                ("x-keep".into(), "yes".into()),
+                ("X-Test".into(), "new".into()),
+                ("X-Added".into(), "1".into()),
+            ]
+        );
+    }
 
     #[test]
     fn apply_response_effects_sets_replaces_adds_removes_and_status() {
@@ -909,14 +1411,23 @@ mod tests {
             .collect();
         assert_eq!(content_types.len(), 1);
         assert_eq!(content_types[0].1, "application/json");
-        assert!(captured.headers.iter().any(|(k, v)| k == "set-cookie" && v == "a=1"));
-        assert!(!captured.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("x-drop")));
+        assert!(captured
+            .headers
+            .iter()
+            .any(|(k, v)| k == "set-cookie" && v == "a=1"));
+        assert!(!captured
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("x-drop")));
     }
 
     #[test]
     fn apply_request_effects_mutates_wire_and_capture_together() {
         let mut wire = HeaderMap::new();
-        wire.insert(HeaderName::from_static("x-old"), HeaderValue::from_static("1"));
+        wire.insert(
+            HeaderName::from_static("x-old"),
+            HeaderValue::from_static("1"),
+        );
         let mut captured = vec![("x-old".to_string(), "1".to_string())];
         let effects = Effects {
             header_ops: vec![
@@ -934,6 +1445,96 @@ mod tests {
     }
 
     #[test]
+    fn invalid_script_headers_do_not_desynchronize_request_capture_from_wire() {
+        let mut wire = HeaderMap::new();
+        wire.insert(
+            HeaderName::from_static("x-keep"),
+            HeaderValue::from_static("original"),
+        );
+        let mut captured = vec![("x-keep".to_string(), "original".to_string())];
+        apply_request_effects(
+            &mut wire,
+            &mut captured,
+            Effects {
+                header_ops: vec![
+                    HeaderOp::Set("x-keep".into(), "bad\nvalue".into()),
+                    HeaderOp::Add("bad header".into(), "value".into()),
+                    HeaderOp::Remove("bad header".into()),
+                ],
+                status: None,
+            },
+        );
+
+        assert_eq!(
+            wire.get("x-keep").and_then(|value| value.to_str().ok()),
+            Some("original")
+        );
+        assert_eq!(captured, vec![("x-keep".into(), "original".into())]);
+    }
+
+    #[test]
+    fn invalid_script_headers_are_not_recorded_on_responses() {
+        let mut captured = CapturedResponse {
+            status: 200,
+            version: "HTTP/1.1".into(),
+            headers: vec![("x-keep".into(), "original".into())],
+            body: Bytes::new(),
+            timestamp_ms: 0,
+        };
+        apply_response_effects(
+            &mut captured,
+            Effects {
+                header_ops: vec![
+                    HeaderOp::Set("x-keep".into(), "bad\nvalue".into()),
+                    HeaderOp::Add("bad header".into(), "value".into()),
+                    HeaderOp::Remove("bad header".into()),
+                ],
+                status: None,
+            },
+        );
+
+        assert_eq!(captured.headers, vec![("x-keep".into(), "original".into())]);
+    }
+
+    #[test]
+    fn request_framing_restores_original_values_and_drops_consumed_trailers() {
+        let mut original = HeaderMap::new();
+        original.insert(CONTENT_LENGTH, HeaderValue::from_static("12"));
+        original.insert(TRAILER, HeaderValue::from_static("x-checksum"));
+        let original_pairs = header_pairs(&original);
+
+        let mut wire = HeaderMap::new();
+        wire.insert(CONTENT_LENGTH, HeaderValue::from_static("1"));
+        wire.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        wire.insert(TRAILER, HeaderValue::from_static("x-scripted"));
+        restore_wire_framing(&mut wire, &original, false);
+        assert_eq!(
+            wire.get(CONTENT_LENGTH),
+            Some(&HeaderValue::from_static("12"))
+        );
+        assert!(wire.get(TRANSFER_ENCODING).is_none());
+        assert!(wire.get(TRAILER).is_none());
+
+        let mut captured = vec![
+            ("content-length".into(), "1".into()),
+            ("transfer-encoding".into(), "chunked".into()),
+            ("trailer".into(), "x-scripted".into()),
+        ];
+        restore_message_framing(&mut captured, &original_pairs, false);
+        assert_eq!(header_values(&captured, "content-length"), vec!["12"]);
+        assert!(header_values(&captured, "transfer-encoding").is_empty());
+        assert!(header_values(&captured, "trailer").is_empty());
+    }
+
+    #[test]
+    fn streamed_message_preserves_the_original_trailer_declaration() {
+        let original = vec![("trailer".into(), "x-checksum".into())];
+        let mut captured = vec![("trailer".into(), "x-scripted".into())];
+        restore_message_framing(&mut captured, &original, true);
+        assert_eq!(header_values(&captured, "trailer"), vec!["x-checksum"]);
+    }
+
+    #[test]
     fn remap_request_target_rewrites_uri_and_host() {
         let (mut parts, ()) = Request::builder()
             .uri("https://cdn.example.com/agent_abc_123.js")
@@ -942,7 +1543,10 @@ mod tests {
             .expect("request")
             .into_parts();
         remap_request_target(&mut parts, "http://localhost:8080/ajax/agent_abc_1.js");
-        assert_eq!(parts.uri.to_string(), "http://localhost:8080/ajax/agent_abc_1.js");
+        assert_eq!(
+            parts.uri.to_string(),
+            "http://localhost:8080/ajax/agent_abc_1.js"
+        );
         assert_eq!(
             parts.headers.get(HOST).and_then(|v| v.to_str().ok()),
             Some("localhost:8080")
@@ -960,12 +1564,60 @@ mod tests {
         assert_eq!(parts.uri.to_string(), "https://cdn.example.com/x");
     }
 
+    #[test]
+    fn captured_https_origin_form_has_an_absolute_url() {
+        let (parts, ()) = Request::builder()
+            .uri("/api/items?q=1")
+            .header(HOST, "api.example.com:8443")
+            .body(())
+            .expect("request")
+            .into_parts();
+
+        let captured = captured_request(&parts, "api.example.com:8443".to_string(), Bytes::new());
+
+        assert_eq!(captured.scheme, "https");
+        assert_eq!(captured.path, "/api/items?q=1");
+        assert_eq!(captured.uri, "https://api.example.com:8443/api/items?q=1");
+    }
+
+    #[test]
+    fn captured_plain_proxy_request_keeps_its_absolute_url() {
+        let (parts, ()) = Request::builder()
+            .uri("http://api.example.com:8080/api/items?q=1")
+            .body(())
+            .expect("request")
+            .into_parts();
+
+        let captured = captured_request(&parts, "api.example.com:8080".to_string(), Bytes::new());
+
+        assert_eq!(captured.scheme, "http");
+        assert_eq!(captured.uri, "http://api.example.com:8080/api/items?q=1");
+    }
+
+    #[test]
+    fn reset_content_status_is_bodyless() {
+        assert!(response_has_no_body("GET", 205));
+        assert!(status_forbids_metadata(205));
+    }
+
     #[tokio::test]
     async fn buffer_capped_small_body_is_fully_captured() {
         let (captured, forward, complete) = buffer_capped(Body::from(vec![1u8, 2, 3]), 64).await;
         assert_eq!(captured, vec![1, 2, 3]);
-        assert!(forward.is_none(), "body within the cap needs no streaming forward");
+        assert!(
+            forward.is_none(),
+            "body within the cap needs no streaming forward"
+        );
         assert!(complete, "a clean small body is complete");
+    }
+
+    #[tokio::test]
+    async fn buffer_capped_exact_limit_is_fully_captured() {
+        let data = vec![b'x'; 64];
+        let (captured, forward, complete) = buffer_capped(Body::from(data.clone()), 64).await;
+        assert_eq!(captured, data);
+        assert!(forward.is_none(), "a body exactly at the cap is complete");
+        assert!(complete);
     }
 
     #[tokio::test]
@@ -974,7 +1626,10 @@ mod tests {
         let (captured, forward, complete) = buffer_capped(Body::from(data.clone()), 40).await;
         // Capture is capped...
         assert_eq!(captured.len(), 40);
-        assert!(complete, "an over-cap body that streamed cleanly is complete");
+        assert!(
+            complete,
+            "an over-cap body that streamed cleanly is complete"
+        );
         // ...but the body forwarded onward is the FULL, untruncated content.
         let full = forward
             .expect("oversized body returns a streaming forward")
@@ -1006,7 +1661,9 @@ mod tests {
             }
             if !me.errored {
                 me.errored = true;
-                return Poll::Ready(Some(Err(Error::from(std::io::Error::other("upstream reset")))));
+                return Poll::Ready(Some(Err(Error::from(std::io::Error::other(
+                    "upstream reset",
+                )))));
             }
             Poll::Ready(None)
         }
@@ -1049,7 +1706,11 @@ mod tests {
         max_flows: usize,
         responder: crate::rules::AutoResponder,
     ) -> Arc<Shared> {
-        Shared::new(max_flows, responder, crate::settings::ProxySettings::default())
+        Shared::new(
+            max_flows,
+            responder,
+            crate::settings::ProxySettings::default(),
+        )
     }
 
     fn responder_with(action: crate::rules::Action) -> crate::rules::AutoResponder {
@@ -1081,6 +1742,7 @@ mod tests {
             start: Instant::now(),
             rule: None,
             request,
+            request_body_complete: true,
         }
     }
 
@@ -1098,15 +1760,363 @@ mod tests {
         handler.inflight = Some(inflight_for("f1", test_request()));
         // Cap 1: a second pending capture evicts "f1" before its response arrives.
         shared.record_new(pending_flow("f2"));
-        assert!(shared.store.lock().unwrap().get("f1").is_none(), "f1 must be evicted");
+        assert!(
+            shared.store.lock().unwrap().get("f1").is_none(),
+            "f1 must be evicted"
+        );
 
-        let res = Response::builder().status(200).body(Body::from("hi")).expect("response");
+        let res = Response::builder()
+            .status(200)
+            .body(Body::from("hi"))
+            .expect("response");
         let out = handler.process_response(res).await;
         assert_eq!(
             out.headers().get("x-rule").and_then(|v| v.to_str().ok()),
             Some("on"),
             "response-phase rules must still apply to an evicted flow's response"
         );
+    }
+
+    #[tokio::test]
+    async fn declared_oversized_response_still_applies_metadata_rules() {
+        let shared = shared_with_responder(
+            10,
+            responder_with(crate::rules::Action::SetResponseHeader {
+                name: "x-large-rule".into(),
+                value: "applied".into(),
+            }),
+        );
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+
+        let res = Response::builder()
+            .status(200)
+            .header(CONTENT_LENGTH, (MAX_CAPTURE_BODY + 1).to_string())
+            .body(Body::from("wire bytes"))
+            .expect("response");
+        let out = handler.process_response(res).await;
+        assert_eq!(
+            out.headers()
+                .get("x-large-rule")
+                .and_then(|value| value.to_str().ok()),
+            Some("applied")
+        );
+        assert_eq!(out.collect().await.expect("body").to_bytes(), "wire bytes");
+    }
+
+    #[tokio::test]
+    async fn declared_oversized_response_still_runs_response_scripts() {
+        let shared = test_shared(10);
+        shared
+            .scripts
+            .write()
+            .expect("scripts")
+            .set_scripts(vec![crate::scripting::Script {
+                id: "large".into(),
+                name: "large".into(),
+                enabled: true,
+                source: r#"fn on_response(req, res) { res.set_header("x-script", "applied"); }"#
+                    .into(),
+            }]);
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+        let res = Response::builder()
+            .header(CONTENT_LENGTH, (MAX_CAPTURE_BODY + 1).to_string())
+            .body(Body::from("wire bytes"))
+            .expect("response");
+        let out = handler.process_response(res).await;
+        assert_eq!(
+            out.headers()
+                .get("x-script")
+                .and_then(|value| value.to_str().ok()),
+            Some("applied")
+        );
+    }
+
+    #[tokio::test]
+    async fn streamed_response_keeps_original_framing_after_script_edits() {
+        let shared = test_shared(10);
+        shared
+            .scripts
+            .write()
+            .expect("scripts")
+            .set_scripts(vec![crate::scripting::Script {
+                id: "framing".into(),
+                name: "framing".into(),
+                enabled: true,
+                source: r#"fn on_response(req, res) {
+                    res.set_header("content-length", "1");
+                    res.set_header("transfer-encoding", "chunked");
+                }"#
+                .into(),
+            }]);
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+        let original_length = (MAX_CAPTURE_BODY + 1).to_string();
+        let response = Response::builder()
+            .header(CONTENT_LENGTH, &original_length)
+            .body(Body::from("wire bytes"))
+            .expect("response");
+
+        let out = handler.process_response(response).await;
+
+        assert_eq!(
+            out.headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok()),
+            Some(original_length.as_str())
+        );
+        assert!(out.headers().get("transfer-encoding").is_none());
+        let recorded = shared
+            .store
+            .lock()
+            .expect("store")
+            .get("f1")
+            .and_then(|flow| flow.response.clone())
+            .expect("recorded response");
+        assert_eq!(
+            header_values(&recorded.headers, "content-length"),
+            vec![original_length.as_str()]
+        );
+        assert!(header_values(&recorded.headers, "transfer-encoding").is_empty());
+    }
+
+    #[tokio::test]
+    async fn buffered_body_rewrite_normalizes_wire_and_recorded_framing() {
+        let shared = shared_with_responder(
+            10,
+            responder_with(crate::rules::Action::RewriteResponseBody {
+                find: "old".into(),
+                replace: "a longer body".into(),
+                regex: false,
+            }),
+        );
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+        let response = Response::builder()
+            .header(CONTENT_LENGTH, "3")
+            .header(TRAILER, "x-checksum")
+            .body(Body::from("old"))
+            .expect("response");
+
+        let out = handler.process_response(response).await;
+        assert_eq!(
+            out.headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok()),
+            Some("13")
+        );
+        assert!(out.headers().get(TRANSFER_ENCODING).is_none());
+        assert!(out.headers().get(TRAILER).is_none());
+        assert_eq!(
+            out.collect().await.expect("body").to_bytes(),
+            "a longer body"
+        );
+
+        let recorded = shared
+            .store
+            .lock()
+            .expect("store")
+            .get("f1")
+            .and_then(|flow| flow.response.clone())
+            .expect("recorded response");
+        assert_eq!(
+            header_values(&recorded.headers, "content-length"),
+            vec!["13"]
+        );
+        assert!(header_values(&recorded.headers, "transfer-encoding").is_empty());
+        assert!(header_values(&recorded.headers, "trailer").is_empty());
+    }
+
+    #[tokio::test]
+    async fn incomplete_stream_still_applies_metadata_rules_and_propagates_error() {
+        let shared = shared_with_responder(
+            10,
+            responder_with(crate::rules::Action::SetResponseHeader {
+                name: "x-incomplete-rule".into(),
+                value: "applied".into(),
+            }),
+        );
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+        let body = Body::from(BoxBody::new(ErrAfter {
+            data: Some(Bytes::from_static(b"prefix")),
+            errored: false,
+        }));
+        let out = handler
+            .process_response(Response::builder().body(body).expect("response"))
+            .await;
+        assert_eq!(
+            out.headers()
+                .get("x-incomplete-rule")
+                .and_then(|value| value.to_str().ok()),
+            Some("applied")
+        );
+        assert!(
+            out.collect().await.is_err(),
+            "the upstream stream error must still reach the client"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_response_skips_body_rewrite_without_spending_fire_limit() {
+        let mut action = responder_with(crate::rules::Action::RewriteResponseBody {
+            find: "wire".into(),
+            replace: "changed".into(),
+            regex: false,
+        });
+        action.scenarios[1].rules[0].fire_limit = Some(1);
+        let shared = shared_with_responder(10, action);
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+        let res = Response::builder()
+            .header(CONTENT_LENGTH, (MAX_CAPTURE_BODY + 1).to_string())
+            .body(Body::from("wire bytes"))
+            .expect("response");
+        let out = handler.process_response(res).await;
+        assert_eq!(out.collect().await.expect("body").to_bytes(), "wire bytes");
+        assert_eq!(
+            shared
+                .cursors
+                .lock()
+                .expect("cursors")
+                .snapshot()
+                .get("r")
+                .copied(),
+            None,
+            "an unsafe skipped rewrite must remain eligible for a later buffered response"
+        );
+    }
+
+    #[tokio::test]
+    async fn rewriting_304_to_200_does_not_restore_the_304_resource_length() {
+        let shared = shared_with_responder(
+            10,
+            responder_with(crate::rules::Action::SetStatus { status: 200 }),
+        );
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+        let res = Response::builder()
+            .status(304)
+            .header(CONTENT_LENGTH, "5000")
+            .body(Body::empty())
+            .expect("response");
+        let out = handler.process_response(res).await;
+        assert_eq!(out.status().as_u16(), 200);
+        assert_ne!(
+            out.headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok()),
+            Some("5000")
+        );
+        assert!(out.collect().await.expect("body").to_bytes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn streaming_304_rewritten_to_200_drops_stale_framing_from_wire_and_capture() {
+        let shared = shared_with_responder(
+            10,
+            responder_with(crate::rules::Action::SetStatus { status: 200 }),
+        );
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+        let res = Response::builder()
+            .status(304)
+            .header(CONTENT_LENGTH, (MAX_CAPTURE_BODY + 1).to_string())
+            .header(TRANSFER_ENCODING, "chunked")
+            .body(Body::empty())
+            .expect("response");
+
+        let out = handler.process_response(res).await;
+        assert_eq!(out.status().as_u16(), 200);
+        assert!(out.headers().get(CONTENT_LENGTH).is_none());
+        assert!(out.headers().get(TRANSFER_ENCODING).is_none());
+        let recorded = shared
+            .store
+            .lock()
+            .expect("store")
+            .get("f1")
+            .and_then(|flow| flow.response.clone())
+            .expect("recorded response");
+        assert!(header_values(&recorded.headers, "content-length").is_empty());
+        assert!(header_values(&recorded.headers, "transfer-encoding").is_empty());
+    }
+
+    #[tokio::test]
+    async fn rewriting_200_to_304_drops_body_and_reports_representation_length() {
+        let shared = shared_with_responder(
+            10,
+            responder_with(crate::rules::Action::SetStatus { status: 304 }),
+        );
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+        let res = Response::builder()
+            .status(200)
+            .body(Body::from("hello"))
+            .expect("response");
+        let out = handler.process_response(res).await;
+        assert_eq!(out.status().as_u16(), 304);
+        assert_eq!(
+            out.headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok()),
+            Some("5")
+        );
+        assert!(out.collect().await.expect("body").to_bytes().is_empty());
+        let recorded = shared
+            .store
+            .lock()
+            .expect("store")
+            .get("f1")
+            .and_then(|flow| flow.response.clone())
+            .expect("recorded response");
+        assert!(
+            recorded.body.is_empty(),
+            "the inspector must match the bodyless wire response"
+        );
+        assert_eq!(
+            header_values(&recorded.headers, "content-length"),
+            vec!["5"]
+        );
+        assert!(header_values(&recorded.headers, "transfer-encoding").is_empty());
+    }
+
+    #[tokio::test]
+    async fn rewriting_large_response_to_204_cancels_stream_and_drops_length() {
+        let shared = shared_with_responder(
+            10,
+            responder_with(crate::rules::Action::SetStatus { status: 204 }),
+        );
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+        let res = Response::builder()
+            .status(200)
+            .header(CONTENT_LENGTH, (MAX_CAPTURE_BODY + 1).to_string())
+            .body(Body::from("must not escape"))
+            .expect("response");
+        let out = handler.process_response(res).await;
+        assert_eq!(out.status().as_u16(), 204);
+        assert!(out.headers().get(CONTENT_LENGTH).is_none());
+        assert!(out.collect().await.expect("body").to_bytes().is_empty());
+        let recorded = shared
+            .store
+            .lock()
+            .expect("store")
+            .get("f1")
+            .and_then(|flow| flow.response.clone())
+            .expect("recorded response");
+        assert!(header_values(&recorded.headers, "content-length").is_empty());
+        assert!(header_values(&recorded.headers, "transfer-encoding").is_empty());
     }
 
     #[tokio::test]
@@ -1126,7 +2136,9 @@ mod tests {
             .expect("response");
         let out = handler.process_response(res).await;
         assert_eq!(
-            out.headers().get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()),
+            out.headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok()),
             Some("5000"),
             "HEAD's resource Content-Length must be restored even after eviction"
         );
@@ -1134,10 +2146,10 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_set_status_falls_back_to_200_keeping_headers() {
-        let shared =
-            shared_with_responder(10, responder_with(crate::rules::Action::SetStatus {
-                status: 1000,
-            }));
+        let shared = shared_with_responder(
+            10,
+            responder_with(crate::rules::Action::SetStatus { status: 1000 }),
+        );
         let mut handler = CaptureHandler::new(Arc::clone(&shared));
         shared.record_new(pending_flow("f1"));
         handler.inflight = Some(inflight_for("f1", test_request()));
@@ -1148,9 +2160,15 @@ mod tests {
             .body(Body::from("hi"))
             .expect("response");
         let out = handler.process_response(res).await;
-        assert_eq!(out.status().as_u16(), 200, "an out-of-range SetStatus falls back to 200");
         assert_eq!(
-            out.headers().get("x-upstream").and_then(|v| v.to_str().ok()),
+            out.status().as_u16(),
+            200,
+            "an out-of-range SetStatus falls back to 200"
+        );
+        assert_eq!(
+            out.headers()
+                .get("x-upstream")
+                .and_then(|v| v.to_str().ok()),
             Some("1"),
             "upstream headers must survive an invalid SetStatus"
         );
@@ -1182,14 +2200,18 @@ mod tests {
             ],
             body: b"{}".to_vec().into(),
         };
-        let out = handler.serve_synthetic("f1", "rule", synthetic, &req).await;
+        let out = handler
+            .serve_synthetic("f1", "rule", synthetic, &req, true)
+            .await;
         assert_eq!(
             out.headers().get("x-mock").and_then(|v| v.to_str().ok()),
             Some("1"),
             "configured headers must survive an invalid status"
         );
         assert_eq!(
-            out.headers().get("content-type").and_then(|v| v.to_str().ok()),
+            out.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
             Some("application/json"),
             "the dedicated content-type must survive an invalid status"
         );
@@ -1208,11 +2230,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_mock_headers_are_absent_from_both_wire_and_store() {
+        let shared = test_shared(10);
+        let handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        let synthetic = SyntheticResponse {
+            status: 200,
+            headers: vec![
+                ("x-valid".into(), "yes".into()),
+                ("bad header".into(), "value".into()),
+                ("x-invalid-value".into(), "bad\nvalue".into()),
+            ],
+            body: b"mock".to_vec().into(),
+        };
+
+        let out = handler
+            .serve_synthetic("f1", "rule", synthetic, &test_request(), true)
+            .await;
+        assert_eq!(
+            out.headers()
+                .get("x-valid")
+                .and_then(|value| value.to_str().ok()),
+            Some("yes")
+        );
+        assert!(out.headers().get("x-invalid-value").is_none());
+        let recorded = shared
+            .store
+            .lock()
+            .unwrap()
+            .get("f1")
+            .and_then(|flow| flow.response.clone())
+            .expect("recorded response");
+        assert_eq!(
+            recorded.headers,
+            vec![
+                ("x-valid".into(), "yes".into()),
+                ("content-length".into(), "4".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn mock_response_waits_for_the_configured_delay() {
         let shared = Shared::new(
             10,
             crate::rules::AutoResponder::default(),
-            crate::settings::ProxySettings { response_delay_ms: 60, ..Default::default() },
+            crate::settings::ProxySettings {
+                response_delay_ms: 60,
+                ..Default::default()
+            },
         );
         let handler = CaptureHandler::new(Arc::clone(&shared));
         shared.record_new(pending_flow("f1"));
@@ -1222,7 +2288,9 @@ mod tests {
             body: b"mock".to_vec().into(),
         };
         let start = Instant::now();
-        let _ = handler.serve_synthetic("f1", "rule", synthetic, &test_request()).await;
+        let _ = handler
+            .serve_synthetic("f1", "rule", synthetic, &test_request(), true)
+            .await;
         assert!(
             start.elapsed() >= Duration::from_millis(60),
             "a mocked response must honor the response-delay throttle"
@@ -1240,7 +2308,9 @@ mod tests {
             body: b"mock".to_vec().into(),
         };
         let start = Instant::now();
-        let _ = handler.serve_synthetic("f1", "rule", synthetic, &test_request()).await;
+        let _ = handler
+            .serve_synthetic("f1", "rule", synthetic, &test_request(), true)
+            .await;
         assert!(
             start.elapsed() < Duration::from_secs(1),
             "the default zero delay must not slow the mock path down"
@@ -1268,7 +2338,9 @@ mod tests {
         handler.inflight = Some(inflight_for("f1", test_request()));
         let out = handler.process_response(obs_text_response()).await;
         assert_eq!(
-            out.headers().get("content-disposition").map(HeaderValue::as_bytes),
+            out.headers()
+                .get("content-disposition")
+                .map(HeaderValue::as_bytes),
             Some(LATIN1_DISPOSITION),
             "untouched obs-text header bytes must never degrade on the wire"
         );
@@ -1293,7 +2365,9 @@ mod tests {
             "the rule's header must land on the wire"
         );
         assert_eq!(
-            out.headers().get("content-disposition").map(HeaderValue::as_bytes),
+            out.headers()
+                .get("content-disposition")
+                .map(HeaderValue::as_bytes),
             Some(LATIN1_DISPOSITION),
             "an unrelated rule edit must not degrade obs-text bytes elsewhere"
         );
@@ -1313,10 +2387,41 @@ mod tests {
         handler.inflight = Some(inflight_for("f1", test_request()));
         let out = handler.process_response(obs_text_response()).await;
         assert_eq!(
-            out.headers().get("content-disposition").map(HeaderValue::as_bytes),
+            out.headers()
+                .get("content-disposition")
+                .map(HeaderValue::as_bytes),
             Some(b"inline".as_slice()),
             "a rule that rewrites the header must win with its new value"
         );
+    }
+
+    #[tokio::test]
+    async fn appending_a_header_preserves_existing_obs_text_bytes() {
+        let shared = test_shared(10);
+        shared
+            .scripts
+            .write()
+            .expect("scripts")
+            .set_scripts(vec![crate::scripting::Script {
+            id: "append".into(),
+            name: "append".into(),
+            enabled: true,
+            source:
+                r#"fn on_response(req, res) { res.add_header("content-disposition", "inline"); }"#
+                    .into(),
+        }]);
+        let mut handler = CaptureHandler::new(Arc::clone(&shared));
+        shared.record_new(pending_flow("f1"));
+        handler.inflight = Some(inflight_for("f1", test_request()));
+
+        let out = handler.process_response(obs_text_response()).await;
+        let values = out
+            .headers()
+            .get_all("content-disposition")
+            .iter()
+            .map(HeaderValue::as_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![LATIN1_DISPOSITION, b"inline"]);
     }
 
     #[tokio::test]
@@ -1326,7 +2431,11 @@ mod tests {
             errored: false,
         }));
         let (captured, forward, complete) = buffer_capped(body, 1024).await;
-        assert_eq!(captured, b"partial".as_slice(), "the prefix before the error is captured");
+        assert_eq!(
+            captured,
+            b"partial".as_slice(),
+            "the prefix before the error is captured"
+        );
         assert!(!complete, "a mid-body error marks the capture incomplete");
         // The forwarded body must surface the error (not end cleanly), so the
         // client sees a failed transfer rather than a falsely-complete response.
@@ -1334,6 +2443,9 @@ mod tests {
             .expect("an errored body returns a forward that propagates the error")
             .collect()
             .await;
-        assert!(err.is_err(), "the forwarded body propagates the upstream error");
+        assert!(
+            err.is_err(),
+            "the forwarded body propagates the upstream error"
+        );
     }
 }

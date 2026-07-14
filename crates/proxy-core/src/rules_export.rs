@@ -201,6 +201,7 @@ mod tests {
                 status: 201,
                 headers: vec![("x-test".to_string(), "1".to_string())],
                 body: "{\"a\":1}".to_string(),
+                body_base64: None,
                 content_type: Some("application/json".to_string()),
                 content_encoding: None,
             },
@@ -264,12 +265,16 @@ mod tests {
                 content_type,
                 headers,
                 content_encoding,
+                ..
             } => {
                 assert_eq!(*status, 201);
                 assert_eq!(body, "{\"a\":1}");
                 assert_eq!(content_type.as_deref(), Some("application/json"));
                 assert_eq!(headers, &vec![("x-test".to_string(), "1".to_string())]);
-                assert_eq!(*content_encoding, None, "identity toggle round-trips as None");
+                assert_eq!(
+                    *content_encoding, None,
+                    "identity toggle round-trips as None"
+                );
             }
             other => panic!("expected Respond, got {other:?}"),
         }
@@ -369,6 +374,7 @@ mod tests {
                 status: 418,
                 headers: vec![("x-a".into(), "1".into()), ("x-b".into(), "2".into())],
                 body: "teapot".into(),
+                body_base64: None,
                 content_type: Some("text/plain".into()),
                 content_encoding: None,
             }),
@@ -397,7 +403,7 @@ mod tests {
 
         assert!(matches!(
             &back[0].rules[0].action,
-            Action::Respond { status: 418, body, content_type, headers, content_encoding: None }
+            Action::Respond { status: 418, body, content_type, headers, content_encoding: None, .. }
                 if body == "teapot"
                     && content_type.as_deref() == Some("text/plain")
                     && headers.len() == 2
@@ -437,9 +443,13 @@ mod tests {
             url: r"^https://api\.test/v\d+/".into(),
             url_match: MatchKind::Regex,
         };
-        let back = parse_rules(&export_rules(&[scenario("sc", "S", vec![rule])])).expect("round-trip");
+        let back =
+            parse_rules(&export_rules(&[scenario("sc", "S", vec![rule])])).expect("round-trip");
         let r = &back[0].rules[0];
-        assert!(!r.enabled, "a disabled rule must stay disabled across export/import");
+        assert!(
+            !r.enabled,
+            "a disabled rule must stay disabled across export/import"
+        );
         assert_eq!(r.fire_limit, None);
         assert!(!r.repeat);
         assert_eq!(r.matcher.method.as_deref(), Some("DELETE"));
@@ -456,6 +466,7 @@ mod tests {
             status: 200,
             headers: vec![],
             body: "{\"ok\":true}".into(),
+            body_base64: None,
             content_type: Some("application/json".into()),
             content_encoding: Some("gzip".into()),
         })];
@@ -490,7 +501,27 @@ mod tests {
         let back = parse_rules(bytes).expect("older bundle parses via serde default");
         assert!(matches!(
             &back[0].rules[0].action,
-            Action::Respond { content_encoding: None, .. }
+            Action::Respond {
+                content_encoding: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn binary_respond_body_round_trips_with_legacy_text_preview() {
+        let scenarios = vec![one_rule_scenario(Action::Respond {
+            status: 200,
+            headers: vec![],
+            body: "� preview".into(),
+            body_base64: Some("AP/+gA==".into()),
+            content_type: Some("application/octet-stream".into()),
+            content_encoding: None,
+        })];
+        let parsed = parse_rules(&export_rules(&scenarios)).expect("round trip");
+        assert!(matches!(
+            &parsed[0].rules[0].action,
+            Action::Respond { body_base64: Some(encoded), .. } if encoded == "AP/+gA=="
         ));
     }
 
@@ -503,7 +534,10 @@ mod tests {
         })];
         let json = String::from_utf8(export_rules(&scenarios)).expect("utf8 json");
 
-        assert!(json.contains("\"version\""), "bundle carries a version field");
+        assert!(
+            json.contains("\"version\""),
+            "bundle carries a version field"
+        );
         assert!(
             json.contains("\"fireLimit\""),
             "snake_case rule fields must serialize as camelCase (fireLimit)"
@@ -551,7 +585,10 @@ mod tests {
         assert_eq!(r.matcher.method, None);
         assert_eq!(r.matcher.url_match, MatchKind::Contains);
         assert!(matches!(r.action, Action::Block));
-        assert_ne!(r.id, "hr", "even a hand-authored rule id is re-keyed on import");
+        assert_ne!(
+            r.id, "hr",
+            "even a hand-authored rule id is re-keyed on import"
+        );
     }
 
     #[test]
@@ -590,8 +627,14 @@ mod tests {
     #[test]
     fn preview_rejects_unusable_bundles() {
         let newer = br#"{"version":99,"scenarios":[{"id":"a","name":"N","rules":[]}]}"#;
-        assert!(preview_rules(newer).is_none(), "newer format is not offered");
-        assert!(preview_rules(br#"{"version":1,"scenarios":[]}"#).is_none(), "nothing to import");
+        assert!(
+            preview_rules(newer).is_none(),
+            "newer format is not offered"
+        );
+        assert!(
+            preview_rules(br#"{"version":1,"scenarios":[]}"#).is_none(),
+            "nothing to import"
+        );
         assert!(preview_rules(b"junk").is_none());
     }
 

@@ -1,14 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { api } from "../ipc";
 import { ruleLabel } from "../autoresponderState";
 import type { HistoryTag, Rule } from "../types";
 import {
-  currentWindowLabel,
-  emitRuleWindowClosed,
+  currentRuleWindowLabel,
   emitRuleWindowResized,
   emitRulesChanged,
+  onRuleWindowsFlushRequested,
   onRulesChanged,
 } from "../ruleWindows";
 import { RuleEditor, useSelectedRule } from "./AutoresponderPanel";
@@ -49,24 +49,34 @@ function useRememberWindowSize(): void {
  *  broadcasts ruleId=null (reload-all); another window's save to a different rule
  *  is ignored so it can't clobber this window's in-progress typing. Own broadcasts
  *  are skipped via `source`. */
-function useExternalReloadToken(label: string, ruleId: string): number {
+function useExternalReloadToken(
+  label: string,
+  ruleId: string,
+  onError: (error: unknown) => void,
+): { reloadToken: number; ready: boolean } {
   const [reloadToken, setReloadToken] = useState(0);
+  const [ready, setReady] = useState(false);
   useEffect(() => {
     let active = true;
     let unlisten: (() => void) | undefined;
+    setReady(false);
     void onRulesChanged((p) => {
       if (p.source === label) return;
       if (p.ruleId === null || p.ruleId === ruleId) setReloadToken((t) => t + 1);
-    }).then((fn) => {
-      if (active) unlisten = fn;
-      else fn();
-    });
+    })
+      .then((fn) => {
+        if (active) {
+          unlisten = fn;
+          setReady(true);
+        } else fn();
+      })
+      .catch(onError);
     return () => {
       active = false;
       unlisten?.();
     };
-  }, [label, ruleId]);
-  return reloadToken;
+  }, [label, onError, ruleId]);
+  return { reloadToken, ready };
 }
 
 /** Live fire-count for this rule so the detached editor's "n/N fired" badge is
@@ -76,13 +86,16 @@ function useRuleHitCount(ruleId: string, reloadToken: number): number {
   const [hits, setHits] = useState(0);
   useEffect(() => {
     let active = true;
-    const poll = () =>
+    let generation = 0;
+    const poll = () => {
+      const request = ++generation;
       void api
         .ruleHits()
         .then((all) => {
-          if (active) setHits(all[ruleId] ?? 0);
+          if (active && request === generation) setHits(all[ruleId] ?? 0);
         })
         .catch(() => {});
+    };
     poll();
     const timer = window.setInterval(poll, 1500);
     return () => {
@@ -102,62 +115,123 @@ function useDetailWindowClose(
   editor: Editor,
   setError: (msg: string) => void,
 ) {
-  const closing = useRef(false);
+  const closeTaskRef = useRef<Promise<boolean> | null>(null);
+  const [closing, setClosing] = useState(false);
+  const [ready, setReady] = useState(false);
   // Reassigned each render so the once-mounted listeners flush the latest edit.
-  const closeRef = useRef<() => Promise<void>>(async () => {});
-  closeRef.current = async () => {
-    if (closing.current) return;
-    closing.current = true;
-    try {
+  const closeRef = useRef<() => Promise<boolean>>(() => Promise.resolve(false));
+
+  function beginClose(operation: () => Promise<void>, failureMessage: string): Promise<boolean> {
+    const active = closeTaskRef.current;
+    if (active) return active;
+    setClosing(true);
+    const task = operation().then(
+      () => true,
+      (error: unknown) => {
+        setError(`${failureMessage} (${error}). The editor was left open so you can retry.`);
+        return false;
+      },
+    );
+    closeTaskRef.current = task;
+    void task.then((closed) => {
+      if (closeTaskRef.current !== task || closed) return;
+      closeTaskRef.current = null;
+      setClosing(false);
+    });
+    return task;
+  }
+
+  closeRef.current = () => {
+    return beginClose(async () => {
       await editor.flush();
-    } catch {
-      /* best-effort flush on close */
-    }
-    emitRuleWindowClosed(ruleId);
-    await getCurrentWindow().destroy();
+      await getCurrentWindow().destroy();
+    }, "Rule changes could not be saved or the window could not close");
   };
+  const close = useCallback(() => closeRef.current(), []);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape" && !e.defaultPrevented) {
         e.preventDefault();
-        void closeRef.current();
+        void close();
       }
     }
     window.addEventListener("keydown", onKey);
     let active = true;
     let unlisten: (() => void) | undefined;
+    setReady(false);
     void getCurrentWindow()
       .onCloseRequested((e) => {
         e.preventDefault();
-        void closeRef.current();
+        void close();
       })
       .then((fn) => {
-        if (active) unlisten = fn;
-        else fn();
-      });
+        if (active) {
+          unlisten = fn;
+          setReady(true);
+        } else fn();
+      })
+      .catch((error) => setError(String(error)));
     return () => {
       active = false;
       window.removeEventListener("keydown", onKey);
       unlisten?.();
     };
-  }, []);
+  }, [close, setError]);
 
-  return async function handleDelete() {
-    if (closing.current) return;
-    closing.current = true;
-    try {
+  async function handleDelete() {
+    await beginClose(async () => {
       editor.clearPending();
+      // A save that already entered IPC cannot be cancelled. Let it settle
+      // before submitting the delete so async Tauri command scheduling cannot
+      // reorder the stale update behind the deletion. Its failure is irrelevant
+      // here because deletion deliberately supersedes that editor snapshot.
+      await editor.flush().catch(() => {});
       await api.deleteRule(scenarioId, ruleId, {
         label: `Delete rule "${ruleLabel(editor.rule?.matcher.url ?? "")}"`,
       });
-      emitRuleWindowClosed(ruleId);
+      emitRulesChanged(currentRuleWindowLabel(), ruleId);
       await getCurrentWindow().destroy();
-    } catch (e) {
-      closing.current = false;
-      setError(String(e));
-    }
-  };
+    }, "The rule could not be deleted or the window could not close");
+  }
+
+  return { handleDelete, close, closing, ready };
+}
+
+function ruleEditorPlaceholder(editorReady: boolean, loading: boolean): string {
+  if (!editorReady) return "Connecting the detached editor…";
+  if (loading) return "Loading rule…";
+  return "Rule not found — it may have been deleted.";
+}
+
+function RuleWindowContent({
+  editorReady,
+  editor,
+  hits,
+  scenarioId,
+  onDelete,
+}: {
+  editorReady: boolean;
+  editor: Editor;
+  hits: number;
+  scenarioId: string;
+  onDelete: () => void;
+}) {
+  const rule = editor.rule;
+  if (!editorReady || !rule) {
+    return <div className="muted pad">{ruleEditorPlaceholder(editorReady, editor.loading)}</div>;
+  }
+
+  return (
+    <>
+      <RuleEditor rule={rule} hits={hits} onPatch={editor.patch} onDelete={onDelete} />
+      <RuleTester
+        scenarioId={scenarioId}
+        seedMethod={rule.matcher.method ?? undefined}
+        seedUrl={rule.matcher.url || undefined}
+      />
+    </>
+  );
 }
 
 /**
@@ -168,9 +242,10 @@ function useDetailWindowClose(
  * locked this rule's inline editor — stays in sync.
  */
 export function RuleDetailWindow({ ruleId, scenarioId }: { ruleId: string; scenarioId: string }) {
-  const label = currentWindowLabel();
+  const label = currentRuleWindowLabel();
   const [error, setError] = useState<string | null>(null);
-  const reloadToken = useExternalReloadToken(label, ruleId);
+  const reportError = useCallback((value: unknown) => setError(String(value)), []);
+  const { reloadToken, ready: syncReady } = useExternalReloadToken(label, ruleId, reportError);
 
   const load = (id: string): Promise<Rule | null> =>
     api.getRule(id).catch((e) => {
@@ -197,9 +272,44 @@ export function RuleDetailWindow({ ruleId, scenarioId }: { ruleId: string; scena
   };
 
   const editor = useSelectedRule(scenarioId, ruleId, load, update, reloadToken);
-  const handleDelete = useDetailWindowClose(ruleId, scenarioId, editor, setError);
+  const {
+    handleDelete,
+    close,
+    closing,
+    ready: closeReady,
+  } = useDetailWindowClose(ruleId, scenarioId, editor, setError);
   const hits = useRuleHitCount(ruleId, reloadToken);
   useRememberWindowSize();
+  const [flushReady, setFlushReady] = useState(false);
+  const flushEditor = editor.flush;
+
+  // The main window owns process exit. Register this editor in its shutdown
+  // barrier so an app close cannot terminate a pending debounced rule save.
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    setFlushReady(false);
+    void onRuleWindowsFlushRequested(ruleId, async (closeAfterFlush) => {
+      if (!closeAfterFlush) {
+        await flushEditor();
+        return;
+      }
+      if (!(await close())) throw new Error("The detached rule editor could not close safely.");
+    })
+      .then((fn) => {
+        if (active) {
+          unlisten = fn;
+          setFlushReady(true);
+        } else fn();
+      })
+      .catch((setupError) => setError(String(setupError)));
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [close, flushEditor, ruleId]);
+
+  const editorReady = syncReady && closeReady && flushReady;
 
   // Keep the OS window title in step with the rule's URL (rules have no name).
   const title = editor.rule ? ruleLabel(editor.rule.matcher.url) : "";
@@ -208,28 +318,16 @@ export function RuleDetailWindow({ ruleId, scenarioId }: { ruleId: string; scena
   }, [title]);
 
   return (
-    <div className="rule-window">
+    <div className="rule-window" inert={closing} aria-busy={closing}>
       {error && <div className="error-bar">{error}</div>}
       <div className="rule-window-body">
-        {editor.rule ? (
-          <RuleEditor
-            rule={editor.rule}
-            hits={hits}
-            onPatch={editor.patch}
-            onDelete={() => void handleDelete()}
-          />
-        ) : (
-          <div className="muted pad">
-            {editor.loading ? "Loading rule…" : "Rule not found — it may have been deleted."}
-          </div>
-        )}
-        {editor.rule && (
-          <RuleTester
-            scenarioId={scenarioId}
-            seedMethod={editor.rule.matcher.method ?? undefined}
-            seedUrl={editor.rule.matcher.url || undefined}
-          />
-        )}
+        <RuleWindowContent
+          editorReady={editorReady}
+          editor={editor}
+          hits={hits}
+          scenarioId={scenarioId}
+          onDelete={() => void handleDelete()}
+        />
       </div>
     </div>
   );

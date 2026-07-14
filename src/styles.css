@@ -416,6 +416,22 @@ textarea {
   min-width: 0;
   border-left: 1px solid var(--line);
 }
+.panel-slot {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+.panel-slot > .right-panel {
+  flex: 1;
+}
+.panel-slot > .panel-rail,
+.panel-slot.collapsed > .right-panel {
+  display: none;
+}
+.panel-slot.collapsed > .panel-rail {
+  display: flex;
+  flex: 1;
+}
 .right-header {
   display: flex;
   align-items: center;

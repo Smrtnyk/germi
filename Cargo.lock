@@ -1517,9 +1517,12 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "winapi",
+ "winreg 0.10.1",
 ]
 
 [[package]]
@@ -3300,9 +3303,12 @@ dependencies = [
  "rhai",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "x509-parser",
  "zip",
 ]
 

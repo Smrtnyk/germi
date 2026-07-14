@@ -61,7 +61,10 @@ export function popOutOpener(
 ): (ruleId: string) => void {
   return (ruleId) => {
     if (editor.rule?.id === ruleId) {
-      void editor.flush().then(() => open(viewedScenarioId, ruleId));
+      void editor
+        .flush()
+        .then(() => open(viewedScenarioId, ruleId))
+        .catch(() => {});
     } else {
       open(viewedScenarioId, ruleId);
     }
@@ -165,6 +168,20 @@ export function appendBulkRuleSummaries(
           ? { ...scenario, rules: [...scenario.rules, ...rules] }
           : scenario,
       )
-    : [...state.scenarios, { id: scenarioId, name: "My mocks", rules }];
-  return { ...state, scenarios, activeScenarioId: scenarioId };
+    : [
+        ...state.scenarios,
+        {
+          id: scenarioId,
+          name: scenarioId === GENERAL_SCENARIO_ID ? "General rules" : "My mocks",
+          rules,
+        },
+      ];
+  return {
+    ...state,
+    scenarios,
+    // General is a stacking layer and can never be the switchable active
+    // scenario. Keep the frontend summary aligned with the engine/SQLite
+    // transaction when a bulk drop targets it.
+    activeScenarioId: scenarioId === GENERAL_SCENARIO_ID ? state.activeScenarioId : scenarioId,
+  };
 }

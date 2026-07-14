@@ -56,13 +56,15 @@ impl PortalHotkey {
 
 #[cfg(target_os = "linux")]
 async fn run(app: AppHandle, trigger: String) -> ashpd::Result<()> {
-    use ashpd::desktop::CreateSessionOptions;
     use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, NewShortcut};
+    use ashpd::desktop::CreateSessionOptions;
     use futures_util::StreamExt;
     use tauri::Emitter;
 
     let shortcuts = GlobalShortcuts::new().await?;
-    let session = shortcuts.create_session(CreateSessionOptions::default()).await?;
+    let session = shortcuts
+        .create_session(CreateSessionOptions::default())
+        .await?;
     let shortcut =
         NewShortcut::new(SHORTCUT_ID, "Toggle the system proxy").preferred_trigger(Some(&*trigger));
     // Blocks until the compositor (and user, if it prompts) accepts the binding.
@@ -109,7 +111,11 @@ pub fn global_shortcut_mode() -> &'static str {
     {
         let wayland =
             std::env::var("XDG_SESSION_TYPE").is_ok_and(|v| v.eq_ignore_ascii_case("wayland"));
-        if wayland { "portal" } else { "plugin" }
+        if wayland {
+            "portal"
+        } else {
+            "plugin"
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -121,6 +127,10 @@ pub fn global_shortcut_mode() -> &'static str {
 /// unbinds it. No-op off Linux.
 #[tauri::command]
 pub fn apply_portal_hotkey(app: AppHandle, state: State<'_, AppState>, accel: String) {
-    let accel = if accel.trim().is_empty() { None } else { Some(accel) };
+    let accel = if accel.trim().is_empty() {
+        None
+    } else {
+        Some(accel)
+    };
     state.portal_hotkey.apply(&app, accel);
 }

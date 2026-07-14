@@ -36,12 +36,20 @@ tokio = { version = "=1.52.3", features = ["rt-multi-thread", "sync", "time", "m
 sysproxy = "=0.3.0"
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+tempfile = "=3.27.0"
 
 # Wayland global shortcuts go through the XDG GlobalShortcuts portal (the X11
 # grabs the global-shortcut plugin uses don't fire on Wayland). Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "=0.13.11", default-features = false, features = ["tokio", "global_shortcuts"] }
 futures-util = "=0.3.31"
+
+# `sysproxy` only accepts numeric `host:port` values on Windows. Read and
+# restore the underlying registry values ourselves so hostnames and
+# per-protocol proxy strings are preserved exactly.
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { version = "=0.3.9", features = ["wininet"] }
+winreg = { version = "=0.10.1", features = ["transactions"] }
 
 [features]
 # this feature is used for production builds or when a dev server is not specified,

@@ -25,8 +25,9 @@ pub enum GuardOutcome {
     Skipped,
     /// Another non-viewer Germi already holds the lock.
     AlreadyRunning,
-    /// The lock could not be set up; the caller should proceed unguarded
-    /// rather than break the primary instance.
+    /// The lock could not be set up. A writable instance must fail closed:
+    /// proceeding would make the single-writer guarantee unknowable and could
+    /// let two processes overwrite the shared settings/scripts/rules stores.
     Unavailable(io::Error),
 }
 
