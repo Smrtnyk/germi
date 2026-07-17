@@ -1,3 +1,17 @@
+import { useState } from "react";
+
+import type { ToastRecord } from "../toast";
+import { IconBell } from "./icons";
+import { NotificationHistoryDialog } from "./NotificationHistoryDialog";
+
+interface NotificationCenterProps {
+  history: readonly ToastRecord[];
+  unreadCount: number;
+  onMarkRead: (id: number) => void;
+  onMarkAllRead: () => void;
+  onClear: () => void;
+}
+
 interface Props {
   running: boolean;
   port: number;
@@ -11,8 +25,47 @@ interface Props {
   generalActive: boolean;
   onOpenPalette: () => void;
   onShowShortcuts: () => void;
+  notifications: NotificationCenterProps;
   /** Pretty label of the configurable command-palette shortcut, for the tooltip. */
   paletteAccel: string;
+}
+
+function NotificationBell({ unreadCount, onOpen }: { unreadCount: number; onOpen: () => void }) {
+  const suffix = unreadCount > 0 ? `, ${unreadCount} unread` : "";
+  const title =
+    unreadCount > 0
+      ? `${unreadCount} unread notification${unreadCount === 1 ? "" : "s"}`
+      : "Notifications";
+  return (
+    <button
+      className="status-key notification-bell"
+      onClick={onOpen}
+      aria-label={`Notifications${suffix}`}
+      title={title}
+    >
+      <IconBell />
+      {unreadCount > 0 && <span className="notification-badge">{Math.min(unreadCount, 99)}</span>}
+    </button>
+  );
+}
+
+function NotificationCenter(props: NotificationCenterProps) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <NotificationBell unreadCount={props.unreadCount} onOpen={() => setOpen(true)} />
+      {open && (
+        <NotificationHistoryDialog
+          history={props.history}
+          unreadCount={props.unreadCount}
+          onMarkRead={props.onMarkRead}
+          onMarkAllRead={props.onMarkAllRead}
+          onClear={props.onClear}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
+  );
 }
 
 /** What the autoresponder is doing: the active scenario, the General layer, both
@@ -47,6 +100,7 @@ export function StatusBar({
   generalActive,
   onOpenPalette,
   onShowShortcuts,
+  notifications,
   paletteAccel,
 }: Props) {
   const host = allowRemote ? "0.0.0.0" : "127.0.0.1";
@@ -76,6 +130,7 @@ export function StatusBar({
           <span className="sep">·</span>
         </>
       )}
+      <NotificationCenter {...notifications} />
       <button
         className="status-key"
         onClick={onOpenPalette}

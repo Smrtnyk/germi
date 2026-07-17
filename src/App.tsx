@@ -43,6 +43,7 @@ import { IconPanelCollapse, IconPanelExpand, IconSearch } from "./components/ico
 import { Shortcuts } from "./components/Shortcuts";
 import { Button } from "./components/ui/Button";
 import { ToastHost, ToastProvider } from "./toast";
+import { isClearTrafficShortcut } from "./trafficShortcuts";
 
 type AppStateValue = ReturnType<typeof useAppState>;
 
@@ -274,6 +275,11 @@ function handleModShortcut(
   runHistory: (redo: boolean) => void,
 ) {
   const k = e.key.toLowerCase();
+  if (isClearTrafficShortcut(e, !isTyping(e.target) && elClosest(e.target, ".flow-scroll"))) {
+    e.preventDefault();
+    s.requestClearTraffic();
+    return;
+  }
   if (k === "a" && !isTyping(e.target)) {
     e.preventDefault();
     s.selectAllVisible();
@@ -930,6 +936,13 @@ export function App() {
           paletteAccel={prettyShortcut(s.shortcuts.palette)}
           onOpenPalette={() => setPaletteOpen(true)}
           onShowShortcuts={() => setCheatOpen(true)}
+          notifications={{
+            history: s.notificationHistory,
+            unreadCount: s.unreadNotifications,
+            onMarkRead: s.markNotificationRead,
+            onMarkAllRead: s.markAllNotificationsRead,
+            onClear: s.clearNotificationHistory,
+          }}
         />
 
         <AppDialogs
@@ -951,6 +964,7 @@ export function App() {
             running: s.proxy.running,
             portError: s.proxy.listenerError,
             onCaChanged: s.refreshCa,
+            onFlushSettings: s.flushSettings,
             onClose: () => {
               s.settings.setSettingsOpen(false);
               s.proxy.clearListenerError();

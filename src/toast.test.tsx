@@ -1,5 +1,5 @@
 import { page } from "vitest/browser";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
 import { ToastHost, useToasts, type Toast, type ToastKind } from "./toast";
@@ -10,7 +10,7 @@ interface HarnessItem {
 }
 
 function Harness({ items }: { items: HarnessItem[] }) {
-  const { toasts, notify, dismiss } = useToasts();
+  const { toasts, history, unreadCount, notify, dismiss } = useToasts();
   return (
     <div>
       {items.map((item, i) => (
@@ -19,9 +19,15 @@ function Harness({ items }: { items: HarnessItem[] }) {
         </button>
       ))}
       <ToastHost toasts={toasts} onDismiss={dismiss} />
+      <span data-testid="history">
+        {history.map((item) => `${item.message}:${item.read ? "read" : "unread"}`).join("|")}
+      </span>
+      <span data-testid="unread-count">{unreadCount}</span>
     </div>
   );
 }
+
+afterEach(() => vi.useRealTimers());
 
 describe("ToastHost", () => {
   it("renders nothing when there are no toasts", async () => {
@@ -96,5 +102,20 @@ describe("useToasts", () => {
     await expect.element(screen.getByText("Hi there")).toBeVisible();
     await screen.getByRole("button", { name: "Dismiss notification" }).click();
     await expect.element(screen.getByText("Hi there")).not.toBeInTheDocument();
+    await expect.element(screen.getByTestId("history")).toHaveTextContent("Hi there:read");
+    await expect.element(screen.getByTestId("unread-count")).toHaveTextContent("0");
+  });
+
+  it("keeps an auto-dismissed toast unread in the session history", async () => {
+    vi.useFakeTimers();
+    const screen = await render(<Harness items={[{ kind: "info", message: "Easy to miss" }]} />);
+    await screen.getByRole("button", { name: "push 0" }).click();
+    await expect.element(screen.getByText("Easy to miss")).toBeVisible();
+
+    await vi.advanceTimersByTimeAsync(4500);
+
+    await expect.element(screen.getByText("Easy to miss")).not.toBeInTheDocument();
+    await expect.element(screen.getByTestId("history")).toHaveTextContent("Easy to miss:unread");
+    await expect.element(screen.getByTestId("unread-count")).toHaveTextContent("1");
   });
 });

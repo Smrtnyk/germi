@@ -1,4 +1,12 @@
-import { createContext, useCallback, useContext, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { ReactNode } from "react";
 
 import { IconCheck, IconClose, IconInfo, IconWarn } from "./components/icons";
@@ -10,6 +18,10 @@ export interface Toast {
   id: number;
   kind: ToastKind;
   message: string;
+}
+
+export interface ToastRecord extends Toast {
+  read: boolean;
 }
 
 const DURATION: Record<ToastKind, number> = {
@@ -47,10 +59,11 @@ export function friendlyError(raw: string): string {
 
 export function useToasts() {
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [history, setHistory] = useState<ToastRecord[]>([]);
   const idRef = useRef(0);
   const timers = useRef<Map<number, number>>(new Map());
 
-  const dismiss = useCallback((id: number) => {
+  const hide = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
     const handle = timers.current.get(id);
     if (handle !== undefined) {
@@ -59,20 +72,63 @@ export function useToasts() {
     }
   }, []);
 
+  const markRead = useCallback((id: number) => {
+    setHistory((prev) => prev.map((item) => (item.id === id ? { ...item, read: true } : item)));
+  }, []);
+
+  const dismiss = useCallback(
+    (id: number) => {
+      hide(id);
+      markRead(id);
+    },
+    [hide, markRead],
+  );
+
   const notify = useCallback(
     (kind: ToastKind, message: string) => {
       const text = kind === "error" ? friendlyError(message) : message;
       if (!text) return -1;
       const id = ++idRef.current;
       setToasts((prev) => [...prev, { id, kind, message: text }].slice(-MAX_VISIBLE));
-      const handle = window.setTimeout(() => dismiss(id), DURATION[kind]);
+      setHistory((prev) => [{ id, kind, message: text, read: false }, ...prev]);
+      const handle = window.setTimeout(() => hide(id), DURATION[kind]);
       timers.current.set(id, handle);
       return id;
     },
-    [dismiss],
+    [hide],
   );
 
-  return { toasts, notify, dismiss };
+  const markAllRead = useCallback(() => {
+    setHistory((prev) => prev.map((item) => (item.read ? item : { ...item, read: true })));
+  }, []);
+
+  const clearHistory = useCallback(() => {
+    setHistory([]);
+    setToasts([]);
+    for (const handle of timers.current.values()) clearTimeout(handle);
+    timers.current.clear();
+  }, []);
+
+  useEffect(
+    () => () => {
+      for (const handle of timers.current.values()) clearTimeout(handle);
+      timers.current.clear();
+    },
+    [],
+  );
+
+  const unreadCount = useMemo(() => history.filter((item) => !item.read).length, [history]);
+
+  return {
+    toasts,
+    history,
+    unreadCount,
+    notify,
+    dismiss,
+    markRead,
+    markAllRead,
+    clearHistory,
+  };
 }
 
 export type Notify = (kind: ToastKind, message: string) => void;
@@ -95,6 +151,14 @@ const ICON_LABEL: Record<ToastKind, string> = {
   info: "Info",
 };
 
+export function ToastKindIcon({ kind }: { kind: ToastKind }) {
+  return (
+    <span className="toast-icon" title={ICON_LABEL[kind]}>
+      {ICON[kind]}
+    </span>
+  );
+}
+
 export function ToastHost({
   toasts,
   onDismiss,
@@ -107,9 +171,7 @@ export function ToastHost({
     <div className="toast-host" role="region" aria-label="Notifications">
       {toasts.map((t) => (
         <div key={t.id} className={`toast ${t.kind}`} role="status">
-          <span className="toast-icon" title={ICON_LABEL[t.kind]}>
-            {ICON[t.kind]}
-          </span>
+          <ToastKindIcon kind={t.kind} />
           <span className="toast-msg">{t.message}</span>
           <IconButton label="Dismiss notification" onClick={() => onDismiss(t.id)}>
             <IconClose />

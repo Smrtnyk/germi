@@ -1,7 +1,8 @@
 //! Taskbar/dock icon indicator. The running app's own window icon gets a status
-//! dot composited in — teal when the system proxy is routed through Germi, red
-//! when it isn't — so the taskbar/dock icon shows the state at a glance (no
-//! separate tray). The frontend pushes the state on every system-proxy change.
+//! dot composited in while the system proxy is routed through Germi. When it is
+//! off the ordinary app icon is restored, so the taskbar/dock does not show a
+//! misleading zero/error badge. The frontend pushes the state on every
+//! system-proxy change.
 
 use tauri::image::Image;
 use tauri::{AppHandle, Manager};
@@ -19,18 +20,21 @@ pub fn set_proxy_indicator(app: AppHandle, system_proxy: bool) {
     });
 }
 
-/// The app icon with a status dot composited into the corner. Teal = system
-/// proxy routed through Germi, red = off.
+/// The app icon with a teal status dot composited into the corner while the
+/// system proxy is routed through Germi. Off restores the unmodified app icon.
 fn status_icon(app: &AppHandle, on: bool) -> (Vec<u8>, u32, u32) {
-    let (mut rgba, width, height) = match app.default_window_icon() {
+    let (rgba, width, height) = match app.default_window_icon() {
         Some(img) => (img.rgba().to_vec(), img.width(), img.height()),
         None => (vec![0u8; 32 * 32 * 4], 32, 32),
     };
-    let dot = if on {
-        [45u8, 212, 191]
-    } else {
-        [239u8, 68, 68]
-    };
+    status_icon_pixels(rgba, width, height, on)
+}
+
+fn status_icon_pixels(mut rgba: Vec<u8>, width: u32, height: u32, on: bool) -> (Vec<u8>, u32, u32) {
+    if !on {
+        return (rgba, width, height);
+    }
+    let dot = [45u8, 212, 191];
     let center_x = f64::from(width) * 0.72;
     let center_y = f64::from(height) * 0.72;
     let radius = f64::from(width.min(height)) * 0.28;
@@ -56,4 +60,30 @@ fn status_icon(app: &AppHandle, on: bool) -> (Vec<u8>, u32, u32) {
         }
     }
     (rgba, width, height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_proxy_uses_the_unmodified_app_icon() {
+        let original = vec![17u8; 8 * 8 * 4];
+        let (actual, width, height) = status_icon_pixels(original.clone(), 8, 8, false);
+
+        assert_eq!(actual, original);
+        assert_eq!((width, height), (8, 8));
+    }
+
+    #[test]
+    fn enabled_proxy_adds_the_teal_badge_without_recoloring_the_opposite_corner() {
+        let original = vec![17u8; 16 * 16 * 4];
+        let (actual, _, _) = status_icon_pixels(original.clone(), 16, 16, true);
+
+        assert_ne!(actual, original);
+        assert_eq!(&actual[..4], &original[..4]);
+        assert!(actual
+            .chunks_exact(4)
+            .any(|pixel| pixel == [45, 212, 191, 255]));
+    }
 }
