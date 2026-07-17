@@ -1907,20 +1907,20 @@ function GeneralTab({
   return (
     <button
       type="button"
-      className={`stab general ${selected ? "active" : ""} ${generalActive ? "" : "layer-off"} ${
-        dropTarget ? "drop-target" : ""
-      }`}
+      className={`stab scenario-tab general ${selected ? "active" : ""} ${
+        generalActive ? "" : "layer-off"
+      } ${dropTarget ? "drop-target" : ""}`}
       onClick={onSelect}
       title="Built-in rules that stack on top of whichever scenario is active — the home for cross-cutting rules like CORS headers. Enable/disable it with the Off button while it's selected; drop requests here to mock them into the General layer."
       {...dropProps}
     >
-      <IconGeneral /> {scenario.name}
+      <IconGeneral /> <span className="stab-label">{scenario.name}</span>
       {generalActive && <span className="live-dot" />}
     </button>
   );
 }
 
-function ScenarioTabs({
+export function ScenarioTabs({
   ar,
   zone,
   zoneProps,
@@ -1963,13 +1963,14 @@ function ScenarioTabs({
       {userScenarios.map((s) => (
         <button
           key={s.id}
-          className={`stab ${s.id === viewedId ? "active" : ""} ${
+          className={`stab scenario-tab ${s.id === viewedId ? "active" : ""} ${
             zone === s.id ? "drop-target" : ""
           }`}
           onClick={() => onActivate(s.id)}
+          title={s.name}
           {...zoneProps(s.id, s.id)}
         >
-          {s.name}
+          <span className="stab-label">{s.name}</span>
           {s.id === ar.activeScenarioId && <span className="live-dot" />}
         </button>
       ))}

@@ -15,6 +15,13 @@ const base = {
   generalActive: false,
   onOpenPalette: noop,
   onShowShortcuts: noop,
+  notifications: {
+    history: [],
+    unreadCount: 0,
+    onMarkRead: noop,
+    onMarkAllRead: noop,
+    onClear: noop,
+  },
   paletteAccel: "Ctrl+K",
 } as const;
 
@@ -92,5 +99,25 @@ describe("StatusBar", () => {
   it("surfaces the configured palette accelerator in the key tooltip", async () => {
     const screen = await render(<StatusBar {...base} />);
     await expect.element(screen.getByTitle(/Ctrl\+K/)).toBeVisible();
+  });
+
+  it("opens notification history and exposes the unread count", async () => {
+    const message = "Proxy could not start";
+    const screen = await render(
+      <StatusBar
+        {...base}
+        notifications={{
+          ...base.notifications,
+          history: [{ id: 1, kind: "error", message, read: false }],
+          unreadCount: 3,
+        }}
+      />,
+    );
+
+    const bell = screen.getByRole("button", { name: "Notifications, 3 unread" });
+    await expect.element(bell).toHaveTextContent("3");
+    await bell.click();
+    await expect.element(screen.getByRole("heading", { name: "Notifications" })).toBeVisible();
+    await expect.element(screen.getByText(message)).toBeVisible();
   });
 });

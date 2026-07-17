@@ -682,6 +682,7 @@ function InterceptionSection({ settings, onChange }: SectionProps) {
 
 export interface SettingsDialogProps extends SectionCtx {
   onImportApplied: (s: ProxySettings) => void;
+  onFlushSettings: () => Promise<void>;
   onClose: () => void;
 }
 
@@ -692,6 +693,65 @@ function loadSection(): string {
   } catch {
     return SECTIONS[0].id;
   }
+}
+
+function useSettingsTransfer(
+  onFlushSettings: () => Promise<void>,
+  onImportApplied: (settings: ProxySettings) => void,
+) {
+  const notify = useToast();
+  const [exportSections, setExportSections] = useState<SettingsSectionSummary[] | null>(null);
+  const [importPreview, setImportPreview] = useState<SettingsSectionSummary[] | null>(null);
+
+  async function startExport() {
+    try {
+      await onFlushSettings();
+      setExportSections(await api.getSettingsSections());
+    } catch (error) {
+      notify("error", String(error));
+    }
+  }
+
+  async function exportSettings(sections: string[]) {
+    setExportSections(null);
+    try {
+      await onFlushSettings();
+      if (await api.exportSettings(sections)) notify("success", "Settings exported");
+    } catch (error) {
+      notify("error", String(error));
+    }
+  }
+
+  async function startImport() {
+    try {
+      await onFlushSettings();
+      setImportPreview(await api.peekSettingsImport());
+    } catch (error) {
+      notify("error", String(error));
+    }
+  }
+
+  async function importSettings(sections: string[]) {
+    setImportPreview(null);
+    try {
+      await onFlushSettings();
+      onImportApplied(await api.applySettingsImport(sections));
+      notify("success", "Settings imported");
+    } catch (error) {
+      notify("error", String(error));
+    }
+  }
+
+  return {
+    exportSections,
+    importPreview,
+    startExport,
+    exportSettings,
+    cancelExport: () => setExportSections(null),
+    startImport,
+    importSettings,
+    cancelImport: () => setImportPreview(null),
+  };
 }
 
 export function SettingsDialog({
@@ -707,12 +767,11 @@ export function SettingsDialog({
   running,
   portError,
   onCaChanged,
+  onFlushSettings,
   onClose,
 }: SettingsDialogProps) {
-  const notify = useToast();
   const [active, setActive] = useState(loadSection);
-  const [exportSections, setExportSections] = useState<SettingsSectionSummary[] | null>(null);
-  const [importPreview, setImportPreview] = useState<SettingsSectionSummary[] | null>(null);
+  const transfer = useSettingsTransfer(onFlushSettings, onImportApplied);
   const section = SECTIONS.find((s) => s.id === active) ?? SECTIONS[0];
 
   useEffect(() => {
@@ -722,39 +781,6 @@ export function SettingsDialog({
       /* ignore quota / privacy-mode errors */
     }
   }, [active]);
-
-  async function startExport() {
-    try {
-      setExportSections(await api.getSettingsSections());
-    } catch (e) {
-      notify("error", String(e));
-    }
-  }
-  async function exportSettings(sections: string[]) {
-    setExportSections(null);
-    try {
-      const ok = await api.exportSettings(sections);
-      if (ok) notify("success", "Settings exported");
-    } catch (e) {
-      notify("error", String(e));
-    }
-  }
-  async function startImport() {
-    try {
-      setImportPreview(await api.peekSettingsImport());
-    } catch (e) {
-      notify("error", String(e));
-    }
-  }
-  async function importSettings(sections: string[]) {
-    setImportPreview(null);
-    try {
-      onImportApplied(await api.applySettingsImport(sections));
-      notify("success", "Settings imported");
-    } catch (e) {
-      notify("error", String(e));
-    }
-  }
 
   return (
     <Modal className="settings-modal" ariaLabelledby="settings-title" onClose={onClose}>
@@ -799,12 +825,15 @@ export function SettingsDialog({
           <div className="settings-foot">
             <div className="settings-foot-left">
               <Button
-                onClick={startImport}
+                onClick={transfer.startImport}
                 title="Import settings from a JSON file (you'll review what it changes first)"
               >
                 Import…
               </Button>
-              <Button onClick={startExport} title="Export selected settings to a JSON file">
+              <Button
+                onClick={transfer.startExport}
+                title="Export selected settings to a JSON file"
+              >
                 Export…
               </Button>
             </div>
@@ -813,24 +842,24 @@ export function SettingsDialog({
             </Button>
           </div>
 
-          {exportSections && (
+          {transfer.exportSections && (
             <SettingsSectionsDialog
               title="Export settings"
               message="Pick what goes into the file — e.g. only host exclusions to share them with colleagues."
-              sections={exportSections}
+              sections={transfer.exportSections}
               confirmLabel="Export…"
-              onConfirm={exportSettings}
-              onCancel={() => setExportSections(null)}
+              onConfirm={transfer.exportSettings}
+              onCancel={transfer.cancelExport}
             />
           )}
-          {importPreview && (
+          {transfer.importPreview && (
             <SettingsSectionsDialog
               title="Import settings"
               message="The file contains the settings below. Checked ones replace your current values; everything else is kept as it is."
-              sections={importPreview}
+              sections={transfer.importPreview}
               confirmLabel="Import"
-              onConfirm={importSettings}
-              onCancel={() => setImportPreview(null)}
+              onConfirm={transfer.importSettings}
+              onCancel={transfer.cancelImport}
             />
           )}
         </>
