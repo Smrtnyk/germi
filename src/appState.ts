@@ -1945,7 +1945,6 @@ function useViewState() {
   const [decode, setDecode] = useState(true);
   const [fullBody, setFullBody] = useState(false);
   const [caOpen, setCaOpen] = useState(false);
-  const [confirmClear, setConfirmClear] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [rightCollapsed, setRightCollapsedState] = useState(() =>
     loadBool("germi.rightCollapsed", false),
@@ -1972,8 +1971,6 @@ function useViewState() {
     setFullBody,
     caOpen,
     setCaOpen,
-    confirmClear,
-    setConfirmClear,
     confirmOpen,
     setConfirmOpen,
     rightCollapsed,
@@ -2326,8 +2323,6 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
     setFullBody,
     caOpen,
     setCaOpen,
-    confirmClear,
-    setConfirmClear,
     confirmOpen,
     setConfirmOpen,
     rightCollapsed,
@@ -2700,19 +2695,12 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
   }
 
   function clearTraffic() {
+    if (flowStore.orderRef.current.length === 0) return;
+    // The backend records this as one history entry. Sharing the mutation queue
+    // with undo keeps even an immediate Ctrl/⌘ Z ordered behind the clear.
     void authoredMutationQueue.run(api.clearFlows).catch((e) => setError(String(e)));
     selection.clearSelection();
     inspector.setDetail(null);
-  }
-
-  function requestClearTraffic() {
-    if (flowStore.orderRef.current.length === 0) return;
-    setConfirmClear(true);
-  }
-
-  function confirmClearTraffic() {
-    setConfirmClear(false);
-    clearTraffic();
   }
 
   // A capture dropped onto the main window shares the open-capture confirm
@@ -2850,10 +2838,6 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
     setRightCollapsed,
     filterInputRef,
     inspectorFindRef,
-    confirmClear,
-    setConfirmClear,
-    requestClearTraffic,
-    confirmClearTraffic,
     confirmOpen,
     setConfirmOpen,
     requestOpenCapture,

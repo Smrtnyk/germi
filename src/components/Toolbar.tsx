@@ -146,7 +146,12 @@ export function Toolbar(props: ToolbarProps) {
         >
           <IconSave /> Save
         </Button>
-        <Button variant="ghost" danger onClick={onClear} title="Clear captured traffic">
+        <Button
+          variant="ghost"
+          danger
+          onClick={onClear}
+          title="Clear captured traffic (undo with Ctrl/⌘ Z)"
+        >
           <IconClear /> Clear
         </Button>
       </div>

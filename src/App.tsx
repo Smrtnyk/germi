@@ -43,7 +43,7 @@ import { IconPanelCollapse, IconPanelExpand, IconSearch } from "./components/ico
 import { Shortcuts } from "./components/Shortcuts";
 import { Button } from "./components/ui/Button";
 import { ToastHost, ToastProvider } from "./toast";
-import { isClearTrafficShortcut } from "./trafficShortcuts";
+import { handleClearTrafficShortcut } from "./trafficShortcuts";
 
 type AppStateValue = ReturnType<typeof useAppState>;
 
@@ -106,7 +106,7 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       disabled: !s.canSaveFilter,
       run: s.saveCurrentFilter,
     },
-    { id: "clear", group: "Traffic", label: "Clear traffic", run: s.requestClearTraffic },
+    { id: "clear", group: "Traffic", label: "Clear traffic", run: s.clearTraffic },
     {
       id: "clear-selection",
       group: "Traffic",
@@ -275,11 +275,14 @@ function handleModShortcut(
   runHistory: (redo: boolean) => void,
 ) {
   const k = e.key.toLowerCase();
-  if (isClearTrafficShortcut(e, !isTyping(e.target) && elClosest(e.target, ".flow-scroll"))) {
-    e.preventDefault();
-    s.requestClearTraffic();
+  if (
+    handleClearTrafficShortcut(
+      e,
+      !isTyping(e.target) && elClosest(e.target, ".flow-scroll"),
+      s.clearTraffic,
+    )
+  )
     return;
-  }
   if (k === "a" && !isTyping(e.target)) {
     e.preventDefault();
     s.selectAllVisible();
@@ -619,22 +622,11 @@ function AppDialogs({
   );
 }
 
-/** The session confirm/option dialogs: destructive clear/open confirms, the
- *  save-as-HAR options (issue #113) and the embedded mock-rules import offer. */
+/** The session confirm/option dialogs: replace-current-capture confirmation,
+ *  save-as-HAR options (issue #113), and the embedded mock-rules import offer. */
 function SessionDialogs({ s }: { s: AppStateValue }) {
   return (
     <>
-      {s.confirmClear && (
-        <ConfirmDialog
-          title="Clear all captured traffic?"
-          message={`Permanently discard all ${s.flowStore.orderRef.current.length} captured flow(s)? Traffic is never auto-saved, so this can't be undone — use Save first if you want to keep it.`}
-          confirmLabel="Clear traffic"
-          danger
-          onConfirm={s.confirmClearTraffic}
-          onCancel={() => s.setConfirmClear(false)}
-        />
-      )}
-
       {s.confirmOpen && (
         <ConfirmDialog
           title="Open a file and replace current traffic?"
@@ -762,7 +754,7 @@ export function App() {
           onOpenSettings={() => s.settings.setSettingsOpen(true)}
           onOpen={s.requestOpenCapture}
           onSaveSession={s.requestSaveSession}
-          onClear={s.requestClearTraffic}
+          onClear={s.clearTraffic}
           filter={s.filtering.filter}
           onFilterChange={s.filtering.setFilter}
           onSaveFilter={s.saveCurrentFilter}
