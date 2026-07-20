@@ -1,6 +1,6 @@
 type ClearShortcutEvent = Pick<
   KeyboardEvent,
-  "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey"
+  "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "preventDefault"
 >;
 
 export function isClearTrafficShortcut(
@@ -14,4 +14,15 @@ export function isClearTrafficShortcut(
     !event.shiftKey &&
     event.key.toLowerCase() === "x"
   );
+}
+
+export function handleClearTrafficShortcut(
+  event: ClearShortcutEvent,
+  withinTrafficList: boolean,
+  clearTraffic: () => void,
+): boolean {
+  if (!isClearTrafficShortcut(event, withinTrafficList)) return false;
+  event.preventDefault();
+  clearTraffic();
+  return true;
 }

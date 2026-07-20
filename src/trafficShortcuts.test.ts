@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { isClearTrafficShortcut } from "./trafficShortcuts";
+import { handleClearTrafficShortcut, isClearTrafficShortcut } from "./trafficShortcuts";
 
 function shortcut(overrides: Partial<KeyboardEvent> = {}) {
   return {
@@ -9,6 +9,7 @@ function shortcut(overrides: Partial<KeyboardEvent> = {}) {
     metaKey: false,
     altKey: false,
     shiftKey: false,
+    preventDefault: vi.fn(),
     ...overrides,
   } as KeyboardEvent;
 }
@@ -24,5 +25,23 @@ describe("isClearTrafficShortcut", () => {
     expect(isClearTrafficShortcut(shortcut({ shiftKey: true }), true)).toBe(false);
     expect(isClearTrafficShortcut(shortcut({ altKey: true }), true)).toBe(false);
     expect(isClearTrafficShortcut(shortcut({ key: "c" }), true)).toBe(false);
+  });
+
+  it("clears immediately and claims the matching keyboard event", () => {
+    const event = shortcut();
+    const clearTraffic = vi.fn();
+
+    expect(handleClearTrafficShortcut(event, true, clearTraffic)).toBe(true);
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(clearTraffic).toHaveBeenCalledOnce();
+  });
+
+  it("leaves unrelated keyboard events and traffic untouched", () => {
+    const event = shortcut({ key: "c" });
+    const clearTraffic = vi.fn();
+
+    expect(handleClearTrafficShortcut(event, true, clearTraffic)).toBe(false);
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    expect(clearTraffic).not.toHaveBeenCalled();
   });
 });

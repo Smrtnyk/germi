@@ -63,6 +63,15 @@ describe("Toolbar", () => {
     expect(onLaunchViewer).toHaveBeenCalledOnce();
   });
 
+  it("runs the clear action directly from the session toolbar", async () => {
+    const onClear = vi.fn();
+    const screen = await render(<Toolbar {...base} onClear={onClear} />);
+
+    await screen.getByRole("button", { name: "Clear" }).click();
+
+    expect(onClear).toHaveBeenCalledOnce();
+  });
+
   it("saves the filter on Ctrl+Enter in the filter bar, not on plain Enter", async () => {
     const onSaveFilter = vi.fn();
     const screen = await render(
