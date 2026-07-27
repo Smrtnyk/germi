@@ -22,7 +22,7 @@ import { useCaptureDrop } from "./captureDrop";
 import { flushDetachedRuleWindows } from "./ruleWindows";
 import { WorkbenchTabs } from "./components/WorkbenchTabs";
 import { CaptureDropOverlay } from "./components/CaptureDropOverlay";
-import type { CaInfo, FlowDetail, FlowSummary } from "./types";
+import { GENERAL_SCENARIO_ID, type CaInfo, type FlowDetail, type FlowSummary } from "./types";
 import { Toolbar } from "./components/Toolbar";
 import { FilterChips } from "./components/FilterChips";
 import { FiltersPanel, type FiltersPanelProps } from "./components/FiltersPanel";
@@ -36,6 +36,7 @@ import { CaDialog } from "./components/CaDialog";
 import { SettingsDialog, type SettingsDialogProps } from "./components/SettingsDialog";
 import { StatusBar } from "./components/StatusBar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { GeneralRulesImportDialog } from "./components/GeneralRulesImportDialog";
 import { SaveSessionDialog } from "./components/SaveSessionDialog";
 import { harRulesOfferMessage } from "./autoresponderState";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
@@ -625,6 +626,13 @@ function AppDialogs({
 /** The session confirm/option dialogs: replace-current-capture confirmation,
  *  save-as-HAR options (issue #113), and the embedded mock-rules import offer. */
 function SessionDialogs({ s }: { s: AppStateValue }) {
+  const harRulesOffer = s.session.harRulesOffer;
+  const harHasGeneralRules = harRulesOffer?.some(
+    (preview) => preview.isGeneral && preview.ruleCount > 0,
+  );
+  const existingGeneralRuleCount =
+    s.ar.autoresponder.scenarios.find((scenario) => scenario.id === GENERAL_SCENARIO_ID)?.rules
+      .length ?? 0;
   return (
     <>
       {s.confirmOpen && (
@@ -645,12 +653,22 @@ function SessionDialogs({ s }: { s: AppStateValue }) {
         />
       )}
 
-      {s.session.harRulesOffer && (
+      {harRulesOffer && !harHasGeneralRules && (
         <ConfirmDialog
           title="Import mock rules from this file?"
-          message={harRulesOfferMessage(s.session.harRulesOffer)}
+          message={harRulesOfferMessage(harRulesOffer)}
           confirmLabel="Import rules"
-          onConfirm={() => void s.session.applyHarRules()}
+          onConfirm={() => void s.session.applyHarRules("asScenario")}
+          onCancel={s.session.dismissHarRules}
+        />
+      )}
+
+      {harRulesOffer && harHasGeneralRules && (
+        <GeneralRulesImportDialog
+          previews={harRulesOffer}
+          existingGeneralRuleCount={existingGeneralRuleCount}
+          replaceScenarios={false}
+          onConfirm={(mode) => void s.session.applyHarRules(mode)}
           onCancel={s.session.dismissHarRules}
         />
       )}
@@ -901,7 +919,8 @@ export function App() {
                   },
                   transferActions: {
                     exportRules: s.ar.exportRules,
-                    importRules: s.ar.importRules,
+                    peekRulesImport: s.ar.peekRulesImport,
+                    applyRulesImport: s.ar.applyRulesImport,
                     dropMock: s.dropMockFlows,
                   },
                 },

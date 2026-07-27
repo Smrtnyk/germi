@@ -11,6 +11,7 @@ import type {
   FlowDetail,
   FlowEvent,
   FlowSummary,
+  GeneralRulesImportMode,
   HistoryTag,
   MockResult,
   OpenedCapture,
@@ -18,6 +19,7 @@ import type {
   Rule,
   RuleSearchScope,
   RuleSummary,
+  ScenarioPreview,
   ScenarioSummary,
   Script,
   ScriptDiagnostic,
@@ -116,9 +118,14 @@ export const api = {
   setCompareSeed: (seed: CompareSeed) => invoke<void>("set_compare_seed", { seed }),
   getCompareSeed: () => invoke<CompareSeed | null>("get_compare_seed"),
   exportRules: (scenarioId: string | null) => invoke<boolean>("export_rules", { scenarioId }),
-  importRules: (replace: boolean, historyTag: HistoryTag) =>
-    invoke<number>("import_rules", { replace, historyTag }),
-  applyHarRules: (historyTag: HistoryTag) => invoke<number>("apply_har_rules", { historyTag }),
+  peekRulesImport: () => invoke<ScenarioPreview[] | null>("peek_rules_import"),
+  applyRulesImport: (
+    replace: boolean,
+    generalMode: GeneralRulesImportMode,
+    historyTag: HistoryTag,
+  ) => invoke<number>("apply_rules_import", { replace, generalMode, historyTag }),
+  applyHarRules: (generalMode: GeneralRulesImportMode, historyTag: HistoryTag) =>
+    invoke<number>("apply_har_rules", { generalMode, historyTag }),
 
   historyUndo: () => invoke<void>("history_undo"),
   historyRedo: () => invoke<void>("history_redo"),

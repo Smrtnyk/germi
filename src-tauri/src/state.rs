@@ -52,6 +52,10 @@ pub struct AppState {
     /// field), held until the user confirms the offer and `apply_har_rules`
     /// imports it (issue #113).
     pub pending_har_rules: Mutex<Option<Vec<u8>>>,
+    /// Standalone rules file picked by `peek_rules_import`, held until the UI
+    /// either applies it directly or asks how an included General layer should
+    /// be routed (issue #122).
+    pub pending_rules_import: Mutex<Option<Vec<u8>>>,
     /// Live XDG `GlobalShortcuts` portal binding (Wayland global hotkey).
     pub portal_hotkey: crate::portal_hotkey::PortalHotkey,
     /// Launched with `--viewer`: the proxy engine is disabled (this instance

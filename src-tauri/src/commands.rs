@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use base64::Engine;
 use proxy_core::{
-    AutoResponderSummary, BodyComparison, FlowDetail, FlowEvent, FlowSummary, HistoryStep,
-    HistoryTag, MockBatch, MockResult, ProxyController, ProxySettings, Rule, RuleSearchScope,
-    RuleSummary, Scenario, ScenarioSummary, Script, ScriptDiagnostic, SearchSide, TestInput,
-    TestResult, GENERAL_SCENARIO_ID,
+    AutoResponderSummary, BodyComparison, FlowDetail, FlowEvent, FlowSummary,
+    GeneralRulesImportMode, HistoryStep, HistoryTag, MockBatch, MockResult, ProxyController,
+    ProxySettings, Rule, RuleSearchScope, RuleSummary, Scenario, ScenarioSummary, Script,
+    ScriptDiagnostic, SearchSide, TestInput, TestResult, GENERAL_SCENARIO_ID,
 };
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -1400,46 +1400,92 @@ pub async fn export_rules(
     Ok(true)
 }
 
-/// Import autoresponder scenarios from a rules file — a HAR carrying
-/// `_germiRules`, or a legacy `.germi-rules` bundle from before the formats
-/// were unified. `replace == false` merges (appends); `replace == true` wipes
-/// the existing scenarios first. Persists the merged config and returns the
-/// number of scenarios imported (0 if the user cancels).
+/// Pick and validate a standalone rules file, then park its bytes until the UI
+/// applies it. The preview retains whether a source scenario is the built-in
+/// General layer so issue #122's destination prompt happens before mutation.
 #[tauri::command]
-pub async fn import_rules(
+pub async fn peek_rules_import(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    replace: bool,
-    history_tag: HistoryTag,
-) -> Result<usize, String> {
-    let controller = state.controller.clone();
+) -> Result<Option<Vec<proxy_core::ScenarioPreview>>, String> {
     let Some(picked) = app
         .dialog()
         .file()
         .add_filter("Mock rules (.har, .germi-rules)", &["har", "germi-rules"])
         .blocking_pick_file()
     else {
-        return Ok(0);
+        return Ok(None);
     };
     let path = picked.into_path().map_err(|e| e.to_string())?;
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let preview = proxy_core::preview_rules_file(&bytes).map_err(|e| e.to_string())?;
+    *state
+        .pending_rules_import
+        .lock()
+        .map_err(|_| "Pending rules import lock is poisoned".to_string())? = Some(bytes);
+    Ok(Some(preview))
+}
+
+fn import_rules_and_persist(
+    controller: &ProxyController,
+    rule_store: &crate::rule_store::RuleStore,
+    bytes: &[u8],
+    replace: bool,
+    general_mode: GeneralRulesImportMode,
+    history_tag: HistoryTag,
+) -> Result<usize, String> {
     controller.with_history(history_tag, |c| {
-        let count = c.import_rules(&bytes, replace).map_err(|e| e.to_string())?;
-        state
-            .rule_store
+        let count = c
+            .import_rules_with_general(bytes, replace, general_mode)
+            .map_err(|e| e.to_string())?;
+        rule_store
             .replace(&c.get_autoresponder())
             .map_err(|e| format!("imported rules could not be persisted: {e}"))?;
-        Ok(count)
+        Ok::<usize, String>(count)
     })
 }
 
+/// Apply the standalone rules file parked by [`peek_rules_import`]. Ordinary
+/// scenarios append or replace as requested; a source General layer follows
+/// the user's explicit issue #122 choice. The bytes are consumed only after
+/// both the live mutation and `SQLite` transaction succeed.
+#[tauri::command]
+pub async fn apply_rules_import(
+    state: State<'_, AppState>,
+    replace: bool,
+    general_mode: GeneralRulesImportMode,
+    history_tag: HistoryTag,
+) -> Result<usize, String> {
+    let controller = state.controller.clone();
+    let mut pending = state
+        .pending_rules_import
+        .lock()
+        .map_err(|_| "Pending rules import lock is poisoned".to_string())?;
+    let count = {
+        let bytes = pending
+            .as_deref()
+            .ok_or_else(|| "No pending rules file to import".to_string())?;
+        import_rules_and_persist(
+            &controller,
+            &state.rule_store,
+            bytes,
+            replace,
+            general_mode,
+            history_tag,
+        )?
+    };
+    pending.take();
+    Ok(count)
+}
+
 /// Import the mock-rules bundle embedded in the last opened HAR (parked by
-/// `stash_embedded_rules` after the user accepted the offer). Always appends —
-/// imported scenarios arrive re-keyed under deduped names, never replacing or
-/// activating anything. Returns the number of scenarios imported.
+/// `stash_embedded_rules` after the user accepted the offer). Ordinary
+/// scenarios always append; an included General layer follows the same
+/// destination choice as a standalone rules import.
 #[tauri::command]
 pub async fn apply_har_rules(
     state: State<'_, AppState>,
+    general_mode: GeneralRulesImportMode,
     history_tag: HistoryTag,
 ) -> Result<usize, String> {
     let controller = state.controller.clone();
@@ -1451,11 +1497,14 @@ pub async fn apply_har_rules(
         let bytes = pending
             .as_deref()
             .ok_or_else(|| "No pending mock rules to import".to_string())?;
-        controller.with_history(history_tag, |c| {
-            let count = c.import_rules(bytes, false).map_err(|e| e.to_string())?;
-            state.rule_store.replace(&c.get_autoresponder())?;
-            Ok::<usize, String>(count)
-        })?
+        import_rules_and_persist(
+            &controller,
+            &state.rule_store,
+            bytes,
+            false,
+            general_mode,
+            history_tag,
+        )?
     };
     // Consume the parked bundle only after both the live import and SQLite
     // transaction succeed, so a persistence error remains retryable.
@@ -1769,6 +1818,55 @@ mod tests {
         assert_eq!(scenario.rules.len(), 1);
         assert_eq!(scenario.rules[0].id, "kept");
         assert_eq!(persisted.active_scenario_id.as_deref(), Some("mocks"));
+
+        drop(store);
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn merged_general_rules_import_is_persisted() {
+        let dir = test_dir("import-general");
+        let (store, _) = RuleStore::open(&dir, false).expect("open store");
+        let destination = controller();
+        let initial = AutoResponder {
+            scenarios: vec![Scenario {
+                id: GENERAL_SCENARIO_ID.to_string(),
+                name: proxy_core::GENERAL_SCENARIO_NAME.to_string(),
+                rules: vec![mock_rule("existing-general")],
+            }],
+            active_scenario_id: None,
+            general_active: true,
+        };
+        destination.set_autoresponder(initial.clone());
+        store.replace(&initial).expect("seed store");
+
+        let source = controller();
+        source.set_autoresponder(AutoResponder {
+            scenarios: vec![Scenario {
+                id: GENERAL_SCENARIO_ID.to_string(),
+                name: proxy_core::GENERAL_SCENARIO_NAME.to_string(),
+                rules: vec![mock_rule("imported-general")],
+            }],
+            active_scenario_id: None,
+            general_active: true,
+        });
+
+        import_rules_and_persist(
+            &destination,
+            &store,
+            &source.export_rules(None),
+            false,
+            GeneralRulesImportMode::Merge,
+            tag(),
+        )
+        .expect("merge and persist General");
+
+        let live = destination.get_autoresponder();
+        let persisted = store.load().expect("reload store");
+        assert_eq!(live.general().expect("live General").rules.len(), 2);
+        assert_eq!(persisted.general().expect("durable General").rules.len(), 2);
+        assert_eq!(persisted, live);
+        assert!(destination.undo().is_some(), "the import remains undoable");
 
         drop(store);
         std::fs::remove_dir_all(dir).expect("remove temp dir");

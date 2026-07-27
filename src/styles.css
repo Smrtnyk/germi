@@ -2239,6 +2239,35 @@ textarea {
   white-space: nowrap;
 }
 
+/* ---- General-rule import routing (issue #122) ---- */
+.general-rules-import-modal {
+  width: min(520px, 92vw);
+}
+.general-rules-import-modal h3 {
+  margin: 0 0 8px;
+}
+.general-rules-import-options {
+  margin: var(--space-5) 0 0;
+  padding: 0;
+  border: 0;
+}
+.general-rules-import-options .check-row {
+  align-items: flex-start;
+  margin: 0;
+  padding: var(--space-3) var(--space-2);
+  border-radius: var(--radius-sm);
+}
+.general-rules-import-options .check-row:hover {
+  background: var(--bg-2);
+}
+.general-rules-import-option {
+  display: grid;
+  gap: 2px;
+}
+.general-rules-import-note {
+  margin: var(--space-4) var(--space-2) 0;
+}
+
 /* ---- in-session notification history ---- */
 .notification-history-modal {
   width: min(560px, 92vw);

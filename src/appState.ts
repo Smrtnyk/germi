@@ -71,6 +71,7 @@ import type {
   FlowDetail,
   FlowEvent,
   FlowSummary,
+  GeneralRulesImportMode,
   HistoryTag,
   OpenedCapture,
   ProxySettings,
@@ -1546,19 +1547,31 @@ function useAutoresponder(
     }
   }
 
-  async function importRules(replace: boolean) {
+  async function peekRulesImport(): Promise<ScenarioPreview[] | null> {
+    try {
+      return await api.peekRulesImport();
+    } catch (e) {
+      setError(String(e));
+      return null;
+    }
+  }
+
+  async function applyRulesImport(replace: boolean, generalMode: GeneralRulesImportMode) {
     try {
       const n = await trackMutation(async () => {
-        // A replacing import owns its queue position before waiting for other
-        // windows, for the same ordering reason as scenario deletion/undo.
-        if (replace) await flushDetachedRuleWindows();
-        return api.importRules(replace, {
+        // Imports that remove rules or merge into General first bring detached
+        // editors current. Reserve the queue position before that wait, for the
+        // same ordering reason as scenario deletion/undo.
+        if (replace || generalMode !== "asScenario") await flushDetachedRuleWindows();
+        return api.applyRulesImport(replace, generalMode, {
           label: replace ? "Replace rules (import)" : "Import rules",
         });
       });
       if (n > 0) {
         await refresh();
-        if (replace) emitRulesChanged(currentRuleWindowLabel(), null);
+        if (replace || generalMode === "replace") {
+          emitRulesChanged(currentRuleWindowLabel(), null);
+        }
         notify("success", `Imported ${plural(n, "scenario")}`);
       }
     } catch (e) {
@@ -1588,7 +1601,8 @@ function useAutoresponder(
     reorderRule,
     mockFlows,
     exportRules,
-    importRules,
+    peekRulesImport,
+    applyRulesImport,
     ruleHits,
     resetRuleState,
   };
@@ -1755,11 +1769,15 @@ function useSession(
     }
   }
   /** Accept the offer: import the bundle parked by the open (issue #113). */
-  async function applyHarRules() {
+  async function applyHarRules(generalMode: GeneralRulesImportMode) {
     try {
-      const n = await trackRuleMutation(() => api.applyHarRules({ label: "Import rules (HAR)" }));
+      if (generalMode !== "asScenario") await flushRuleSnapshot();
+      const n = await trackRuleMutation(() =>
+        api.applyHarRules(generalMode, { label: "Import rules (HAR)" }),
+      );
       setHarRulesOffer(null);
       await refreshRules();
+      if (generalMode === "replace") emitRulesChanged(currentRuleWindowLabel(), null);
       notify("success", `Imported ${plural(n, "scenario")}`);
     } catch (e) {
       setError(String(e));
