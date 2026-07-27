@@ -112,6 +112,7 @@ fn init_app_state(app: &mut tauri::App, viewer: bool) -> Result<(), Box<dyn std:
         settings_ops: tokio::sync::Mutex::new(()),
         scripts_ops: tokio::sync::Mutex::new(()),
         pending_har_rules: std::sync::Mutex::new(None),
+        pending_rules_import: std::sync::Mutex::new(None),
         portal_hotkey: portal_hotkey::PortalHotkey::default(),
         viewer,
     });
@@ -241,7 +242,8 @@ pub fn run() {
             commands::set_compare_seed,
             commands::get_compare_seed,
             commands::export_rules,
-            commands::import_rules,
+            commands::peek_rules_import,
+            commands::apply_rules_import,
             commands::apply_har_rules,
             commands::history_undo,
             commands::history_redo,

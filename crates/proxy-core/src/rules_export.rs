@@ -18,7 +18,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::flow::now_ms;
-use crate::rules::Scenario;
+use crate::rules::{Scenario, GENERAL_SCENARIO_ID};
 
 const FORMAT_VERSION: u32 = 1;
 
@@ -26,6 +26,21 @@ const FORMAT_VERSION: u32 = 1;
 /// two imports landing in the same millisecond (`base`), which would otherwise
 /// collide and re-alias the cursor accounting that re-keying exists to protect.
 static IMPORT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// How a source bundle's built-in General scenario should land in the
+/// destination document. Ordinary scenarios still follow the separate
+/// append/replace choice.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum GeneralRulesImportMode {
+    /// Preserve the historical behavior: re-key General into an ordinary,
+    /// switchable scenario and leave the destination General layer untouched.
+    AsScenario,
+    /// Append imported General rules after the destination's current rules.
+    Merge,
+    /// Replace only the destination General layer's rules.
+    Replace,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -55,26 +70,40 @@ impl RulesExport {
 pub struct ScenarioPreview {
     pub name: String,
     pub rule_count: usize,
+    /// The built-in General layer is identified by its durable id, not its
+    /// display name. The frontend uses this to offer General-specific import
+    /// choices before anything is mutated.
+    pub is_general: bool,
+}
+
+fn scenario_previews(export: &RulesExport) -> Vec<ScenarioPreview> {
+    export
+        .scenarios
+        .iter()
+        .map(|scenario| ScenarioPreview {
+            name: scenario.name.clone(),
+            rule_count: scenario.rules.len(),
+            is_general: scenario.id == GENERAL_SCENARIO_ID,
+        })
+        .collect()
 }
 
 /// Summarize a rules bundle without importing (or re-keying) anything. Returns
 /// `None` when the bytes aren't a usable bundle — malformed, a newer format
 /// version, or carrying no scenarios — so callers simply don't offer an import.
 pub fn preview_rules(bytes: &[u8]) -> Option<Vec<ScenarioPreview>> {
-    let export: RulesExport = serde_json::from_slice(bytes).ok()?;
-    if export.version > FORMAT_VERSION || export.scenarios.is_empty() {
+    let export = decode_bundle(bytes).ok()?;
+    if export.scenarios.is_empty() {
         return None;
     }
-    Some(
-        export
-            .scenarios
-            .iter()
-            .map(|s| ScenarioPreview {
-                name: s.name.clone(),
-                rule_count: s.rules.len(),
-            })
-            .collect(),
-    )
+    Some(scenario_previews(&export))
+}
+
+/// Validate and summarize a user-picked rules file. Unlike [`preview_rules`],
+/// this accepts either the current HAR carrier or the legacy bare bundle and
+/// returns parsing errors so a bad standalone import is surfaced to the user.
+pub fn preview_rules_file(bytes: &[u8]) -> Result<Vec<ScenarioPreview>> {
+    Ok(scenario_previews(&decode_rules_file(bytes)?))
 }
 
 /// Just the version field, read first so a newer-format file gets a clear
@@ -92,14 +121,47 @@ struct VersionPeek {
 /// field is rejected with a clear message rather than silently importing
 /// nothing. The HAR check must come first — fed to the bare parser, a HAR
 /// would "succeed" as an empty bundle (every field is defaulted).
+#[cfg(test)]
 pub fn parse_rules(bytes: &[u8]) -> Result<Vec<Scenario>> {
+    Ok(parse_rules_with_origins(bytes)?
+        .into_iter()
+        .map(|imported| imported.scenario)
+        .collect())
+}
+
+/// A re-keyed scenario plus whether it occupied the built-in General slot in
+/// the source bundle. Re-keying deliberately changes every scenario id, so the
+/// import coordinator must retain this bit separately if the user wants those
+/// rules routed back into the destination General layer.
+pub(crate) struct ImportedScenario {
+    pub scenario: Scenario,
+    pub was_general: bool,
+}
+
+pub(crate) fn parse_rules_with_origins(bytes: &[u8]) -> Result<Vec<ImportedScenario>> {
+    let export = decode_rules_file(bytes)?;
+    let base = now_ms();
+    Ok(export
+        .scenarios
+        .into_iter()
+        .map(|scenario| {
+            let was_general = scenario.id == GENERAL_SCENARIO_ID;
+            ImportedScenario {
+                scenario: rekey_scenario(scenario, base),
+                was_general,
+            }
+        })
+        .collect())
+}
+
+fn decode_rules_file(bytes: &[u8]) -> Result<RulesExport> {
     if let Some(bundle) = crate::import::har_embedded_rules(bytes) {
-        return parse_bundle(&bundle);
+        return decode_bundle(&bundle);
     }
     if is_har(bytes) {
         anyhow::bail!("this HAR carries no embedded mock rules (embedding is opted into on save)");
     }
-    parse_bundle(bytes)
+    decode_bundle(bytes)
 }
 
 /// Whether the bytes are a HAR-shaped JSON document (a top-level `log` object).
@@ -111,9 +173,8 @@ fn is_har(bytes: &[u8]) -> bool {
     serde_json::from_slice::<Peek>(bytes).is_ok_and(|p| p.log.is_some())
 }
 
-/// Parse a bare [`RulesExport`] bundle, re-keying every scenario and rule.
-/// Rejects a bundle from a newer, incompatible format.
-fn parse_bundle(bytes: &[u8]) -> Result<Vec<Scenario>> {
+/// Decode a bare [`RulesExport`] bundle, rejecting a newer incompatible format.
+fn decode_bundle(bytes: &[u8]) -> Result<RulesExport> {
     if let Ok(peek) = serde_json::from_slice::<VersionPeek>(bytes) {
         if peek.version > FORMAT_VERSION {
             anyhow::bail!(
@@ -131,12 +192,7 @@ fn parse_bundle(bytes: &[u8]) -> Result<Vec<Scenario>> {
             FORMAT_VERSION
         );
     }
-    let base = now_ms();
-    Ok(export
-        .scenarios
-        .into_iter()
-        .map(|s| rekey_scenario(s, base))
-        .collect())
+    Ok(export)
 }
 
 /// Assign a fresh scenario id and a fresh id to every rule. All other fields are
@@ -223,6 +279,27 @@ mod tests {
             ids.extend(s.rules.iter().map(|r| r.id.clone()));
         }
         ids
+    }
+
+    #[test]
+    fn preview_identifies_general_by_its_durable_id() {
+        let bytes = export_rules(&[
+            scenario(
+                GENERAL_SCENARIO_ID,
+                "Renamed in a hand-edited file",
+                vec![respond_rule("general-rule")],
+            ),
+            scenario(
+                "ordinary",
+                "General rules",
+                vec![respond_rule("ordinary-rule")],
+            ),
+        ]);
+
+        let preview = preview_rules(&bytes).expect("preview");
+        assert!(preview[0].is_general);
+        assert_eq!(preview[0].rule_count, 1);
+        assert!(!preview[1].is_general, "the display name is not identity");
     }
 
     #[test]

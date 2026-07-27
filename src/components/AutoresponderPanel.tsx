@@ -34,10 +34,12 @@ import type {
   ActionKind,
   AutoResponderSummary,
   BulkMockEvent,
+  GeneralRulesImportMode,
   HistoryTag,
   Rule,
   RuleSearchScope,
   RuleSummary,
+  ScenarioPreview,
   ScenarioSummary,
 } from "../types";
 import { isShallowScope, ruleMatchesScopeClient } from "../ruleScope";
@@ -47,6 +49,7 @@ import type { AutoLayout } from "../appState";
 import { useResizable } from "../useResizable";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
+import { GeneralRulesImportDialog } from "./GeneralRulesImportDialog";
 import {
   IconCheck,
   IconChevronDown,
@@ -117,7 +120,8 @@ interface RuleActions {
 
 interface TransferActions {
   exportRules: (scenarioId: string | null) => void;
-  importRules: (replace: boolean) => void;
+  peekRulesImport: () => Promise<ScenarioPreview[] | null>;
+  applyRulesImport: (replace: boolean, generalMode: GeneralRulesImportMode) => Promise<void>;
   dropMock: (ids: string[], scenarioId: string | null) => void;
 }
 
@@ -2027,6 +2031,10 @@ export function AutoresponderPanel({ data, actions, editor, flushRef }: Autoresp
   const { seed, reloadToken, layout, openWindowRuleIds, onOpenRuleWindow } = editor;
   const [pendingDelete, setPendingDelete] = useState<ScenarioSummary | null>(null);
   const [pendingReplace, setPendingReplace] = useState(false);
+  const [pendingImport, setPendingImport] = useState<{
+    replace: boolean;
+    previews: ScenarioPreview[];
+  } | null>(null);
   const [collapsed, setCollapsed] = useDetailCollapsed();
   const { zone, zoneProps } = useFlowDrop(transferActions.dropMock);
   const flushRegistryRef = useRef<EditorFlushRegistry | null>(null);
@@ -2085,6 +2093,30 @@ export function AutoresponderPanel({ data, actions, editor, flushRef }: Autoresp
       if (s) setViewedId(s.id);
     });
 
+  const applyPickedImport = (
+    pending: { replace: boolean; previews: ScenarioPreview[] },
+    generalMode: GeneralRulesImportMode,
+  ) => {
+    const needsFlush = pending.replace || generalMode !== "asScenario";
+    void (needsFlush ? flushAllEditors() : Promise.resolve())
+      .then(() => transferActions.applyRulesImport(pending.replace, generalMode))
+      .catch(() => {});
+  };
+
+  const startRulesImport = async (replace: boolean) => {
+    const previews = await transferActions.peekRulesImport();
+    if (previews === null) return;
+    const pending = { replace, previews };
+    const general = previews.find((preview) => preview.isGeneral);
+    if (general && general.ruleCount > 0) {
+      setPendingImport(pending);
+      return;
+    }
+    // An empty built-in General scenario carries no user rules and should not
+    // materialize as a confusing ordinary scenario. Merging it is a no-op.
+    applyPickedImport(pending, general ? "merge" : "asScenario");
+  };
+
   return (
     <div className="autoresponder">
       <ScenarioTabs
@@ -2096,7 +2128,7 @@ export function AutoresponderPanel({ data, actions, editor, flushRef }: Autoresp
         onActivate={activateAndView}
         onOffToggle={onOffToggle}
         onAdd={createAndFocus}
-        onImport={() => transferActions.importRules(false)}
+        onImport={() => void startRulesImport(false)}
         onReplace={() => setPendingReplace(true)}
         onExportAll={() => {
           void flushAllEditors()
@@ -2143,6 +2175,7 @@ export function AutoresponderPanel({ data, actions, editor, flushRef }: Autoresp
         ar={ar}
         pendingDelete={pendingDelete}
         pendingReplace={pendingReplace}
+        pendingImport={pendingImport}
         onCancelDelete={() => setPendingDelete(null)}
         onConfirmDelete={() => {
           const scenario = pendingDelete;
@@ -2156,9 +2189,13 @@ export function AutoresponderPanel({ data, actions, editor, flushRef }: Autoresp
         onCancelReplace={() => setPendingReplace(false)}
         onConfirmReplace={() => {
           setPendingReplace(false);
-          void flushAllEditors()
-            .then(() => transferActions.importRules(true))
-            .catch(() => {});
+          void startRulesImport(true);
+        }}
+        onCancelImport={() => setPendingImport(null)}
+        onConfirmImport={(mode) => {
+          const pending = pendingImport;
+          setPendingImport(null);
+          if (pending) applyPickedImport(pending, mode);
         }}
       />
     </div>
@@ -2210,19 +2247,30 @@ function AutoresponderDialogs({
   ar,
   pendingDelete,
   pendingReplace,
+  pendingImport,
   onCancelDelete,
   onConfirmDelete,
   onCancelReplace,
   onConfirmReplace,
+  onCancelImport,
+  onConfirmImport,
 }: {
   ar: AutoResponderSummary;
   pendingDelete: ScenarioSummary | null;
   pendingReplace: boolean;
+  pendingImport: { replace: boolean; previews: ScenarioPreview[] } | null;
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
   onCancelReplace: () => void;
   onConfirmReplace: () => void;
+  onCancelImport: () => void;
+  onConfirmImport: (mode: GeneralRulesImportMode) => void;
 }) {
+  const generalRuleCount =
+    ar.scenarios.find((scenario) => scenario.id === GENERAL_SCENARIO_ID)?.rules.length ?? 0;
+  const regularScenarioCount = ar.scenarios.filter(
+    (scenario) => scenario.id !== GENERAL_SCENARIO_ID,
+  ).length;
   return (
     <>
       {pendingDelete && (
@@ -2239,14 +2287,23 @@ function AutoresponderDialogs({
         <ConfirmDialog
           title="Replace all scenarios?"
           message={
-            ar.scenarios.length > 0
-              ? `This replaces all ${ar.scenarios.length} of your scenario(s) with the ones in the file you pick. Mocking switches off until you activate a scenario. This can't be undone.`
+            regularScenarioCount > 0
+              ? `This replaces all ${regularScenarioCount} of your regular scenario(s) with the ones in the file you pick. General rules stay unless the file contains General rules; if it does, you'll choose how to handle them. Mocking switches off until you activate a scenario. This can't be undone.`
               : `This loads the scenarios from the file you pick. Mocking stays off until you activate one.`
           }
           confirmLabel="Choose file & replace"
           danger
           onConfirm={onConfirmReplace}
           onCancel={onCancelReplace}
+        />
+      )}
+      {pendingImport && (
+        <GeneralRulesImportDialog
+          previews={pendingImport.previews}
+          existingGeneralRuleCount={generalRuleCount}
+          replaceScenarios={pendingImport.replace}
+          onConfirm={onConfirmImport}
+          onCancel={onCancelImport}
         />
       )}
     </>

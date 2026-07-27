@@ -65,7 +65,9 @@ pub use rules::{
     RuleSearchScope, RuleSet, RuleSummary, Scenario, ScenarioSummary, GENERAL_SCENARIO_ID,
     GENERAL_SCENARIO_NAME,
 };
-pub use rules_export::{preview_rules, RulesExport, ScenarioPreview};
+pub use rules_export::{
+    preview_rules, preview_rules_file, GeneralRulesImportMode, RulesExport, ScenarioPreview,
+};
 pub use scripting::{Script, ScriptDiagnostic};
 pub use settings::ProxySettings;
 pub use settings_io::{
@@ -725,7 +727,20 @@ impl ProxyController {
     /// the active pointer to Off (importing must not silently start mocking).
     /// Returns the number of scenarios imported.
     pub fn import_rules(&self, bytes: &[u8], replace: bool) -> Result<usize> {
-        let imported = rules_export::parse_rules(bytes)?;
+        self.import_rules_with_general(bytes, replace, GeneralRulesImportMode::AsScenario)
+    }
+
+    /// Import scenarios with an explicit destination for a source General
+    /// layer. Ordinary scenarios still append or replace according to
+    /// `replace`; General can remain an ordinary scenario (legacy behavior),
+    /// merge into the built-in layer, or replace that layer's rules.
+    pub fn import_rules_with_general(
+        &self,
+        bytes: &[u8],
+        replace: bool,
+        general_mode: GeneralRulesImportMode,
+    ) -> Result<usize> {
+        let imported = rules_export::parse_rules_with_origins(bytes)?;
         let count = imported.len();
 
         let mut ar = self.get_autoresponder();
@@ -740,11 +755,40 @@ impl ProxyController {
                 ar.scenarios.push(general);
             }
         }
+        // The merge/replace destinations and the name de-duplication set both
+        // need the canonical built-in layer to exist before imported scenarios
+        // are routed.
+        ar.ensure_general();
         let mut taken: std::collections::HashSet<String> =
             ar.scenarios.iter().map(|s| s.name.clone()).collect();
-        for mut scenario in imported {
+        let mut imported_general_rules = Vec::new();
+        let mut saw_general = false;
+        for imported in imported {
+            let mut scenario = imported.scenario;
+            if imported.was_general && general_mode != GeneralRulesImportMode::AsScenario {
+                saw_general = true;
+                imported_general_rules.append(&mut scenario.rules);
+                continue;
+            }
             scenario.name = rules_export::dedupe_name(&mut taken, &scenario.name);
             ar.scenarios.push(scenario);
+        }
+
+        if saw_general {
+            let general = ar
+                .scenarios
+                .iter_mut()
+                .find(|scenario| scenario.id == GENERAL_SCENARIO_ID)
+                .expect("ensure_general seeded the destination");
+            match general_mode {
+                GeneralRulesImportMode::Merge => {
+                    general.rules.append(&mut imported_general_rules);
+                }
+                GeneralRulesImportMode::Replace => {
+                    general.rules = imported_general_rules;
+                }
+                GeneralRulesImportMode::AsScenario => unreachable!("handled above"),
+            }
         }
 
         // Guarantee the built-in General scenario exists and stays first, even
@@ -1701,6 +1745,14 @@ mod tests {
         Scenario {
             id: id.to_string(),
             name: id.to_string(),
+            rules,
+        }
+    }
+
+    fn general_scenario(rules: Vec<Rule>) -> Scenario {
+        Scenario {
+            id: GENERAL_SCENARIO_ID.to_string(),
+            name: GENERAL_SCENARIO_NAME.to_string(),
             rules,
         }
     }
@@ -3036,6 +3088,160 @@ mod tests {
             .find(|s| s.name == "B")
             .expect("imported B");
         assert_ne!(imported.id, "B", "imported scenario must be re-keyed");
+    }
+
+    #[test]
+    fn imported_general_can_remain_an_ordinary_scenario() {
+        let dst = controller();
+        dst.set_autoresponder(AutoResponder {
+            scenarios: vec![
+                general_scenario(vec![respond_rule("existing-general")]),
+                scenario("A", vec![]),
+            ],
+            active_scenario_id: Some("A".to_string()),
+            general_active: true,
+        });
+        let src = controller();
+        src.set_autoresponder(AutoResponder {
+            scenarios: vec![general_scenario(vec![respond_rule("imported-general")])],
+            active_scenario_id: None,
+            general_active: true,
+        });
+
+        dst.import_rules_with_general(
+            &src.export_rules(None),
+            false,
+            GeneralRulesImportMode::AsScenario,
+        )
+        .expect("import General as an ordinary scenario");
+
+        let ar = dst.get_autoresponder();
+        assert_eq!(
+            ar.general().expect("General").rules[0].id,
+            "existing-general"
+        );
+        assert_eq!(user_names(&ar), vec!["A", "General rules (2)"]);
+        let ordinary = ar.scenarios.last().expect("ordinary imported scenario");
+        assert_ne!(ordinary.id, GENERAL_SCENARIO_ID);
+        assert_ne!(ordinary.rules[0].id, "imported-general");
+        assert_eq!(ar.active_scenario_id.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn imported_general_rules_merge_into_the_built_in_layer() {
+        let dst = controller();
+        dst.set_autoresponder(AutoResponder {
+            scenarios: vec![
+                general_scenario(vec![respond_rule("existing-general")]),
+                scenario("A", vec![]),
+            ],
+            active_scenario_id: Some("A".to_string()),
+            general_active: false,
+        });
+        let src = controller();
+        src.set_autoresponder(AutoResponder {
+            scenarios: vec![
+                general_scenario(vec![respond_rule("imported-general")]),
+                scenario("B", vec![]),
+            ],
+            active_scenario_id: None,
+            general_active: true,
+        });
+
+        let count = dst
+            .import_rules_with_general(
+                &src.export_rules(None),
+                false,
+                GeneralRulesImportMode::Merge,
+            )
+            .expect("merge General");
+
+        assert_eq!(count, 2);
+        let ar = dst.get_autoresponder();
+        let general = ar.general().expect("General");
+        assert_eq!(general.rules.len(), 2);
+        assert_eq!(general.rules[0].id, "existing-general");
+        assert_ne!(
+            general.rules[1].id, "imported-general",
+            "import is re-keyed"
+        );
+        assert_eq!(
+            general.rules[1].action,
+            respond_rule("imported-general").action
+        );
+        assert_eq!(user_names(&ar), vec!["A", "B"]);
+        assert_eq!(ar.active_scenario_id.as_deref(), Some("A"));
+        assert!(
+            !ar.general_active,
+            "import does not silently enable General"
+        );
+    }
+
+    #[test]
+    fn imported_general_rules_replace_only_the_built_in_layer() {
+        let dst = controller();
+        dst.set_autoresponder(AutoResponder {
+            scenarios: vec![
+                general_scenario(vec![respond_rule("old-one"), respond_rule("old-two")]),
+                scenario("A", vec![]),
+            ],
+            active_scenario_id: Some("A".to_string()),
+            general_active: true,
+        });
+        let src = controller();
+        src.set_autoresponder(AutoResponder {
+            scenarios: vec![
+                general_scenario(vec![respond_rule("new-general")]),
+                scenario("B", vec![]),
+            ],
+            active_scenario_id: None,
+            general_active: true,
+        });
+
+        dst.import_rules_with_general(
+            &src.export_rules(None),
+            false,
+            GeneralRulesImportMode::Replace,
+        )
+        .expect("replace General");
+
+        let ar = dst.get_autoresponder();
+        let general = ar.general().expect("General");
+        assert_eq!(general.rules.len(), 1);
+        assert_ne!(general.rules[0].id, "new-general", "import is re-keyed");
+        assert_eq!(general.rules[0].action, respond_rule("new-general").action);
+        assert_eq!(user_names(&ar), vec!["A", "B"]);
+        assert_eq!(ar.active_scenario_id.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn regular_scenario_replace_and_general_merge_are_independent() {
+        let dst = controller();
+        dst.set_autoresponder(AutoResponder {
+            scenarios: vec![
+                general_scenario(vec![respond_rule("existing-general")]),
+                scenario("A", vec![]),
+            ],
+            active_scenario_id: Some("A".to_string()),
+            general_active: true,
+        });
+        let src = controller();
+        src.set_autoresponder(AutoResponder {
+            scenarios: vec![
+                general_scenario(vec![respond_rule("imported-general")]),
+                scenario("B", vec![]),
+            ],
+            active_scenario_id: None,
+            general_active: true,
+        });
+
+        dst.import_rules_with_general(&src.export_rules(None), true, GeneralRulesImportMode::Merge)
+            .expect("replace regular scenarios while merging General");
+
+        let ar = dst.get_autoresponder();
+        assert_eq!(user_names(&ar), vec!["B"]);
+        assert_eq!(ar.general().expect("General").rules.len(), 2);
+        assert_eq!(ar.active_scenario_id, None);
     }
 
     #[test]

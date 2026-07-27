@@ -222,8 +222,8 @@ describe("mockingRuleCount (save-options gate)", () => {
 describe("harRulesOfferMessage", () => {
   it("lists every embedded scenario with its rule count", () => {
     const message = harRulesOfferMessage([
-      { name: "General rules", ruleCount: 1 },
-      { name: "Checkout", ruleCount: 5 },
+      { name: "General rules", ruleCount: 1, isGeneral: true },
+      { name: "Checkout", ruleCount: 5, isGeneral: false },
     ]);
     expect(message).toContain("General rules (1 rule)");
     expect(message).toContain("Checkout (5 rules)");

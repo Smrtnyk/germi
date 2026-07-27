@@ -213,7 +213,13 @@ export interface AutoResponderSummary {
 export interface ScenarioPreview {
   name: string;
   ruleCount: number;
+  /** True when this source scenario is Germi's built-in General layer. */
+  isGeneral: boolean;
 }
+
+/** Where a source bundle's General rules should land (mirrors
+ *  proxy-core `GeneralRulesImportMode`). */
+export type GeneralRulesImportMode = "asScenario" | "merge" | "replace";
 
 /** Result of opening a capture (mirrors `commands::OpenedCapture`):
  *  `embeddedRules` is non-null only for a Germi-written HAR carrying rules. */
