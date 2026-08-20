@@ -25,7 +25,28 @@ jobs:
       - uses: actions/checkout@v7
 
       # aws-lc-rs (via hudsucker/rustls) needs NASM to assemble on Windows.
-      - uses: ilammy/setup-nasm@v1
+      # Use the runner's package manager: setup-nasm's Node 24 update is not
+      # released, while its current v1 release still targets deprecated Node 20.
+      - name: Install and verify NASM
+        shell: pwsh
+        run: |
+          choco install nasm --version=2.16.3 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) {
+            throw "Chocolatey failed to install NASM (exit code $LASTEXITCODE)"
+          }
+
+          $nasmDir = Join-Path $env:ProgramFiles "NASM"
+          $nasm = Join-Path $nasmDir "nasm.exe"
+          if (-not (Test-Path $nasm -PathType Leaf)) {
+            throw "NASM executable was not installed at $nasm"
+          }
+
+          $version = & $nasm --version
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^NASM version 2\.16\.03\b') {
+            throw "Expected NASM 2.16.03, got: $version"
+          }
+          $version
+          $nasmDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
