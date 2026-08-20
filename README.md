@@ -127,7 +127,9 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   import them as new scenarios, so one file shares both the traffic and the
   mocks that produced it. A rules-only export (Autoresponder → **Export rules**)
   uses the same envelope with zero entries, replacing the old `.germi-rules`
-  format (legacy files still import).
+  format (legacy files still import). Fiddler Classic AutoResponder `.farx`
+  exports import as scenarios too; Germi reports unsupported Fiddler-only rule
+  semantics instead of silently changing them.
 - **Viewer mode** — **New viewer** (or launching with `--viewer`) opens a second,
   proxy-less window for inspecting saved HAR/SAZ captures *alongside* a
   capturing instance, without the two fighting over the proxy port or system proxy.

@@ -3299,6 +3299,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "mime_guess",
+ "quick-xml 0.39.4",
  "regex 1.12.4",
  "rhai",
  "serde",

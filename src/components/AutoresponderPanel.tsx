@@ -2003,14 +2003,14 @@ export function ScenarioTabs({
       </button>
       <Button
         size="small"
-        title="Import scenarios from a rules .har or legacy .germi-rules file (added to your existing scenarios)"
+        title="Import scenarios from a rules .har, Fiddler Classic .farx, or legacy .germi-rules file (added to your existing scenarios)"
         onClick={onImport}
       >
         Import
       </Button>
       <Button
         size="small"
-        title="Replace all scenarios with the contents of a rules .har or legacy .germi-rules file"
+        title="Replace all scenarios with the contents of a rules .har, Fiddler Classic .farx, or legacy .germi-rules file"
         onClick={onReplace}
       >
         Replace…
