@@ -21,12 +21,14 @@ import { flowUrl } from "../flowUrl";
 import { dragFlowIds, encodeFlowIds, FLOW_DRAG_MIME } from "../dnd";
 import { useToast } from "../toast";
 import { copyText } from "../useCopy";
+import { resourceTypeForFlow } from "../resourceType";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import {
   availabilityToneIcon,
   IconArrowDown,
   IconCompare,
   IconMock,
+  IconResourceType,
   IconSortAsc,
   IconSortDesc,
   IconSortNone,
@@ -331,6 +333,17 @@ function AvailabilityCell({ availability }: { availability: Availability | null 
 }
 
 function FlowCell({ c, f, comments }: FlowCellProps) {
+  if (c.special === "seq") {
+    const resourceType = resourceTypeForFlow(f);
+    return (
+      <span className="c-seq-cell">
+        <span className="c-resource-icon-slot">
+          {resourceType && <IconResourceType resourceType={resourceType} />}
+        </span>
+        <span className="c-seq-number">{f.seq}</span>
+      </span>
+    );
+  }
   if (c.special === "method") {
     return <span className={`c-method m-${f.method.toLowerCase()}`}>{f.method}</span>;
   }

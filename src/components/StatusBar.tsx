@@ -138,7 +138,7 @@ export function StatusBar({
       >
         ⌘K
       </button>
-      <button className="status-key" onClick={onShowShortcuts} title="Keyboard shortcuts (?)">
+      <button className="status-key" onClick={onShowShortcuts} title="Help (?)">
         ?
       </button>
     </footer>

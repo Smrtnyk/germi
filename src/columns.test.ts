@@ -81,8 +81,10 @@ describe("column text rendering", () => {
   });
 
   it("renders the request number and sorts by it numerically", () => {
+    const [seq] = resolveColumns(["seq"], []);
     expect(textOf("seq", summary({ seq: 42 }))).toBe("42");
     expect(sortKeyOf("seq", summary({ seq: 42 }))).toBe(42);
+    expect(seq).toMatchObject({ width: 60, align: "right", special: "seq" });
   });
 
   it("shows a non-numeric placeholder for an in-flight status", () => {

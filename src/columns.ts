@@ -8,7 +8,7 @@ import type { AvailabilityVerdict, FlowSummary } from "./types";
 // `columnOrder` (persisted UI state) + `settings.headerColumns` (backend-pinned).
 
 export type ColAlign = "left" | "right";
-export type SpecialCell = "method" | "status" | "kind" | "comment" | "availability";
+export type SpecialCell = "seq" | "method" | "status" | "kind" | "comment" | "availability";
 
 export interface ColumnDef {
   id: string;
@@ -66,6 +66,7 @@ const BUILTIN_COLUMNS: ColumnDef[] = [
     label: "#",
     width: 60,
     align: "right",
+    special: "seq",
     text: (f) => `${f.seq}`,
     sortKey: (f) => f.seq,
   },

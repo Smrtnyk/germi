@@ -23,6 +23,7 @@ import { useResizable } from "../useResizable";
 import { headersToText, parseCookies, parseQuery, type KV } from "../curl";
 import { rawMessage, requestLine, statusLine } from "../rawHttp";
 import { flowDetailUrl } from "../flowUrl";
+import { resourceTypeForFlow, type ResourceType } from "../resourceType";
 import { selectAllContext } from "../selectAllContext";
 import { MaximizedOverlay } from "./MaximizedOverlay";
 import {
@@ -34,6 +35,7 @@ import {
   IconExternal,
   IconMaximize,
   IconMock,
+  IconResourceType,
 } from "./icons";
 import { Button } from "./ui/Button";
 import { SegmentedControl } from "./ui/SegmentedControl";
@@ -1170,6 +1172,7 @@ function MessageView({
 function RequestHead({
   detail,
   ttfb,
+  resourceType,
   onMock,
   viewer,
   url,
@@ -1179,6 +1182,7 @@ function RequestHead({
 }: {
   detail: FlowDetail;
   ttfb: number | null;
+  resourceType: ResourceType | null;
   onMock: (detail: FlowDetail) => void;
   viewer: boolean;
   url: string;
@@ -1190,48 +1194,57 @@ function RequestHead({
   const caseSensitive = find.caseSensitive;
   return (
     <div className="req-head">
-      <div className="req-line">
-        <span className={`badge m-${detail.method.toLowerCase()}`}>{detail.method}</span>
-        {detail.status !== null && <span className="badge status">{detail.status}</span>}
-        {detail.matchedRule && (
-          <span className="badge rule">
-            <IconMock /> {detail.matchedRule}
-          </span>
-        )}
-        {ttfb !== null && <span className="muted timing">TTFB {ttfb} ms</span>}
-        {detail.durationMs !== null && <span className="muted timing">{detail.durationMs} ms</span>}
-        {!viewer && (
-          <Button
-            variant="primary"
-            className="mock-btn"
-            onClick={() => onMock(detail)}
-            title="Create an autoresponder rule seeded from this response"
-          >
-            <IconMock /> Mock this →
-          </Button>
-        )}
-      </div>
-      <div className="req-url">
-        <span className="url-text" data-select-all="region">
-          {urlQuery ? highlight(url, urlQuery, find.urlActive, caseSensitive) : url}
+      {resourceType && (
+        <span className="inspector-resource-icon-slot">
+          <IconResourceType resourceType={resourceType} className="inspector-resource-icon" />
         </span>
-        <div className="url-actions">
-          <Button
-            variant="ghost"
-            className="url-copy"
-            title="Copy URL"
-            onClick={() => copy("URL", url)}
-          >
-            <IconCopy /> URL
-          </Button>
-          <Button
-            variant="ghost"
-            className="url-copy"
-            title="Copy as cURL"
-            onClick={() => onCopyCurl(detail.id)}
-          >
-            cURL
-          </Button>
+      )}
+      <div className="req-head-content">
+        <div className="req-line">
+          <span className={`badge m-${detail.method.toLowerCase()}`}>{detail.method}</span>
+          {detail.status !== null && <span className="badge status">{detail.status}</span>}
+          {detail.matchedRule && (
+            <span className="badge rule">
+              <IconMock /> {detail.matchedRule}
+            </span>
+          )}
+          {ttfb !== null && <span className="muted timing">TTFB {ttfb} ms</span>}
+          {detail.durationMs !== null && (
+            <span className="muted timing">{detail.durationMs} ms</span>
+          )}
+          {!viewer && (
+            <Button
+              variant="primary"
+              className="mock-btn"
+              onClick={() => onMock(detail)}
+              title="Create an autoresponder rule seeded from this response"
+            >
+              <IconMock /> Mock this →
+            </Button>
+          )}
+        </div>
+        <div className="req-url">
+          <span className="url-text" data-select-all="region">
+            {urlQuery ? highlight(url, urlQuery, find.urlActive, caseSensitive) : url}
+          </span>
+          <div className="url-actions">
+            <Button
+              variant="ghost"
+              className="url-copy"
+              title="Copy URL"
+              onClick={() => copy("URL", url)}
+            >
+              <IconCopy /> URL
+            </Button>
+            <Button
+              variant="ghost"
+              className="url-copy"
+              title="Copy as cURL"
+              onClick={() => onCopyCurl(detail.id)}
+            >
+              cURL
+            </Button>
+          </div>
         </div>
       </div>
     </div>
@@ -1577,6 +1590,16 @@ function InspectorEmpty({ loading }: { loading: boolean }) {
   );
 }
 
+function selectedResourceType(
+  summary: FlowSummary | undefined,
+  detailId: string,
+): ResourceType | null {
+  // The summary changes synchronously with selection while detail is loaded
+  // asynchronously. Never pair a stale detail header with the next row's icon.
+  if (!summary || summary.id !== detailId) return null;
+  return resourceTypeForFlow(summary);
+}
+
 function SingleFlowView({
   detail,
   summary,
@@ -1600,6 +1623,7 @@ function SingleFlowView({
   if (!detail || !activeMsg) {
     return <InspectorEmpty loading={loading} />;
   }
+  const resourceType = selectedResourceType(summary, detail.id);
 
   return (
     <div className="inspector">
@@ -1607,6 +1631,7 @@ function SingleFlowView({
       <RequestHead
         detail={detail}
         ttfb={summary?.ttfbMs ?? null}
+        resourceType={resourceType}
         onMock={onMock}
         viewer={viewer}
         url={url}
