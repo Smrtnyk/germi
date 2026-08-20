@@ -101,9 +101,6 @@ function ColorPickerDialog({
                     <span className="color-picker-preset-swatch" aria-hidden="true">
                       <span style={{ background: joinHex8(preset) }} />
                     </span>
-                    <span className="color-picker-preset-name" aria-hidden="true">
-                      Preset {index + 1}
-                    </span>
                     <span id={`${presetGroupName}-${index}-label`} className="visually-hidden">
                       Preset {index + 1}, {preset.hex}, {preset.alphaPct}% opacity
                     </span>

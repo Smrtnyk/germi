@@ -2522,13 +2522,13 @@ textarea {
   margin-top: var(--space-4);
 }
 .color-picker-preset-grid label {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  display: flex;
   align-items: center;
-  gap: var(--space-2) var(--space-3);
+  justify-content: center;
+  gap: var(--space-3);
   min-inline-size: 0;
-  min-block-size: 48px;
-  padding: var(--space-3);
+  min-block-size: 36px;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--bg-2);
@@ -2545,9 +2545,11 @@ textarea {
   margin: 0;
 }
 .color-picker-preset-swatch {
+  flex: 1 1 20px;
   display: block;
-  grid-column: 1 / -1;
-  block-size: 18px;
+  min-inline-size: 0;
+  max-inline-size: 36px;
+  block-size: 16px;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 3px;
@@ -2558,11 +2560,10 @@ textarea {
   inline-size: 100%;
   block-size: 100%;
 }
-.color-picker-preset-name {
-  overflow: hidden;
-  font-size: var(--fs-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+@media (pointer: coarse) {
+  .color-picker-preset-grid label {
+    min-block-size: 44px;
+  }
 }
 .color-picker-preset-status {
   min-block-size: 1lh;
@@ -2657,6 +2658,9 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.appearance-reset-actions {
+  margin-block-start: var(--space-6);
 }
 @container (max-width: 320px) {
   .filter-preset-settings-grid {
@@ -3159,7 +3163,7 @@ code {
 }
 .color-row {
   display: grid;
-  grid-template-columns: 168px 44px auto;
+  grid-template-columns: minmax(0, 1fr) 44px auto;
   align-items: center;
   gap: var(--space-5);
   border-radius: var(--radius-xs);

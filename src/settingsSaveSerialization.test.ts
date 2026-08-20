@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { OrderedTaskQueue } from "./orderedTaskQueue";
+import { DEFAULT_FILTER_COLOR_PRESETS } from "./filterColorPresets";
 import { settleSettingsWrite, type SettingsWriteResult } from "./settingsDraft";
 import {
   bindSettingsPort,
@@ -32,6 +33,7 @@ function settings(overrides: Partial<ProxySettings> = {}): ProxySettings {
     systemProxyHotkey: "",
     theme: "system",
     highlightColors: {},
+    filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
     ...overrides,
   };
 }

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
 import { DEFAULT_SHORTCUTS } from "../shortcuts";
+import { DEFAULT_FILTER_COLOR_PRESETS } from "../filterColorPresets";
 import type {
   SettingsWindowResult,
   SettingsWindowSnapshot,
@@ -21,7 +22,7 @@ const eventMocks = vi.hoisted(() => ({
   }),
   announceReady: vi.fn(() => Promise.resolve()),
   request: vi.fn((_request: unknown) => Promise.resolve()),
-  requestPreview: vi.fn(() => Promise.resolve()),
+  requestPreview: vi.fn((_payload: unknown) => Promise.resolve()),
   resumePreview: vi.fn(() => Promise.resolve()),
   sendShutdown: vi.fn(() => Promise.resolve()),
 }));
@@ -78,6 +79,7 @@ function snapshot(
       systemProxyHotkey: "",
       theme: "dark",
       highlightColors: {},
+      filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
       ...settingsOverrides,
     },
     columnOrder: ["seq", "method"],
@@ -147,6 +149,123 @@ describe("unseeded Settings window", () => {
       expect(screen.getByRole("alert").element().textContent).toContain("draft was kept open"),
     );
     expect(windowMocks.close).not.toHaveBeenCalled();
+  });
+
+  it("sends a preset edit through detached Save without appearance previewing it", async () => {
+    eventMocks.onState.mockImplementationOnce((handler) => {
+      eventMocks.stateHandler = handler;
+      return Promise.resolve(() => {});
+    });
+    eventMocks.onResult.mockImplementationOnce((handler) => {
+      eventMocks.resultHandler = handler;
+      return Promise.resolve(() => {});
+    });
+    const screen = await render(<SettingsWindow sessionId="active-session" />);
+    await vi.waitFor(() => expect(eventMocks.announceReady).toHaveBeenCalledOnce());
+    eventMocks.stateHandler?.({ sessionId: "active-session", snapshot: snapshot(1, 8080) });
+    await screen.getByRole("button", { name: "Appearance" }).click();
+    await screen.getByRole("button", { name: "Filter preset 1 color" }).click();
+    await screen.getByLabelText("Hex").fill("#11223380");
+    await screen.getByRole("button", { name: "Apply" }).click();
+
+    expect(eventMocks.requestPreview).not.toHaveBeenCalled();
+    expect(eventMocks.request).not.toHaveBeenCalled();
+    await screen.getByRole("button", { name: "Save" }).click();
+    await vi.waitFor(() => expect(eventMocks.request).toHaveBeenCalledOnce());
+    const request = eventMocks.request.mock.calls[0][0] as {
+      requestId: string;
+      action: {
+        kind: string;
+        draft: { settings: SettingsWindowSnapshot["settings"] };
+      };
+    };
+    expect(request.action.kind).toBe("save");
+    expect(request.action.draft.settings.filterColorPresets[0]).toBe("#11223380");
+
+    eventMocks.resultHandler?.({
+      sessionId: "active-session",
+      requestId: request.requestId,
+      ok: true,
+      snapshot: snapshot(2, 8080, {
+        filterColorPresets: ["#11223380", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)],
+      }),
+    });
+    await vi.waitFor(() => expect(windowMocks.close).toHaveBeenCalledOnce());
+  });
+
+  it("discards a detached preset draft on Cancel without contacting main", async () => {
+    eventMocks.onState.mockImplementationOnce((handler) => {
+      eventMocks.stateHandler = handler;
+      return Promise.resolve(() => {});
+    });
+    const screen = await render(<SettingsWindow sessionId="active-session" />);
+    await vi.waitFor(() => expect(eventMocks.announceReady).toHaveBeenCalledOnce());
+    eventMocks.stateHandler?.({ sessionId: "active-session", snapshot: snapshot(1, 8080) });
+    await screen.getByRole("button", { name: "Appearance" }).click();
+    await screen.getByRole("button", { name: "Filter preset 1 color" }).click();
+    await screen.getByLabelText("Hex").fill("#11223380");
+    await screen.getByRole("button", { name: "Apply" }).click();
+    await screen.getByRole("button", { name: "Cancel" }).click();
+
+    await vi.waitFor(() => expect(windowMocks.close).toHaveBeenCalledOnce());
+    expect(eventMocks.request).not.toHaveBeenCalled();
+    expect(eventMocks.requestPreview).toHaveBeenCalledExactlyOnceWith({
+      sessionId: "active-session",
+      revision: 1,
+      appearance: { theme: "dark", highlightColors: {} },
+    });
+    expect(eventMocks.requestPreview.mock.calls[0][0]).not.toHaveProperty("filterColorPresets");
+  });
+
+  it("rebaselines imported presets in the detached window before a clean Escape", async () => {
+    eventMocks.onState.mockImplementationOnce((handler) => {
+      eventMocks.stateHandler = handler;
+      return Promise.resolve(() => {});
+    });
+    eventMocks.onResult.mockImplementationOnce((handler) => {
+      eventMocks.resultHandler = handler;
+      return Promise.resolve(() => {});
+    });
+    const screen = await render(<SettingsWindow sessionId="active-session" />);
+    await vi.waitFor(() => expect(eventMocks.announceReady).toHaveBeenCalledOnce());
+    eventMocks.stateHandler?.({ sessionId: "active-session", snapshot: snapshot(1, 8080) });
+
+    await screen.getByTitle(/Import settings from a JSON file/).click();
+    await vi.waitFor(() => expect(eventMocks.request).toHaveBeenCalledOnce());
+    const previewRequest = eventMocks.request.mock.calls[0][0] as { requestId: string };
+    eventMocks.resultHandler?.({
+      sessionId: "active-session",
+      requestId: previewRequest.requestId,
+      ok: true,
+      sections: [{ id: "appearance", label: "Appearance", detail: "10 filter color presets" }],
+    });
+    await expect
+      .element(screen.getByText(/Import applies the checked settings immediately/))
+      .toBeVisible();
+    await screen.getByRole("button", { name: "Import", exact: true }).click();
+    await vi.waitFor(() => expect(eventMocks.request).toHaveBeenCalledTimes(2));
+    const applyRequest = eventMocks.request.mock.calls[1][0] as { requestId: string };
+    const importedPresets = ["#11223380", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)];
+    eventMocks.resultHandler?.({
+      sessionId: "active-session",
+      requestId: applyRequest.requestId,
+      ok: true,
+      snapshot: snapshot(2, 8080, { filterColorPresets: importedPresets }),
+    });
+
+    await screen.getByRole("button", { name: "Appearance" }).click();
+    await screen.getByRole("button", { name: "Filter preset 1 color" }).click();
+    await expect.element(screen.getByLabelText("Hex")).toHaveValue("#11223380");
+    await screen
+      .getByRole("dialog", { name: "Filter preset 1 color" })
+      .getByRole("button", { name: "Cancel" })
+      .click();
+    await userEvent.keyboard("{Escape}");
+
+    await vi.waitFor(() => expect(windowMocks.close).toHaveBeenCalledOnce());
+    await expect
+      .element(screen.getByRole("dialog", { name: "Discard unsaved changes?" }))
+      .not.toBeInTheDocument();
   });
 
   it("routes Escape and native X directly to destruction before state is seeded", async () => {

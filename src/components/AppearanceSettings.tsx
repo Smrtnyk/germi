@@ -51,10 +51,16 @@ export function AppearanceSettings({
 
   function resetAll() {
     onPreviewAppearance({ theme: settings.theme, highlightColors: {} });
-    onChange({ ...settings, highlightColors: {} });
+    onChange({
+      ...settings,
+      highlightColors: {},
+      filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
+    });
   }
 
-  const anyOverridden = HIGHLIGHT_COLORS.some((s) => colors[s.key] !== undefined);
+  const anyOverridden =
+    HIGHLIGHT_COLORS.some((s) => colors[s.key] !== undefined) ||
+    !isEqual(settings.filterColorPresets, DEFAULT_FILTER_COLOR_PRESETS);
 
   return (
     <div className="settings-pane">
@@ -104,7 +110,6 @@ export function AppearanceSettings({
         so each color picker includes opacity. Drafts preview live; Apply keeps a choice in this
         Settings draft. Save applies everything; dismissing Settings restores the saved colors.
       </p>
-      <FilterColorPresetSettings settings={settings} onChange={onChange} />
       {GROUPS.map((g) => (
         <Fragment key={g.id}>
           <div className="col-section-label">{g.label}</div>
@@ -130,11 +135,12 @@ export function AppearanceSettings({
           </ul>
         </Fragment>
       ))}
-      <div className="col-add-list">
+      <div className="col-add-list appearance-reset-actions">
         <Button size="small" onClick={resetAll} disabled={!anyOverridden}>
           Reset all to defaults
         </Button>
       </div>
+      <FilterColorPresetSettings settings={settings} onChange={onChange} />
     </div>
   );
 }
@@ -178,7 +184,7 @@ function FilterColorPresetSettings({
           </div>
         ))}
       </div>
-      <div className="col-add-list">
+      <div className="col-add-list appearance-reset-actions">
         <Button
           size="small"
           disabled={isEqual(presets, DEFAULT_FILTER_COLOR_PRESETS)}
