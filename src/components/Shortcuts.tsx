@@ -1,5 +1,6 @@
 import { prettyShortcut, type Bindings } from "../shortcuts";
-import { IconClose } from "./icons";
+import { RESOURCE_TYPE_META } from "../resourceType";
+import { IconClose, IconResourceType } from "./icons";
 import { Button } from "./ui/Button";
 import { Modal } from "./ui/Modal";
 
@@ -11,7 +12,7 @@ function buildGroups(b: Bindings): { title: string; rows: { keys: string; desc: 
       title: "Global",
       rows: [
         { keys: prettyShortcut(b.palette), desc: "Open command palette" },
-        { keys: "?", desc: "Show this shortcuts help" },
+        { keys: "?", desc: "Show help" },
         { keys: prettyShortcut(b.save), desc: "Save session" },
         { keys: prettyShortcut(b.open), desc: "Open session" },
       ],
@@ -56,31 +57,55 @@ function buildGroups(b: Bindings): { title: string; rows: { keys: string; desc: 
   ];
 }
 
+type ShortcutGroup = ReturnType<typeof buildGroups>[number];
+
+function ShortcutSection({ group }: { group: ShortcutGroup }) {
+  return (
+    <div className="shortcuts-group">
+      <h4>{group.title}</h4>
+      {group.rows.map((row) => (
+        <div className="shortcuts-row" key={row.desc}>
+          <kbd>{row.keys}</kbd>
+          <span>{row.desc}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function Shortcuts({ bindings, onClose }: { bindings: Bindings; onClose: () => void }) {
-  const groups = buildGroups(bindings);
+  const [globalGroup, trafficGroup, panelsGroup] = buildGroups(bindings);
   return (
     <Modal className="shortcuts-modal" ariaLabelledby="shortcuts-title" onClose={onClose}>
       {(close) => (
         <>
           <div className="modal-head">
-            <h3 id="shortcuts-title">Keyboard shortcuts</h3>
+            <h3 id="shortcuts-title">Help</h3>
             <Button variant="ghost" onClick={close} aria-label="Close">
               <IconClose />
             </Button>
           </div>
+          <h4 className="help-section-title">Keyboard shortcuts</h4>
           <div className="shortcuts-grid">
-            {groups.map((g) => (
-              <div className="shortcuts-group" key={g.title}>
-                <h4>{g.title}</h4>
-                {g.rows.map((r) => (
-                  <div className="shortcuts-row" key={r.desc}>
-                    <kbd>{r.keys}</kbd>
-                    <span>{r.desc}</span>
-                  </div>
-                ))}
-              </div>
-            ))}
+            <div className="shortcuts-column">
+              <ShortcutSection group={globalGroup} />
+              <ShortcutSection group={panelsGroup} />
+            </div>
+            <div className="shortcuts-column">
+              <ShortcutSection group={trafficGroup} />
+            </div>
           </div>
+          <section className="resource-legend" aria-labelledby="resource-legend-title">
+            <h4 id="resource-legend-title">Resource icons</h4>
+            <div className="resource-legend-grid">
+              {RESOURCE_TYPE_META.map(({ type, label }) => (
+                <div className="resource-legend-item" key={type}>
+                  <IconResourceType resourceType={type} decorative />
+                  <span className="resource-legend-label">{label}</span>
+                </div>
+              ))}
+            </div>
+          </section>
           <p className="muted small">
             Tip: <kbd>{prettyShortcut(bindings.palette)}</kbd> opens the command palette for every
             action. Rebind these under Settings → Shortcuts.
