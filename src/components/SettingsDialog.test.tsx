@@ -105,6 +105,41 @@ function clickBackdrop(selector: string) {
   );
 }
 
+function shownColumnRow(label: string): HTMLLIElement {
+  const rows = document.querySelectorAll<HTMLLIElement>('ul[aria-label="Shown columns"] > li');
+  const match = [...rows].find(
+    (item) => item.querySelector(".col-name")?.textContent?.trim() === label,
+  );
+  if (!match) throw new Error(`Column row is missing: ${label}`);
+  return match;
+}
+
+function dragColumnBefore(sourceLabel: string, targetLabel: string) {
+  const source = shownColumnRow(sourceLabel);
+  const target = shownColumnRow(targetLabel);
+  const handle = source.querySelector<HTMLElement>(".col-drag-handle");
+  if (!handle) throw new Error("Column drag handle is missing");
+  const dataTransfer = new DataTransfer();
+  handle.dispatchEvent(
+    new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer }),
+  );
+  const clientY = target.getBoundingClientRect().top + 1;
+  target.dispatchEvent(
+    new DragEvent("dragover", {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer,
+      clientY,
+    }),
+  );
+  target.dispatchEvent(
+    new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer, clientY }),
+  );
+  handle.dispatchEvent(
+    new DragEvent("dragend", { bubbles: true, cancelable: true, dataTransfer, clientY }),
+  );
+}
+
 async function stagePortAppearanceAndLayout(screen: BrowserScreen) {
   await screen.getByRole("button", { name: "Connections" }).click();
   await screen.getByRole("spinbutton").fill("9090");
@@ -388,6 +423,35 @@ describe("SettingsDialog", () => {
     await expect.element(screen.getByLabelText("Selected row hex")).toHaveValue("#ff000080");
     await screen.getByRole("button", { name: "Connections" }).click();
     await expect.element(screen.getByRole("spinbutton")).toHaveValue(9090);
+  });
+
+  it("persists a dragged column order only when Settings is saved", async () => {
+    const persist = vi.fn((_draft: SettingsDialogDraft) => Promise.resolve());
+    const initial = ["seq", "method", "url"];
+    localStorage.setItem("germi.settingsSection", "columns");
+    localStorage.setItem("germi.columns", JSON.stringify(initial));
+    const screen = await render(<Harness persist={persist} />);
+
+    dragColumnBefore("URL", "#");
+    await vi.waitFor(() =>
+      expect(
+        [...document.querySelectorAll(".col-name")].map((element) => element.textContent),
+      ).toEqual(["URL", "#", "Method"]),
+    );
+    expect(localStorage.getItem("germi.columns")).toBe(JSON.stringify(initial));
+    expect(persist).not.toHaveBeenCalled();
+
+    await screen.getByRole("button", { name: "Save" }).click();
+
+    await expect.element(screen.getByRole("button", { name: "Open settings" })).toBeVisible();
+    expect(localStorage.getItem("germi.columns")).toBe(JSON.stringify(["url", "seq", "method"]));
+    expect(persist).toHaveBeenCalledOnce();
+    expect(persist.mock.calls[0][0].columnOrder).toEqual(["url", "seq", "method"]);
+
+    await screen.getByRole("button", { name: "Open settings" }).click();
+    expect(
+      [...document.querySelectorAll(".col-name")].map((element) => element.textContent),
+    ).toEqual(["URL", "#", "Method"]);
   });
 
   it("keeps a failed Save open, reports the error, and rolls local options back", async () => {
