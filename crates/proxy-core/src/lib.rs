@@ -40,11 +40,12 @@ mod shared;
 mod store;
 mod tester;
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
@@ -123,12 +124,56 @@ pub struct MockBatch {
 }
 
 /// Which side(s) of a flow a content search scans.
-#[derive(Deserialize, Clone, Copy)]
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchSide {
     Request,
     Response,
     Either,
+}
+
+/// One logical source searched by a traffic-filter term. `All` is URL OR raw
+/// headers OR decoded textual bodies; `Content` is the same without URL.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FlowFilterField {
+    All,
+    Content,
+    Body,
+    Headers,
+    Cookies,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowFilterTerm {
+    pub field: FlowFilterField,
+    pub side: SearchSide,
+    pub value: String,
+    pub regex: bool,
+    pub neg: bool,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowFilterRequest {
+    pub key: String,
+    pub candidates: Vec<String>,
+    pub terms: Vec<FlowFilterTerm>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowFilterMatches {
+    pub key: String,
+    pub matched: Vec<String>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowFilterBatchResult {
+    pub cancelled: bool,
+    pub filters: Vec<FlowFilterMatches>,
 }
 
 fn cookie_pair(raw: &str) -> Option<String> {
@@ -156,6 +201,301 @@ fn cookie_pairs(headers: &[(String, String)], side: SearchSide) -> Vec<String> {
         }
     }
     pairs
+}
+
+enum FlowFilterPattern {
+    Compiled(regex::Regex),
+    InvalidRegex,
+}
+
+impl FlowFilterPattern {
+    fn new(value: &str, regex: bool) -> Self {
+        let expression = if regex {
+            value.to_string()
+        } else {
+            regex::escape(value)
+        };
+        regex::RegexBuilder::new(&expression)
+            .case_insensitive(true)
+            .build()
+            .map_or(Self::InvalidRegex, Self::Compiled)
+    }
+
+    fn matches(&self, text: &str) -> bool {
+        match self {
+            Self::Compiled(regex) => regex.is_match(text),
+            Self::InvalidRegex => false,
+        }
+    }
+}
+
+struct CompiledFlowFilterTerm {
+    field: FlowFilterField,
+    side: SearchSide,
+    pattern: FlowFilterPattern,
+    neg: bool,
+}
+
+struct MessageSearchDocument<'a> {
+    body_bytes: &'a [u8],
+    headers_source: &'a [(String, String)],
+    side: SearchSide,
+    headers: OnceLock<String>,
+    body: OnceLock<Option<Cow<'a, str>>>,
+    cookies: OnceLock<Vec<String>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FILTER_BODY_PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FILTER_BODY_OWNED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FILTER_BODY_PEAK_OWNED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_filter_body_projection(owned_bytes: usize) {
+    FILTER_BODY_PROJECTIONS.set(FILTER_BODY_PROJECTIONS.get() + 1);
+    if owned_bytes > 0 {
+        let live = FILTER_BODY_OWNED_BYTES.get() + owned_bytes;
+        FILTER_BODY_OWNED_BYTES.set(live);
+        FILTER_BODY_PEAK_OWNED_BYTES.set(FILTER_BODY_PEAK_OWNED_BYTES.get().max(live));
+    }
+}
+
+#[cfg(test)]
+fn reset_filter_body_projection_stats() {
+    assert_eq!(FILTER_BODY_OWNED_BYTES.get(), 0);
+    FILTER_BODY_PROJECTIONS.set(0);
+    FILTER_BODY_PEAK_OWNED_BYTES.set(0);
+}
+
+#[cfg(test)]
+fn filter_body_projection_stats() -> (usize, usize, usize) {
+    (
+        FILTER_BODY_PROJECTIONS.get(),
+        FILTER_BODY_OWNED_BYTES.get(),
+        FILTER_BODY_PEAK_OWNED_BYTES.get(),
+    )
+}
+
+impl<'a> MessageSearchDocument<'a> {
+    fn new(side: SearchSide, body: &'a [u8], headers: &'a [(String, String)]) -> Self {
+        Self {
+            body_bytes: body,
+            headers_source: headers,
+            side,
+            headers: OnceLock::new(),
+            body: OnceLock::new(),
+            cookies: OnceLock::new(),
+        }
+    }
+
+    fn headers(&self) -> &str {
+        self.headers.get_or_init(|| {
+            self.headers_source
+                .iter()
+                .map(|(key, value)| format!("{key}: {value}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+
+    fn body(&self) -> Option<&str> {
+        self.body
+            .get_or_init(|| {
+                if !crate::flow::is_textual(self.headers_source) {
+                    return None;
+                }
+                let body = match crate::body::decode_body(self.headers_source, self.body_bytes) {
+                    Some((decoded, _truncated)) => Some(match String::from_utf8(decoded) {
+                        Ok(text) => Cow::Owned(text),
+                        Err(error) => {
+                            Cow::Owned(String::from_utf8_lossy(error.as_bytes()).into_owned())
+                        }
+                    }),
+                    None => Some(String::from_utf8_lossy(self.body_bytes)),
+                };
+                #[cfg(test)]
+                record_filter_body_projection(match &body {
+                    Some(Cow::Owned(text)) => text.len(),
+                    _ => 0,
+                });
+                body
+            })
+            .as_deref()
+    }
+
+    fn cookies(&self) -> &[String] {
+        self.cookies
+            .get_or_init(|| cookie_pairs(self.headers_source, self.side))
+    }
+
+    fn matches(&self, field: FlowFilterField, pattern: &FlowFilterPattern) -> bool {
+        match field {
+            FlowFilterField::All | FlowFilterField::Content => {
+                pattern.matches(self.headers())
+                    || self.body().is_some_and(|body| pattern.matches(body))
+            }
+            FlowFilterField::Body => self.body().is_some_and(|body| pattern.matches(body)),
+            FlowFilterField::Headers => pattern.matches(self.headers()),
+            FlowFilterField::Cookies => self.cookies().iter().any(|pair| pattern.matches(pair)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for MessageSearchDocument<'_> {
+    fn drop(&mut self) {
+        if let Some(Some(Cow::Owned(text))) = self.body.get() {
+            FILTER_BODY_OWNED_BYTES.set(FILTER_BODY_OWNED_BYTES.get() - text.len());
+        }
+    }
+}
+
+struct FlowFilterEvaluation<'a> {
+    filter_index: usize,
+    terms: &'a [CompiledFlowFilterTerm],
+    hits: Vec<bool>,
+    viable: bool,
+}
+
+impl FlowFilterEvaluation<'_> {
+    fn needs_side(&self, side: SearchSide) -> bool {
+        self.viable
+            && self
+                .terms
+                .iter()
+                .zip(&self.hits)
+                .any(|(term, hit)| !hit && term_scans_side(term.side, side))
+    }
+
+    fn scan_message(&mut self, side: SearchSide, document: &MessageSearchDocument<'_>) {
+        if !self.viable {
+            return;
+        }
+        for (term, hit) in self.terms.iter().zip(&mut self.hits) {
+            if !*hit && term_scans_side(term.side, side) {
+                *hit = document.matches(term.field, &term.pattern);
+            }
+        }
+        if self
+            .terms
+            .iter()
+            .zip(&self.hits)
+            .any(|(term, hit)| term.neg && *hit)
+        {
+            self.viable = false;
+            return;
+        }
+        if side == SearchSide::Request
+            && self
+                .terms
+                .iter()
+                .zip(&self.hits)
+                .any(|(term, hit)| !term.neg && !*hit && term.side == SearchSide::Request)
+        {
+            self.viable = false;
+        }
+    }
+
+    fn matched(&self) -> bool {
+        self.viable
+            && self
+                .terms
+                .iter()
+                .zip(&self.hits)
+                .all(|(term, hit)| if term.neg { !*hit } else { *hit })
+    }
+}
+
+fn term_scans_side(configured: SearchSide, message: SearchSide) -> bool {
+    configured == SearchSide::Either || configured == message
+}
+
+fn evaluate_flow_filters(
+    flow: &crate::flow::Flow,
+    id: &str,
+    compiled: &[(HashSet<&str>, Vec<CompiledFlowFilterTerm>)],
+) -> Vec<usize> {
+    let mut evaluations = compiled
+        .iter()
+        .enumerate()
+        .filter(|(_, (candidates, _))| candidates.contains(id))
+        .map(|(filter_index, (_, terms))| FlowFilterEvaluation {
+            filter_index,
+            terms,
+            hits: vec![false; terms.len()],
+            viable: true,
+        })
+        .collect::<Vec<_>>();
+    if evaluations.is_empty() {
+        return Vec::new();
+    }
+
+    if evaluations.iter().any(|evaluation| {
+        evaluation
+            .terms
+            .iter()
+            .any(|term| term.field == FlowFilterField::All)
+    }) {
+        let url = format!(
+            "{} {}://{}{}",
+            flow.request.method, flow.request.scheme, flow.request.host, flow.request.path
+        );
+        for evaluation in &mut evaluations {
+            for (term, hit) in evaluation.terms.iter().zip(&mut evaluation.hits) {
+                if term.field == FlowFilterField::All {
+                    *hit = term.pattern.matches(&url);
+                }
+            }
+            if evaluation
+                .terms
+                .iter()
+                .zip(&evaluation.hits)
+                .any(|(term, hit)| term.neg && *hit)
+            {
+                evaluation.viable = false;
+            }
+        }
+    }
+
+    if evaluations
+        .iter()
+        .any(|evaluation| evaluation.needs_side(SearchSide::Request))
+    {
+        {
+            let request = MessageSearchDocument::new(
+                SearchSide::Request,
+                &flow.request.body,
+                &flow.request.headers,
+            );
+            for evaluation in &mut evaluations {
+                if evaluation.needs_side(SearchSide::Request) {
+                    evaluation.scan_message(SearchSide::Request, &request);
+                }
+            }
+        }
+    }
+
+    if let Some(response) = &flow.response {
+        if evaluations
+            .iter()
+            .any(|evaluation| evaluation.needs_side(SearchSide::Response))
+        {
+            let response =
+                MessageSearchDocument::new(SearchSide::Response, &response.body, &response.headers);
+            for evaluation in &mut evaluations {
+                if evaluation.needs_side(SearchSide::Response) {
+                    evaluation.scan_message(SearchSide::Response, &response);
+                }
+            }
+        }
+    }
+
+    evaluations
+        .into_iter()
+        .filter_map(|evaluation| evaluation.matched().then_some(evaluation.filter_index))
+        .collect()
 }
 
 /// A live proxy: its bound address, a shutdown signal, and the serving task's
@@ -615,6 +955,119 @@ impl ProxyController {
                 (!pairs.is_empty()).then_some(pairs)
             },
         )
+    }
+
+    /// Match a bounded batch of complete filter plans against per-flow store
+    /// snapshots. Each plan already carries the ids that passed its frontend
+    /// chips/structured constraints. Logical terms AND together; `All` and
+    /// `Content` perform their internal OR before negation. Message projections
+    /// are lazy and shared across plans, so a body is decompressed at most once
+    /// per side and flow for the whole batch. Only the union of requested
+    /// candidates is cloned under one store lock, providing a coherent snapshot
+    /// without copying the whole capture or duplicating ref-counted body bytes.
+    pub fn search_flow_filters(
+        &self,
+        filters: &[FlowFilterRequest],
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<FlowFilterBatchResult> {
+        self.search_flow_filters_with_snapshot_hook(filters, is_cancelled, || {})
+    }
+
+    fn search_flow_filters_with_snapshot_hook(
+        &self,
+        filters: &[FlowFilterRequest],
+        is_cancelled: impl Fn() -> bool,
+        after_snapshot: impl FnOnce(),
+    ) -> Result<FlowFilterBatchResult> {
+        if is_cancelled() {
+            return Ok(FlowFilterBatchResult {
+                cancelled: true,
+                filters: Vec::new(),
+            });
+        }
+
+        let compiled: Vec<(HashSet<&str>, Vec<CompiledFlowFilterTerm>)> = filters
+            .iter()
+            .map(|filter| {
+                let candidates = filter.candidates.iter().map(String::as_str).collect();
+                let terms = filter
+                    .terms
+                    .iter()
+                    .map(|term| CompiledFlowFilterTerm {
+                        field: term.field,
+                        side: term.side,
+                        pattern: FlowFilterPattern::new(&term.value, term.regex),
+                        neg: term.neg,
+                    })
+                    .collect();
+                (candidates, terms)
+            })
+            .collect();
+        let mut requested_ids = Vec::new();
+        let mut requested_seen = HashSet::new();
+        for filter in filters {
+            for id in &filter.candidates {
+                if requested_seen.insert(id.as_str()) {
+                    requested_ids.push(id.as_str());
+                }
+            }
+        }
+        let snapshot = {
+            let store =
+                self.shared.store.lock().map_err(|_| {
+                    anyhow!("flow store lock poisoned while taking filter snapshot")
+                })?;
+            requested_ids
+                .iter()
+                .filter_map(|id| store.get(id).cloned().map(|flow| (*id, flow)))
+                .collect::<Vec<_>>()
+        };
+        after_snapshot();
+        if is_cancelled() {
+            return Ok(FlowFilterBatchResult {
+                cancelled: true,
+                filters: Vec::new(),
+            });
+        }
+
+        let mut hits = vec![HashSet::<String>::new(); filters.len()];
+        for (id, flow) in snapshot {
+            if is_cancelled() {
+                return Ok(FlowFilterBatchResult {
+                    cancelled: true,
+                    filters: Vec::new(),
+                });
+            }
+            for index in evaluate_flow_filters(&flow, id, &compiled) {
+                hits[index].insert(id.to_string());
+            }
+            if is_cancelled() {
+                return Ok(FlowFilterBatchResult {
+                    cancelled: true,
+                    filters: Vec::new(),
+                });
+            }
+        }
+        let results = filters
+            .iter()
+            .zip(hits)
+            .map(|(filter, hits)| {
+                let mut seen = HashSet::new();
+                FlowFilterMatches {
+                    key: filter.key.clone(),
+                    matched: filter
+                        .candidates
+                        .iter()
+                        .filter(|id| seen.insert(id.as_str()) && hits.contains(id.as_str()))
+                        .cloned()
+                        .collect(),
+                }
+            })
+            .collect();
+        Ok(FlowFilterBatchResult {
+            cancelled: false,
+            filters: results,
+        })
     }
 
     /// Whether two flows' bodies are byte-identical, per side, for the compare
@@ -4605,6 +5058,49 @@ mod tests {
         flow
     }
 
+    fn flow_filter_term(
+        field: FlowFilterField,
+        side: SearchSide,
+        value: &str,
+        regex: bool,
+        neg: bool,
+    ) -> FlowFilterTerm {
+        FlowFilterTerm {
+            field,
+            side,
+            value: value.to_string(),
+            regex,
+            neg,
+        }
+    }
+
+    fn flow_filter_request(
+        key: &str,
+        candidates: &[&str],
+        terms: Vec<FlowFilterTerm>,
+    ) -> FlowFilterRequest {
+        FlowFilterRequest {
+            key: key.to_string(),
+            candidates: candidates.iter().map(|id| (*id).to_string()).collect(),
+            terms,
+        }
+    }
+
+    fn flow_filter_matches(
+        controller: &ProxyController,
+        candidates: &[&str],
+        terms: Vec<FlowFilterTerm>,
+    ) -> Vec<String> {
+        controller
+            .search_flow_filters(&[flow_filter_request("filter", candidates, terms)], || {
+                false
+            })
+            .expect("filter snapshot")
+            .filters
+            .remove(0)
+            .matched
+    }
+
     #[test]
     fn search_headers_matches_request_and_response_header_value() {
         let c = controller();
@@ -4910,6 +5406,600 @@ mod tests {
                 .is_empty(),
             "a response-body match must not be reported on the Request side"
         );
+    }
+
+    #[test]
+    fn flow_filter_all_is_url_or_request_response_headers_or_decoded_bodies() {
+        let c = controller();
+        let mut url = completed_flow("url");
+        url.request.path = "/shared-needle".to_string();
+        let mut request_header = completed_flow("request-header");
+        request_header
+            .request
+            .headers
+            .push(("x-test".to_string(), "shared-needle".to_string()));
+        let response_header = flow_with_headers(
+            "response-header",
+            vec![],
+            vec![("x-test", "shared-needle"), ("content-type", "text/plain")],
+            b"other",
+        );
+        let mut request_body = completed_flow("request-body");
+        request_body.request.headers = vec![("content-type".into(), "text/plain".into())];
+        request_body.request.body = b"shared-needle".to_vec().into();
+        let response_body = flow_with_headers(
+            "response-body",
+            vec![],
+            vec![("content-type", "application/json")],
+            br#"{"value":"shared-needle"}"#,
+        );
+        let clean = completed_flow("clean");
+        for flow in [
+            url,
+            request_header,
+            response_header,
+            request_body,
+            response_body,
+            clean,
+        ] {
+            c.shared.record_new(flow);
+        }
+
+        let ids = [
+            "url",
+            "request-header",
+            "response-header",
+            "request-body",
+            "response-body",
+            "clean",
+        ];
+        assert_eq!(
+            flow_filter_matches(
+                &c,
+                &ids,
+                vec![flow_filter_term(
+                    FlowFilterField::All,
+                    SearchSide::Either,
+                    "shared-needle",
+                    false,
+                    false,
+                )],
+            ),
+            ids[..5]
+                .iter()
+                .map(|id| (*id).to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn flow_filter_content_scopes_sides_ands_terms_and_negates_after_or() {
+        let c = controller();
+        let mut both = completed_flow("both");
+        both.request.headers = vec![
+            ("content-type".into(), "text/plain".into()),
+            ("x-request".into(), "alpha".into()),
+        ];
+        both.request.body = b"request-beta".to_vec().into();
+        if let Some(response) = both.response.as_mut() {
+            response
+                .headers
+                .push(("x-response".into(), "response-beta".into()));
+        }
+        let mut request_only = completed_flow("request-only");
+        request_only.request.headers = vec![("x-request".into(), "alpha".into())];
+        let clean = completed_flow("clean");
+        for flow in [both, request_only, clean] {
+            c.shared.record_new(flow);
+        }
+        let candidates = ["both", "request-only", "clean"];
+
+        assert_eq!(
+            flow_filter_matches(
+                &c,
+                &candidates,
+                vec![
+                    flow_filter_term(
+                        FlowFilterField::Content,
+                        SearchSide::Request,
+                        "alpha",
+                        false,
+                        false,
+                    ),
+                    flow_filter_term(
+                        FlowFilterField::Content,
+                        SearchSide::Response,
+                        "response-beta",
+                        false,
+                        false,
+                    ),
+                ],
+            ),
+            vec!["both".to_string()]
+        );
+        assert_eq!(
+            flow_filter_matches(
+                &c,
+                &candidates,
+                vec![flow_filter_term(
+                    FlowFilterField::Content,
+                    SearchSide::Either,
+                    "alpha|response-beta",
+                    true,
+                    true,
+                )],
+            ),
+            vec!["clean".to_string()]
+        );
+    }
+
+    #[test]
+    fn flow_filter_content_decodes_gzip_deflate_and_brotli() {
+        let c = controller();
+        for encoding in ["gzip", "deflate", "br"] {
+            let encoded = crate::body::compress_body(encoding, b"decoded-search-needle")
+                .expect("encode body");
+            c.shared.record_new(flow_with_headers(
+                encoding,
+                vec![],
+                vec![
+                    ("content-type", "text/plain"),
+                    ("content-encoding", encoding),
+                ],
+                &encoded,
+            ));
+        }
+        let request_encoded = crate::body::compress_body("gzip", b"decoded-request-needle")
+            .expect("encode request body");
+        let mut request_gzip = completed_flow("request-gzip");
+        request_gzip.request.headers = vec![
+            ("content-type".into(), "text/plain".into()),
+            ("content-encoding".into(), "gzip".into()),
+        ];
+        request_gzip.request.body = request_encoded.into();
+        c.shared.record_new(request_gzip);
+        assert_eq!(
+            flow_filter_matches(
+                &c,
+                &["gzip", "deflate", "br"],
+                vec![flow_filter_term(
+                    FlowFilterField::Content,
+                    SearchSide::Response,
+                    "decoded-search-needle",
+                    false,
+                    false,
+                )],
+            ),
+            vec!["gzip".to_string(), "deflate".to_string(), "br".to_string()]
+        );
+        assert_eq!(
+            flow_filter_matches(
+                &c,
+                &["request-gzip"],
+                vec![flow_filter_term(
+                    FlowFilterField::Content,
+                    SearchSide::Request,
+                    "decoded-request-needle",
+                    false,
+                    false,
+                )],
+            ),
+            vec!["request-gzip".to_string()]
+        );
+    }
+
+    #[test]
+    fn filter_body_projection_borrows_identity_text_and_owns_decoded_text_once() {
+        let identity = b"identity-search-text";
+        let identity_headers = vec![("content-type".to_string(), "text/plain".to_string())];
+        let identity_document =
+            MessageSearchDocument::new(SearchSide::Request, identity, &identity_headers);
+        let identity_text = identity_document.body().expect("identity text");
+        assert_eq!(identity_text, "identity-search-text");
+        assert_eq!(identity_text.as_ptr(), identity.as_ptr());
+        assert!(matches!(
+            identity_document.body.get(),
+            Some(Some(Cow::Borrowed(_)))
+        ));
+
+        let encoded =
+            crate::body::compress_body("gzip", b"decoded-search-text").expect("encode body");
+        let encoded_headers = vec![
+            ("content-type".to_string(), "text/plain".to_string()),
+            ("content-encoding".to_string(), "gzip".to_string()),
+        ];
+        let encoded_document =
+            MessageSearchDocument::new(SearchSide::Response, &encoded, &encoded_headers);
+        let first = encoded_document.body().expect("decoded text");
+        let first_ptr = first.as_ptr();
+        assert_eq!(first, "decoded-search-text");
+        assert!(matches!(
+            encoded_document.body.get(),
+            Some(Some(Cow::Owned(_)))
+        ));
+        assert_eq!(
+            encoded_document
+                .body()
+                .expect("cached decoded text")
+                .as_ptr(),
+            first_ptr
+        );
+    }
+
+    #[test]
+    fn flow_filter_url_hit_never_projects_a_body() {
+        let c = controller();
+        let mut candidate = completed_flow("url-hit");
+        candidate.request.path = "/url-short-circuit".to_string();
+        candidate.request.headers = vec![
+            ("content-type".into(), "text/plain".into()),
+            ("content-encoding".into(), "gzip".into()),
+        ];
+        candidate.request.body = crate::body::compress_body("gzip", b"request miss")
+            .expect("compress request")
+            .into();
+        let response = candidate.response.as_mut().expect("response");
+        response.headers = candidate.request.headers.clone();
+        response.body = crate::body::compress_body("gzip", b"response miss")
+            .expect("compress response")
+            .into();
+        c.shared.record_new(candidate);
+
+        reset_filter_body_projection_stats();
+        assert_eq!(
+            flow_filter_matches(
+                &c,
+                &["url-hit"],
+                vec![flow_filter_term(
+                    FlowFilterField::All,
+                    SearchSide::Either,
+                    "url-short-circuit",
+                    false,
+                    false,
+                )],
+            ),
+            vec!["url-hit".to_string()]
+        );
+        assert_eq!(filter_body_projection_stats(), (0, 0, 0));
+    }
+
+    #[test]
+    fn flow_filter_request_hit_skips_response_body_projection() {
+        let c = controller();
+        let mut candidate = completed_flow("request-hit");
+        candidate.request.headers = vec![
+            ("content-type".into(), "text/plain".into()),
+            ("content-encoding".into(), "gzip".into()),
+        ];
+        candidate.request.body = crate::body::compress_body("gzip", b"request-side-needle")
+            .expect("compress request")
+            .into();
+        let response = candidate.response.as_mut().expect("response");
+        response.headers = candidate.request.headers.clone();
+        response.body = crate::body::compress_body("gzip", b"response miss")
+            .expect("compress response")
+            .into();
+        c.shared.record_new(candidate);
+
+        reset_filter_body_projection_stats();
+        assert_eq!(
+            flow_filter_matches(
+                &c,
+                &["request-hit"],
+                vec![flow_filter_term(
+                    FlowFilterField::Content,
+                    SearchSide::Either,
+                    "request-side-needle",
+                    false,
+                    false,
+                )],
+            ),
+            vec!["request-hit".to_string()]
+        );
+        let (projections, retained, peak) = filter_body_projection_stats();
+        assert_eq!(projections, 1);
+        assert_eq!(retained, 0);
+        assert_eq!(peak, b"request-side-needle".len());
+    }
+
+    #[test]
+    fn flow_filter_releases_one_large_side_before_decoding_the_other() {
+        let c = controller();
+        let request_text = format!("request-marker{}", "a".repeat(2 * 1024 * 1024));
+        let response_text = format!("response-marker{}", "b".repeat(2 * 1024 * 1024));
+        let mut candidate = completed_flow("two-large-sides");
+        candidate.request.headers = vec![
+            ("content-type".into(), "text/plain".into()),
+            ("content-encoding".into(), "gzip".into()),
+        ];
+        candidate.request.body = crate::body::compress_body("gzip", request_text.as_bytes())
+            .expect("compress request")
+            .into();
+        let response = candidate.response.as_mut().expect("response");
+        response.headers = candidate.request.headers.clone();
+        response.body = crate::body::compress_body("gzip", response_text.as_bytes())
+            .expect("compress response")
+            .into();
+        c.shared.record_new(candidate);
+
+        reset_filter_body_projection_stats();
+        assert_eq!(
+            flow_filter_matches(
+                &c,
+                &["two-large-sides"],
+                vec![
+                    flow_filter_term(
+                        FlowFilterField::Body,
+                        SearchSide::Request,
+                        "request-marker",
+                        false,
+                        false,
+                    ),
+                    flow_filter_term(
+                        FlowFilterField::Body,
+                        SearchSide::Response,
+                        "response-marker",
+                        false,
+                        false,
+                    ),
+                ],
+            ),
+            vec!["two-large-sides".to_string()]
+        );
+        let (projections, retained, peak) = filter_body_projection_stats();
+        assert_eq!(projections, 2);
+        assert_eq!(retained, 0);
+        assert_eq!(peak, request_text.len().max(response_text.len()));
+    }
+
+    #[test]
+    fn flow_filter_content_skips_binary_body_but_keeps_raw_headers() {
+        let c = controller();
+        c.shared.record_new(flow_with_headers(
+            "body-only",
+            vec![],
+            vec![("content-type", "image/png")],
+            b"binary-needle",
+        ));
+        c.shared.record_new(flow_with_headers(
+            "header",
+            vec![],
+            vec![("content-type", "image/png"), ("x-test", "binary-needle")],
+            b"other",
+        ));
+        assert_eq!(
+            flow_filter_matches(
+                &c,
+                &["body-only", "header"],
+                vec![flow_filter_term(
+                    FlowFilterField::Content,
+                    SearchSide::Response,
+                    "binary-needle",
+                    false,
+                    false,
+                )],
+            ),
+            vec!["header".to_string()]
+        );
+    }
+
+    #[test]
+    fn flow_filter_cookie_projection_keeps_duplicates_and_excludes_attributes() {
+        let c = controller();
+        c.shared.record_new(flow_with_headers(
+            "cookie",
+            vec![("Cookie", "duplicate=first; duplicate=second")],
+            vec![("Set-Cookie", "sid=abc; Path=/private")],
+            b"body",
+        ));
+        for value in ["duplicate=first", "duplicate=second", "sid=abc"] {
+            assert_eq!(
+                flow_filter_matches(
+                    &c,
+                    &["cookie"],
+                    vec![flow_filter_term(
+                        FlowFilterField::Cookies,
+                        SearchSide::Either,
+                        value,
+                        false,
+                        false,
+                    )],
+                ),
+                vec!["cookie".to_string()]
+            );
+        }
+        assert!(flow_filter_matches(
+            &c,
+            &["cookie"],
+            vec![flow_filter_term(
+                FlowFilterField::Cookies,
+                SearchSide::Response,
+                "Path=/private",
+                false,
+                false,
+            )],
+        )
+        .is_empty());
+        assert_eq!(
+            flow_filter_matches(
+                &c,
+                &["cookie"],
+                vec![flow_filter_term(
+                    FlowFilterField::Content,
+                    SearchSide::Response,
+                    "Path=/private",
+                    false,
+                    false,
+                )],
+            ),
+            vec!["cookie".to_string()]
+        );
+    }
+
+    #[test]
+    fn flow_filter_invalid_regex_is_safe_and_candidates_are_unique() {
+        let c = controller();
+        c.shared.record_new(completed_flow("one"));
+        assert!(flow_filter_matches(
+            &c,
+            &["one", "one"],
+            vec![flow_filter_term(
+                FlowFilterField::All,
+                SearchSide::Either,
+                "(",
+                true,
+                false,
+            )],
+        )
+        .is_empty());
+        assert_eq!(
+            flow_filter_matches(
+                &c,
+                &["one", "one"],
+                vec![flow_filter_term(
+                    FlowFilterField::All,
+                    SearchSide::Either,
+                    "(",
+                    true,
+                    true,
+                )],
+            ),
+            vec!["one".to_string()]
+        );
+    }
+
+    #[test]
+    fn flow_filter_batch_cancels_without_returning_partial_results() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let c = controller();
+        for id in ["one", "two", "three"] {
+            c.shared.record_new(completed_flow(id));
+        }
+        let checks = AtomicUsize::new(0);
+        let result = c
+            .search_flow_filters(
+                &[flow_filter_request(
+                    "filter",
+                    &["one", "two", "three"],
+                    vec![flow_filter_term(
+                        FlowFilterField::All,
+                        SearchSide::Either,
+                        "response",
+                        false,
+                        false,
+                    )],
+                )],
+                || checks.fetch_add(1, Ordering::Relaxed) >= 2,
+            )
+            .expect("filter snapshot");
+        assert!(result.cancelled);
+        assert!(result.filters.is_empty());
+    }
+
+    #[test]
+    fn flow_filter_batch_matches_with_the_store_lock_released() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let c = controller();
+        c.shared.record_new(completed_flow("one"));
+        let checks = AtomicUsize::new(0);
+        let result = c
+            .search_flow_filters(
+                &[flow_filter_request(
+                    "filter",
+                    &["one"],
+                    vec![flow_filter_term(
+                        FlowFilterField::Content,
+                        SearchSide::Response,
+                        "response-one",
+                        false,
+                        false,
+                    )],
+                )],
+                || {
+                    if checks.fetch_add(1, Ordering::Relaxed) > 0 {
+                        assert!(c.shared.store.try_lock().is_ok());
+                    }
+                    false
+                },
+            )
+            .expect("filter snapshot");
+        assert_eq!(result.filters[0].matched, vec!["one".to_string()]);
+    }
+
+    #[test]
+    fn flow_filter_batch_uses_one_coherent_candidate_union_snapshot() {
+        let c = controller();
+        for id in ["removed", "replaced", "outside"] {
+            let mut candidate = completed_flow(id);
+            candidate.response.as_mut().expect("response").body = b"snapshot-needle"[..].into();
+            c.shared.record_new(candidate);
+        }
+
+        let request = flow_filter_request(
+            "filter",
+            &["removed", "replaced"],
+            vec![flow_filter_term(
+                FlowFilterField::Content,
+                SearchSide::Response,
+                "snapshot-needle",
+                false,
+                false,
+            )],
+        );
+        let result = c
+            .search_flow_filters_with_snapshot_hook(
+                &[request],
+                || false,
+                || {
+                    let mut store = c.shared.store.lock().expect("snapshot lock was released");
+                    store.remove(&["removed".to_string()]);
+                    let mut replacement = completed_flow("replaced");
+                    replacement.response.as_mut().expect("response").body =
+                        b"replacement-does-not-match"[..].into();
+                    store.insert(replacement);
+                },
+            )
+            .expect("coherent snapshot");
+
+        assert_eq!(
+            result.filters[0].matched,
+            vec!["removed".to_string(), "replaced".to_string()]
+        );
+        assert!(
+            !result.filters[0].matched.contains(&"outside".to_string()),
+            "an unrequested matching flow is never copied into the bounded snapshot"
+        );
+    }
+
+    #[test]
+    fn flow_filter_snapshot_lock_poison_is_an_error_not_an_empty_success() {
+        let c = controller();
+        c.shared.record_new(completed_flow("one"));
+        let shared = Arc::clone(&c.shared);
+        assert!(std::thread::spawn(move || {
+            let _store = shared.store.lock().expect("lock store before poison");
+            panic!("poison filter snapshot lock");
+        })
+        .join()
+        .is_err());
+
+        let error = c
+            .search_flow_filters(
+                &[flow_filter_request(
+                    "filter",
+                    &["one"],
+                    vec![flow_filter_term(
+                        FlowFilterField::All,
+                        SearchSide::Either,
+                        "one",
+                        false,
+                        false,
+                    )],
+                )],
+                || false,
+            )
+            .expect_err("a poisoned snapshot must not become a successful empty miss");
+        assert!(error.to_string().contains("filter snapshot"));
     }
 
     #[test]

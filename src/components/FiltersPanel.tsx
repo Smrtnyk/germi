@@ -4,7 +4,7 @@ import { xor } from "es-toolkit";
 
 import { KIND_CHIPS, STATUS_CHIPS } from "../filter";
 import { filterColorPresetParts } from "../filterColorPresets";
-import { hasContentTerms, savedFilterLabel, type SavedFilter } from "../savedFilters";
+import { savedFilterLabel, type SavedFilter } from "../savedFilters";
 import type { ColorParts } from "../theme";
 import { ColorPicker } from "./ColorPicker";
 import { IconChevronDown, IconChevronRight, IconClose } from "./icons";
@@ -16,10 +16,11 @@ export interface FiltersPanelProps {
   /** Authoritative complete tints from Settings. */
   colorPresets: readonly string[];
   soloId: string | null;
-  /** Live matching-row count per filter id; null = not countable (content terms). */
+  /** Live matching-row count per filter id; null while its backend scan is pending. */
   counts: Map<string, number | null>;
   /** Whether the filter bar / chips currently hold anything worth saving. */
   canSaveCurrent: boolean;
+  onCreate: () => void;
   onSaveCurrent: () => void;
   onColorPreview: (id: string, value: ColorParts) => void;
   onColorPreviewCancel: (id: string) => void;
@@ -32,11 +33,7 @@ function CountBadge({ count }: { count: number | null }) {
   return (
     <span
       className="sf-count"
-      title={
-        count === null
-          ? "No live count — body:/header:/cookie: terms need a backend scan"
-          : `${count} matching request(s)`
-      }
+      title={count === null ? "Counting matches…" : `${count} matching request(s)`}
     >
       {count ?? "–"}
     </span>
@@ -82,19 +79,10 @@ function SavedFilterEditor({
           </FilterChip>
         ))}
       </div>
-      {hasContentTerms(f.query) && (
-        <p className="sf-note">
-          body:/header:/cookie: terms are honored by <strong>only</strong> (full scan) — row
-          highlights skip them.
-        </p>
-      )}
     </div>
   );
 }
 
-/** The highlight toggle, disabled for filters the frontend can't evaluate live
- *  (body:/header:/cookie: terms need a backend scan) so a lit-but-inert toggle never
- *  suggests tinting that will not happen. */
 function HighlightToggle({
   f,
   onUpdate,
@@ -102,17 +90,12 @@ function HighlightToggle({
   f: SavedFilter;
   onUpdate: FiltersPanelProps["onUpdate"];
 }) {
-  const highlightable = !hasContentTerms(f.query);
   return (
     <button
-      className={`sf-toggle ${f.highlight && highlightable ? "on" : ""}`}
-      disabled={!highlightable}
+      className={`sf-toggle ${f.highlight ? "on" : ""}`}
+      aria-pressed={f.highlight}
       onClick={() => onUpdate(f.id, { highlight: !f.highlight })}
-      title={
-        highlightable
-          ? "Tint matching rows with this filter's color"
-          : "Highlights skip body:/header:/cookie: filters — use only to apply them via a full scan"
-      }
+      title="Tint matching rows with this filter's color"
     >
       highlight
     </button>
@@ -168,6 +151,7 @@ function SavedFilterRow({
         <CountBadge count={count} />
         <button
           className={`sf-toggle ${solo ? "on" : ""}`}
+          aria-pressed={solo}
           onClick={() => onSolo(solo ? null : f.id)}
           title="Show only this filter's requests — one saved filter at a time"
         >
@@ -194,6 +178,7 @@ export function FiltersPanel({
   soloId,
   counts,
   canSaveCurrent,
+  onCreate,
   onSaveCurrent,
   onColorPreview,
   onColorPreviewCancel,
@@ -207,6 +192,9 @@ export function FiltersPanel({
       <div className="filters-head">
         <span className="filters-title">Saved filters</span>
         <div className="spacer" />
+        <Button size="small" onClick={onCreate} title="Configure a new saved filter">
+          New filter…
+        </Button>
         <Button
           variant="primary"
           size="small"
@@ -229,7 +217,7 @@ export function FiltersPanel({
           </p>
           <p>
             Matching requests are tinted with that color; <strong>only</strong> narrows the list to
-            a single filter's matches. Type a filter above, then save it here.
+            a single filter's matches. Create one directly here, or save the current filter bar.
           </p>
         </div>
       ) : (

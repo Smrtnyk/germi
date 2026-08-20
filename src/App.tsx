@@ -11,7 +11,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { useAppState, type RightTab } from "./appState";
 import {
-  accelFromEvent,
+  dispatchShortcutCommand,
   prettyShortcut,
   reverseLookup,
   type Accel,
@@ -47,11 +47,25 @@ import { ToastHost, ToastProvider } from "./toast";
 import { handleClearTrafficShortcut } from "./trafficShortcuts";
 import { selectAllContext } from "./selectAllContext";
 import { CaptureImportProgress } from "./captureImport";
+import { DEFAULT_FILTER_OPACITY, nextFilterColor } from "./savedFilters";
+import { useFilterWindowController } from "./useFilterWindowController";
+import { buildAppWindowActions } from "./appWindowActions";
+import { runAppShutdown } from "./appShutdown";
 
 type AppStateValue = ReturnType<typeof useAppState>;
 
-function buildActions(s: AppStateValue, openSettings: () => void): PaletteAction[] {
+function buildActions(
+  s: AppStateValue,
+  openSettings: () => void,
+  openFilterWindow: () => void,
+): PaletteAction[] {
   const ar = s.ar.autoresponder;
+  const windowActions = buildAppWindowActions({
+    settingsReady: s.settingsReady,
+    createFilterShortcut: prettyShortcut(s.shortcuts["create-filter"]),
+    openSettings,
+    openFilterWindow,
+  });
   // The proxy is disabled in viewer mode, so its commands don't apply there.
   const proxyActions: PaletteAction[] = s.viewer
     ? []
@@ -102,6 +116,7 @@ function buildActions(s: AppStateValue, openSettings: () => void): PaletteAction
       shortcut: prettyShortcut(s.shortcuts["toggle-filter-hide"]),
       run: s.savedFilters.toggleViewMode,
     },
+    windowActions.createFilter,
     {
       id: "save-filter",
       group: "Traffic",
@@ -176,13 +191,7 @@ function buildActions(s: AppStateValue, openSettings: () => void): PaletteAction
       label: s.decode ? "Disable body decode" : "Enable body decode",
       run: () => s.setDecode((d) => !d),
     },
-    {
-      id: "settings",
-      group: "App",
-      label: "Open Settings…",
-      disabled: !s.settingsReady,
-      run: openSettings,
-    },
+    windowActions.settings,
     { id: "ca", group: "App", label: "CA certificate…", run: () => s.setCaOpen(true) },
     { id: "new-viewer", group: "App", label: "New viewer window", run: s.launchViewer },
   ];
@@ -217,10 +226,12 @@ function isTyping(target: EventTarget | null): boolean {
 function commandActions(
   s: AppStateValue,
   setPaletteOpen: Dispatch<SetStateAction<boolean>>,
+  openFilterWindow: () => void,
 ): Record<CommandId, () => void> {
   return {
     palette: () => setPaletteOpen((o) => !o),
     "focus-filter": () => focusSearch(s),
+    "create-filter": openFilterWindow,
     "toggle-filter-hide": () => s.savedFilters.toggleViewMode(),
     save: () => s.requestSaveSession(),
     open: () => s.requestOpenCapture(),
@@ -318,15 +329,14 @@ function handleShortcut(
   runHistory: (redo: boolean) => void,
 ) {
   // Configurable commands run first; only their accels live in `reverse`, so the
-  // fixed combos keep their exact semantics. All bound commands fire even while
-  // typing (e.g. Ctrl+S in the filter), matching the previous behavior.
-  const accel = accelFromEvent(e);
-  const cmd = accel ? reverse.get(accel) : undefined;
-  if (cmd) {
-    e.preventDefault();
-    actions[cmd]();
-    return;
-  }
+  // fixed combos keep their exact semantics. Create-filter alone preserves
+  // unrelated editors while remaining available from the startup-focused bar.
+  const dispatched = dispatchShortcutCommand(reverse, e, actions, {
+    editing: isTyping(e.target),
+    fromFilterInput: e.target === s.filterInputRef.current,
+    modalOpen: document.querySelector("dialog[open]") !== null,
+  });
+  if (dispatched !== "none") return;
   if (e.key === "F3") {
     handleFindNav(e, s);
     return;
@@ -681,17 +691,18 @@ function useSafeAppClose(
   const notify = s.notify;
   const { closing, closingRef } = useSafeWindowClose({
     closeOnEscape: false,
-    operation: async () => {
-      await closeSettings();
-      await flushDetachedScriptsWindow(5_000, true);
-      await flushDetachedRuleWindows(5_000, true);
-      await ruleFlushRef.current();
-      await flushRuleMutations();
-      await flushHistory();
-      await flushSettings();
-      await scriptsFlushRef.current();
-      await getCurrentWindow().destroy();
-    },
+    operation: () =>
+      runAppShutdown({
+        closeSettings,
+        closeScripts: () => flushDetachedScriptsWindow(5_000, true),
+        closeRules: () => flushDetachedRuleWindows(5_000, true),
+        flushRuleEditor: () => ruleFlushRef.current(),
+        flushRuleMutations,
+        flushHistory,
+        flushSettings,
+        flushScripts: () => scriptsFlushRef.current(),
+        destroyMain: () => getCurrentWindow().destroy(),
+      }),
     onFailure: (error) => notify("error", `Could not close safely: ${String(error)}`),
     onSetupError: (error) =>
       notify("error", `Could not install the safe-close handler: ${String(error)}`),
@@ -716,8 +727,7 @@ function useAppSettingsWindow(s: AppStateValue) {
     clearListenerError: s.proxy.clearListenerError,
     notify: s.notify,
   });
-  const actions = useMemo(() => buildActions(s, settingsWindow.open), [s, settingsWindow.open]);
-  return { settingsWindow, actions };
+  return settingsWindow;
 }
 
 function useAppKeyboardShortcuts(
@@ -751,13 +761,49 @@ function useAppKeyboardShortcuts(
   }, []);
 }
 
+function useFilterCreation(s: AppStateValue, openSettings: () => void) {
+  const openFilterWindow = useFilterWindowController({
+    initialDraft: {
+      query: s.filtering.filter,
+      kinds: [...s.filtering.typeChips],
+      statuses: [...s.filtering.statusChips],
+      color: nextFilterColor(s.savedFilters.filters),
+      opacity: DEFAULT_FILTER_OPACITY,
+      highlight: true,
+    },
+    existingFilters: s.savedFilters.filters,
+    filterColorPresets: s.settings.settings.filterColorPresets,
+    save: (draft, only) => {
+      const created = s.saveFilterDraft(draft);
+      if (only) s.savedFilters.setSolo(created.id);
+      return created;
+    },
+    preview: s.savedFilters.setDraftPreview,
+    notify: s.notify,
+  });
+  const actions = useMemo(
+    () => buildActions(s, openSettings, openFilterWindow),
+    [s, openSettings, openFilterWindow],
+  );
+  return {
+    actions,
+    openFilterWindow,
+  };
+}
+
+function useAppWindows(s: AppStateValue) {
+  const settingsWindow = useAppSettingsWindow(s);
+  const filterCreation = useFilterCreation(s, settingsWindow.open);
+  return { settingsWindow, filterCreation };
+}
+
 export function App() {
   const ruleFlushRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const scriptsFlushRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const s = useAppState(() => ruleFlushRef.current());
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [cheatOpen, setCheatOpen] = useState(false);
-  const { settingsWindow, actions } = useAppSettingsWindow(s);
+  const { settingsWindow, filterCreation } = useAppWindows(s);
   const { closing, closingRef } = useSafeAppClose(
     s,
     ruleFlushRef,
@@ -766,7 +812,7 @@ export function App() {
   );
 
   const reverse = useMemo(() => reverseLookup(s.shortcuts), [s.shortcuts]);
-  const cmdActions = commandActions(s, setPaletteOpen);
+  const cmdActions = commandActions(s, setPaletteOpen, filterCreation.openFilterWindow);
 
   const fileDrop = useCaptureDrop({
     onFile: s.requestOpenDropped,
@@ -892,6 +938,7 @@ export function App() {
                 soloId: s.savedFilters.soloId,
                 counts: s.savedFilters.counts,
                 canSaveCurrent: s.canSaveFilter,
+                onCreate: filterCreation.openFilterWindow,
                 onSaveCurrent: s.saveCurrentFilter,
                 onColorPreview: s.savedFilters.previewFilterColor,
                 onColorPreviewCancel: s.savedFilters.cancelFilterColorPreview,
@@ -987,7 +1034,9 @@ export function App() {
 
         <SessionDialogs s={s} />
 
-        {paletteOpen && <CommandPalette actions={actions} onClose={() => setPaletteOpen(false)} />}
+        {paletteOpen && (
+          <CommandPalette actions={filterCreation.actions} onClose={() => setPaletteOpen(false)} />
+        )}
         {cheatOpen && <Shortcuts bindings={s.shortcuts} onClose={() => setCheatOpen(false)} />}
 
         <CaptureDropOverlay

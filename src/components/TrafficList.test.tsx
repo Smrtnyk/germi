@@ -5,8 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
 import "../styles.css";
-import { resolvePresentedTint, type SavedFilter } from "../savedFilters";
 import { DEFAULT_FILTER_COLOR_PRESETS } from "../filterColorPresets";
+import { resolvePresentedTint, type FilterDraft, type SavedFilter } from "../savedFilters";
+import { api, type FlowFilterBatchResult, type FlowFilterRequest } from "../ipc";
 import { useSavedFilters } from "../useSavedFilters";
 import { FilterChips } from "./FilterChips";
 import { FiltersPanel } from "./FiltersPanel";
@@ -55,6 +56,7 @@ const PREVIEW_FILTER: SavedFilter = {
 };
 const PREVIEW_FLOW = flowSummary({ imported: true });
 const PREVIEW_FLOWS = [PREVIEW_FLOW];
+const EMPTY_BAR = { query: "", kinds: [], statuses: [] } as const;
 
 function editingComments(overrides: Partial<ReturnType<typeof commentDraft>> = {}) {
   return { ...commentDraft(), ...overrides };
@@ -77,7 +79,7 @@ function SavedFilterColorHarness({
 }: {
   selection?: "none" | "selected" | "checked";
 }) {
-  const savedFilters = useSavedFilters(PREVIEW_FLOWS, null, vi.fn());
+  const savedFilters = useSavedFilters(PREVIEW_FLOWS, EMPTY_BAR, vi.fn());
   return (
     <>
       <FiltersPanel
@@ -86,6 +88,7 @@ function SavedFilterColorHarness({
         soloId={savedFilters.soloId}
         counts={savedFilters.counts}
         canSaveCurrent={false}
+        onCreate={vi.fn()}
         onSaveCurrent={vi.fn()}
         onColorPreview={savedFilters.previewFilterColor}
         onColorPreviewCancel={savedFilters.cancelFilterColorPreview}
@@ -148,6 +151,114 @@ function renderedPreviewRow(): HTMLElement {
   const row = document.querySelector<HTMLElement>(".flow-canvas .flow-row");
   if (!row) throw new Error("Preview flow row is missing");
   return row;
+}
+
+function pendingResult() {
+  let resolve!: (value: FlowFilterBatchResult) => void;
+  const promise = new Promise<FlowFilterBatchResult>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function filterResult(requests: FlowFilterRequest[], matched: string[]): FlowFilterBatchResult {
+  return {
+    cancelled: false,
+    filters: requests.map((request) => ({ key: request.key, matched })),
+  };
+}
+
+const DRAFT_FLOWS = [
+  flowSummary({ id: "one", seq: 1, path: "/one" }),
+  flowSummary({ id: "two", seq: 2, path: "/two" }),
+];
+
+function draft(query: string): FilterDraft {
+  return {
+    query,
+    kinds: [],
+    statuses: [],
+    color: "#e879f9",
+    opacity: 32,
+    highlight: true,
+  };
+}
+
+function DraftPreviewTrafficHarness() {
+  const savedFilters = useSavedFilters(DRAFT_FLOWS, EMPTY_BAR, vi.fn());
+  const common = {
+    columns: resolveColumns(["seq", "url"], []),
+    sort: null,
+    onToggleSort: vi.fn(),
+    selectedId: null,
+    selectedIds: new Set<string>(),
+    onRowClick: vi.fn(),
+    onKeySelect: vi.fn(),
+    onClearSelection: vi.fn(),
+    onDeleteSelected: vi.fn(),
+    onCommentEdit: vi.fn(),
+    onMockFlow: vi.fn(),
+    onFilterToHost: vi.fn(),
+    onExcludeHost: vi.fn(),
+    onCopyCurl: vi.fn(),
+    onCopyBody: vi.fn(),
+    onCompareSelected: vi.fn(),
+    viewer: false,
+  } satisfies Omit<ComponentProps<typeof TrafficList>, "flows" | "view">;
+  return (
+    <>
+      <button
+        onClick={() => savedFilters.setDraftPreview({ draft: draft("content:needle"), only: true })}
+      >
+        Preview only
+      </button>
+      <button
+        onClick={() =>
+          savedFilters.setDraftPreview({ draft: draft("content:needle"), only: false })
+        }
+      >
+        Preview highlight
+      </button>
+      <button
+        onClick={() =>
+          savedFilters.setDraftPreview({ draft: draft("req-content:needle"), only: true })
+        }
+      >
+        Request only
+      </button>
+      <button
+        onClick={() =>
+          savedFilters.setDraftPreview({ draft: draft("resp-header:needle"), only: true })
+        }
+      >
+        Response headers only
+      </button>
+      <button
+        onClick={() =>
+          savedFilters.setDraftPreview({ draft: draft("resp-header:needle"), only: false })
+        }
+      >
+        Highlight response headers
+      </button>
+      <button onClick={savedFilters.clearDraftPreview}>Clear preview</button>
+      <div style={{ display: "grid", height: 180, width: 640 }}>
+        <TrafficList
+          {...common}
+          flows={savedFilters.visibleFlows}
+          view={{
+            matchedIds: savedFilters.listMatchedIds,
+            savedTints: savedFilters.tints,
+            savedTintPresentations: savedFilters.tintPresentations,
+            totalCount: DRAFT_FLOWS.length,
+          }}
+        />
+      </div>
+    </>
+  );
+}
+
+function trafficRows(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>(".flow-canvas .flow-row")];
 }
 
 describe("CommentCell", () => {
@@ -338,6 +449,82 @@ describe("FlowRow saved-filter tint", () => {
     expect(row.classList.contains("tinted")).toBe(false);
     expect(row.style.getPropertyValue("--row-tint")).toBe("");
     expect(getComputedStyle(row).backgroundColor).toBe("rgba(96, 165, 250, 0.13)");
+  });
+});
+
+describe("TrafficList draft preview", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    localStorage.removeItem(SAVED_FILTERS_KEY);
+    localStorage.removeItem("germi.filterMode");
+  });
+
+  it("previews Highlight and Only on real rows without retaining stale semantics", async () => {
+    vi.spyOn(api, "cancelFlowFilterSearch").mockResolvedValue();
+    const content = pendingResult();
+    const request = pendingResult();
+    const responseHeaders = pendingResult();
+    const search = vi
+      .spyOn(api, "searchFlowFilters")
+      .mockImplementationOnce(() => content.promise)
+      .mockImplementationOnce(() => request.promise)
+      .mockImplementationOnce(() => responseHeaders.promise);
+    const screen = await render(<DraftPreviewTrafficHarness />);
+
+    await screen.getByRole("button", { name: "Preview only" }).click();
+    await vi.waitFor(() => expect(search).toHaveBeenCalledOnce());
+    expect(trafficRows()).toHaveLength(2);
+    expect(trafficRows().some((row) => row.classList.contains("tinted"))).toBe(false);
+
+    content.resolve(filterResult(search.mock.calls[0][0], ["one"]));
+    await vi.waitFor(() => {
+      expect(trafficRows()).toHaveLength(1);
+      expect(trafficRows()[0].textContent).toContain("1");
+      expect(trafficRows()[0].title).toBe("saved filter: content:needle (preview)");
+      expect(trafficRows()[0].classList.contains("tinted")).toBe(true);
+    });
+
+    await screen.getByRole("button", { name: "Preview highlight" }).click();
+    await vi.waitFor(() => expect(trafficRows()).toHaveLength(2));
+    expect(search).toHaveBeenCalledOnce();
+    expect(trafficRows().filter((row) => row.classList.contains("tinted"))).toHaveLength(1);
+
+    await screen.getByRole("button", { name: "Request only" }).click();
+    await vi.waitFor(() => {
+      expect(trafficRows()).toHaveLength(2);
+      expect(trafficRows().some((row) => row.classList.contains("tinted"))).toBe(false);
+    });
+    await vi.waitFor(() => expect(search).toHaveBeenCalledTimes(2));
+    request.resolve(filterResult(search.mock.calls[1][0], ["two"]));
+    await vi.waitFor(() => {
+      expect(trafficRows()).toHaveLength(1);
+      expect(trafficRows()[0].textContent).toContain("2");
+      expect(trafficRows()[0].title).toBe("saved filter: req-content:needle (preview)");
+    });
+
+    await screen.getByRole("button", { name: "Response headers only" }).click();
+    await vi.waitFor(() => {
+      expect(trafficRows()).toHaveLength(2);
+      expect(trafficRows().some((row) => row.classList.contains("tinted"))).toBe(false);
+    });
+    await vi.waitFor(() => expect(search).toHaveBeenCalledTimes(3));
+    responseHeaders.resolve(filterResult(search.mock.calls[2][0], ["one"]));
+    await vi.waitFor(() => {
+      expect(trafficRows()).toHaveLength(1);
+      expect(trafficRows()[0].textContent).toContain("1");
+      expect(trafficRows()[0].title).toBe("saved filter: resp-header:needle (preview)");
+    });
+
+    await screen.getByRole("button", { name: "Highlight response headers" }).click();
+    await vi.waitFor(() => expect(trafficRows()).toHaveLength(2));
+    expect(search).toHaveBeenCalledTimes(3);
+    expect(trafficRows().filter((row) => row.classList.contains("tinted"))).toHaveLength(1);
+
+    await screen.getByRole("button", { name: "Clear preview" }).click();
+    await vi.waitFor(() => {
+      expect(trafficRows()).toHaveLength(2);
+      expect(trafficRows().some((row) => row.classList.contains("tinted"))).toBe(false);
+    });
   });
 });
 

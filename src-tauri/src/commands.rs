@@ -8,23 +8,25 @@
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use proxy_core::{
     AutoResponderSummary, BodyComparison, CaptureImportHandle, CaptureImportProgress,
-    CaptureImportStage, FlowDetail, FlowEvent, FlowSummary, GeneralRulesImportMode, HistoryStep,
-    HistoryTag, MockBatch, MockResult, ProxyController, ProxySettings, Rule, RuleSearchScope,
-    RuleSummary, Scenario, ScenarioSummary, Script, ScriptDiagnostic, SearchSide, TestInput,
-    TestResult, CAPTURE_IMPORT_CANCELLED, GENERAL_SCENARIO_ID,
+    CaptureImportStage, FlowDetail, FlowEvent, FlowFilterBatchResult, FlowFilterRequest,
+    FlowSummary, GeneralRulesImportMode, HistoryStep, HistoryTag, MockBatch, MockResult,
+    ProxyController, ProxySettings, Rule, RuleSearchScope, RuleSummary, Scenario, ScenarioSummary,
+    Script, ScriptDiagnostic, SearchSide, TestInput, TestResult, CAPTURE_IMPORT_CANCELLED,
+    GENERAL_SCENARIO_ID,
 };
 use serde::Serialize;
 use tauri::ipc::Channel;
-use tauri::State;
+use tauri::{AppHandle, Emitter, Manager, State, Window, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::state::{AppState, SystemProxyOwnership};
+use crate::state::{AppState, FilterWindowLifecycle, SystemProxyOwnership};
 use crate::system_proxy::{self, SystemProxyConfig};
 
 #[derive(Serialize)]
@@ -1171,6 +1173,80 @@ pub async fn search_cookies(
     })
     .await
     .map_err(|e| format!("cookie search task failed: {e}"))
+}
+
+/// Match several complete traffic-filter plans against one shared, bounded
+/// candidate batch. A newer batch automatically cancels an older blocking
+/// search; the frontend also cancels immediately when its filter generation
+/// changes instead of waiting for the replacement debounce.
+#[tauri::command]
+pub async fn search_flow_filters(
+    state: State<'_, AppState>,
+    filters: Vec<FlowFilterRequest>,
+) -> Result<FlowFilterBatchResult, String> {
+    let controller = state.controller.clone();
+    let epoch = state.flow_filter_search_epoch.clone();
+    let token = epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+    tauri::async_runtime::spawn_blocking(move || {
+        controller.search_flow_filters(&filters, || epoch.load(Ordering::Acquire) != token)
+    })
+    .await
+    .map_err(|error| format!("traffic filter search task failed: {error}"))?
+    .map_err(|error| format!("traffic filter snapshot failed: {error}"))
+}
+
+#[tauri::command]
+pub fn cancel_flow_filter_search(state: State<'_, AppState>) {
+    state
+        .flow_filter_search_epoch
+        .fetch_add(1, Ordering::AcqRel);
+}
+
+/// Bind the session from the live child webview itself. The command-injected
+/// `Window` is its exact native dispatcher, so no pre-ready URL/runtime getter
+/// is needed. A reload is idempotent; a different live session cannot replace
+/// the active incarnation. The listener captures this exact incarnation so a
+/// delayed old `Destroyed` event cannot close a replacement.
+#[tauri::command]
+pub fn register_filter_window_session(
+    app: AppHandle,
+    window: Window,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<FilterWindowLifecycle, String> {
+    if window.label() != "filter-builder" {
+        return Err("only the filter window can announce filter readiness".to_string());
+    }
+    if session_id.trim().is_empty() {
+        return Err("filter-window session id cannot be empty".to_string());
+    }
+    let (lifecycle, newly_bound) = state
+        .filter_window_sessions
+        .lock()
+        .map_err(|_| "filter-window session registry is unavailable".to_string())?
+        .register(session_id)
+        .map_err(str::to_string)?;
+    if newly_bound {
+        let destroyed_app = app.clone();
+        let destroyed_lifecycle = lifecycle.clone();
+        window.on_window_event(move |event| {
+            if !matches!(event, WindowEvent::Destroyed) {
+                return;
+            }
+            let closed = destroyed_app.try_state::<AppState>().is_some_and(|state| {
+                state
+                    .filter_window_sessions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .close(&destroyed_lifecycle)
+            });
+            if closed {
+                let _ =
+                    destroyed_app.emit("germi://filter-window-closed", destroyed_lifecycle.clone());
+            }
+        });
+    }
+    Ok(lifecycle)
 }
 
 /// Deep rule search within one scenario: ids of rules whose `scope` fields match.
@@ -2328,6 +2404,19 @@ mod tests {
 
     fn tag() -> HistoryTag {
         HistoryTag::new("test", None)
+    }
+
+    #[test]
+    fn filter_window_registration_never_inspects_a_pre_ready_webview_url() {
+        let source = include_str!("commands.rs");
+        let registration = source
+            .split("pub fn register_filter_window_session")
+            .nth(1)
+            .and_then(|tail| tail.split("pub fn search_rules").next())
+            .expect("filter registration command source");
+        assert!(!registration.contains(".url()"));
+        let legacy_error = ["could not inspect", " the native filter window"].concat();
+        assert!(!source.contains(&legacy_error));
     }
 
     fn proxy(enable: bool, host: &str, port: u16, bypass: &str) -> SystemProxyConfig {

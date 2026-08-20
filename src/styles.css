@@ -311,6 +311,7 @@ body {
 .body::-webkit-scrollbar,
 .rule-list-viewport::-webkit-scrollbar,
 .rule-editor::-webkit-scrollbar,
+.filter-window::-webkit-scrollbar,
 .modal::-webkit-scrollbar {
   width: 12px;
   height: 12px;
@@ -319,6 +320,7 @@ body {
 .body::-webkit-scrollbar-thumb,
 .rule-list-viewport::-webkit-scrollbar-thumb,
 .rule-editor::-webkit-scrollbar-thumb,
+.filter-window::-webkit-scrollbar-thumb,
 .modal::-webkit-scrollbar-thumb {
   background: var(--scrollbar-thumb);
   background-clip: padding-box;
@@ -329,6 +331,7 @@ body {
 .body::-webkit-scrollbar-thumb:hover,
 .rule-list-viewport::-webkit-scrollbar-thumb:hover,
 .rule-editor::-webkit-scrollbar-thumb:hover,
+.filter-window::-webkit-scrollbar-thumb:hover,
 .modal::-webkit-scrollbar-thumb:hover {
   background: var(--muted);
   background-clip: padding-box;
@@ -337,6 +340,7 @@ body {
 .body::-webkit-scrollbar-corner,
 .rule-list-viewport::-webkit-scrollbar-corner,
 .rule-editor::-webkit-scrollbar-corner,
+.filter-window::-webkit-scrollbar-corner,
 .modal::-webkit-scrollbar-corner {
   background: transparent;
 }
@@ -2731,6 +2735,167 @@ textarea {
   margin: 0 0 8px;
 }
 
+/* ---- modeless saved-filter window (issue #130) ---- */
+.filter-window {
+  height: 100%;
+  overflow: auto;
+  background: var(--bg-1);
+}
+.filter-window-form {
+  width: min(680px, 100%);
+  min-height: 100%;
+  margin: 0 auto;
+  padding: var(--space-8);
+}
+.filter-window-loading {
+  padding: var(--space-8);
+}
+.filter-window-head {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: var(--space-6);
+}
+.filter-window-head h1,
+.filter-window-loading h1 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+.filter-window-head p {
+  margin: var(--space-2) 0 0;
+}
+.filter-window-fields {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.filter-window-label-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+}
+.filter-window-label-row .filter-dialog-label {
+  margin-top: 0;
+}
+.filter-window-label-row .filter-help {
+  margin-left: auto;
+}
+.filter-dialog-label {
+  display: block;
+  margin-top: var(--space-5);
+  font-weight: 600;
+}
+.filter-dialog-hint {
+  margin: var(--space-2) 0 var(--space-3);
+}
+.filter-dialog-query {
+  width: 100%;
+  font-family: var(--mono);
+}
+.filter-dialog-group {
+  margin: var(--space-5) 0 0;
+  padding: 0;
+  border: 0;
+}
+.filter-dialog-group legend {
+  margin-bottom: var(--space-3);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+.filter-dialog-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.filter-guided-search {
+  padding: var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+}
+.filter-guided-controls {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(110px, auto) minmax(150px, auto);
+  gap: var(--space-4);
+  align-items: end;
+}
+.filter-guided-controls label {
+  display: grid;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.filter-guided-controls input,
+.filter-guided-controls select {
+  width: 100%;
+  color: var(--text);
+}
+.filter-guided-value input,
+.filter-effective-query output {
+  font-family: var(--mono);
+}
+.filter-effective-query {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.filter-effective-query output {
+  min-height: 30px;
+  padding: 6px 8px;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+}
+.filter-dialog-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+  margin-top: var(--space-5);
+}
+.filter-dialog-mode-pills {
+  display: inline-flex;
+  gap: var(--space-2);
+}
+.filter-dialog-mode-hint {
+  margin: var(--space-2) 0 0;
+}
+.filter-dialog-color {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--fs-sm);
+}
+.filter-dialog-name {
+  margin: var(--space-5) 0 0;
+  color: var(--muted);
+}
+.filter-dialog-name strong {
+  color: var(--text);
+  font-family: var(--mono);
+}
+.filter-dialog-error {
+  margin: var(--space-4) 0 0;
+}
+.filter-window-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-4);
+  margin-top: var(--space-6);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 620px) {
+  .filter-guided-controls {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ---- settings section checklist (partial import/export, issue #112) ---- */
 .sections-modal {
   width: min(480px, 92vw);
@@ -4184,7 +4349,7 @@ kbd {
   margin: var(--space-5) 0;
   padding: 0;
   display: grid;
-  grid-template-columns: 1fr auto auto auto;
+  grid-template-columns: 1fr auto auto auto auto;
   gap: var(--space-2);
 }
 .shortcut-row {

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use proxy_core::ProxyController;
+use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
 
 use crate::rule_store::RuleStore;
@@ -54,6 +56,51 @@ pub struct PreparedLaunchCapture {
     pub path: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilterWindowLifecycle {
+    pub session_id: String,
+    pub incarnation: u64,
+}
+
+#[derive(Default)]
+pub struct FilterWindowSessions {
+    next_incarnation: u64,
+    active: Option<FilterWindowLifecycle>,
+}
+
+impl FilterWindowSessions {
+    pub fn register(
+        &mut self,
+        session_id: String,
+    ) -> Result<(FilterWindowLifecycle, bool), &'static str> {
+        if let Some(active) = &self.active {
+            if active.session_id == session_id {
+                return Ok((active.clone(), false));
+            }
+            return Err("another native filter window already owns the active session");
+        }
+        self.next_incarnation = self
+            .next_incarnation
+            .checked_add(1)
+            .ok_or("filter-window incarnation counter exhausted")?;
+        let lifecycle = FilterWindowLifecycle {
+            session_id,
+            incarnation: self.next_incarnation,
+        };
+        self.active = Some(lifecycle.clone());
+        Ok((lifecycle, true))
+    }
+
+    pub fn close(&mut self, lifecycle: &FilterWindowLifecycle) -> bool {
+        if self.active.as_ref() != Some(lifecycle) {
+            return false;
+        }
+        self.active = None;
+        true
+    }
+}
+
 /// Tauri-managed application state. The proxy engine lives entirely in
 /// `proxy-core`; this just holds a shared handle to it plus where the CA lives.
 pub struct AppState {
@@ -64,6 +111,14 @@ pub struct AppState {
     /// Stored so a re-subscribe (React Strict Mode double-mount, hot reload, or a
     /// future remount) aborts the prior task instead of leaking it.
     pub flow_forwarder: Mutex<Option<JoinHandle<()>>>,
+    /// Monotonic cancellation epoch for the one main-window filter matcher.
+    /// Starting or explicitly cancelling a batch invalidates older blocking
+    /// work without coupling cancellation to the live flow subscription.
+    pub flow_filter_search_epoch: Arc<AtomicU64>,
+    /// Backend-owned incarnation for the singleton filter window. Both ready
+    /// and destroyed notifications carry this identity, so delayed events from
+    /// an older webview cannot replace or clear the current draft session.
+    pub filter_window_sessions: Mutex<FilterWindowSessions>,
     pub system_proxy_ownership: Mutex<SystemProxyOwnership>,
     /// Hand-off mailbox for the compare window (issue #86): the main window
     /// stores the seed flow ids here before opening/focusing the `compare`
@@ -108,4 +163,49 @@ pub struct AppState {
     /// only inspects saved captures), so a second Germi can run alongside the
     /// capturing one without fighting over the proxy port / system proxy.
     pub viewer: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FilterWindowSessions;
+
+    #[test]
+    fn filter_window_registration_is_idempotent_but_cannot_replace_the_live_session() {
+        let mut sessions = FilterWindowSessions::default();
+        let (first, created) = sessions
+            .register("first".into())
+            .expect("first registration");
+        assert!(created);
+        let (retry, created) = sessions.register("first".into()).expect("ready retry");
+        assert!(!created);
+        assert_eq!(
+            retry, first,
+            "ready retries retain the native window's incarnation"
+        );
+        assert!(sessions.register("replacement".into()).is_err());
+        let (still_current, _) = sessions.register("first".into()).expect("still current");
+        assert_eq!(still_current, first);
+    }
+
+    #[test]
+    fn filter_window_destroy_closes_exactly_once_and_allows_reopen() {
+        let mut sessions = FilterWindowSessions::default();
+        let (first, _) = sessions
+            .register("first".into())
+            .expect("first registration");
+        assert!(sessions.close(&first));
+
+        let (second, _) = sessions
+            .register("second".into())
+            .expect("reopen registration");
+        assert!(second.incarnation > first.incarnation);
+        assert!(!sessions.close(&first));
+        assert!(sessions.register("first".into()).is_err());
+        let (still_current, _) = sessions
+            .register("second".into())
+            .expect("replacement remains");
+        assert_eq!(still_current, second);
+        assert!(sessions.close(&second));
+        assert!(!sessions.close(&second));
+    }
 }

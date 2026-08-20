@@ -3,6 +3,7 @@ export type WindowRoute =
   | { kind: "compare" }
   | { kind: "scripts" }
   | { kind: "settings"; sessionId: string }
+  | { kind: "filter" }
   | { kind: "app" };
 
 export function resolveWindowRoute(search: string): WindowRoute {
@@ -14,5 +15,6 @@ export function resolveWindowRoute(search: string): WindowRoute {
   if (params.get("scripts")) return { kind: "scripts" };
   const settingsSession = params.get("settings");
   if (settingsSession) return { kind: "settings", sessionId: settingsSession };
+  if (params.get("filter")) return { kind: "filter" };
   return { kind: "app" };
 }

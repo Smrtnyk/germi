@@ -23,6 +23,7 @@ import { closeSettingsWindow } from "../settingsWindow";
 import { baselineFromSnapshot, draftFromSnapshot } from "../settingsReconciliation";
 import type { SettingsDialogDraft } from "../settingsDraft";
 import type { ProxySettings, SettingsSectionSummary } from "../types";
+import { useNativeWindowCloseRequest } from "../useSafeWindowClose";
 import { ToastHost, ToastProvider, useToasts } from "../toast";
 import { Button } from "./ui/Button";
 import { SettingsDialog } from "./SettingsDialog";
@@ -89,26 +90,7 @@ function useSettingsOperation(
 }
 
 function useNativeCloseRequests(requestClose: () => void, setError: (error: string) => void): void {
-  useEffect(() => {
-    let active = true;
-    let unlisten: (() => void) | undefined;
-    void getCurrentWindow()
-      .onCloseRequested((event) => {
-        event.preventDefault();
-        requestClose();
-      })
-      .then((stop) => {
-        if (active) unlisten = stop;
-        else stop();
-      })
-      .catch((cause: unknown) => {
-        if (active) setError(String(cause));
-      });
-    return () => {
-      active = false;
-      unlisten?.();
-    };
-  }, [requestClose, setError]);
+  useNativeWindowCloseRequest(requestClose, (cause) => setError(String(cause)));
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {

@@ -29,6 +29,7 @@ function makeProps(overrides: Partial<Props> = {}): Props {
     soloId: null,
     counts: new Map(),
     canSaveCurrent: false,
+    onCreate: vi.fn(),
     onSaveCurrent: vi.fn(),
     onColorPreview: vi.fn(),
     onColorPreviewCancel: vi.fn(),
@@ -57,6 +58,13 @@ describe("FiltersPanel", () => {
     expect(onSaveCurrent).toHaveBeenCalledOnce();
   });
 
+  it("opens direct filter creation from the panel header", async () => {
+    const onCreate = vi.fn();
+    const screen = await render(<FiltersPanel {...makeProps({ onCreate })} />);
+    await screen.getByRole("button", { name: "New filter…" }).click();
+    expect(onCreate).toHaveBeenCalledOnce();
+  });
+
   it("lists an entry with its label and live match count", async () => {
     const screen = await render(
       <FiltersPanel
@@ -70,7 +78,7 @@ describe("FiltersPanel", () => {
     await expect.element(screen.getByText("7")).toBeVisible();
   });
 
-  it("shows a dash for entries whose count needs a backend scan", async () => {
+  it("shows a pending count while a backend scan is running", async () => {
     const screen = await render(
       <FiltersPanel
         {...makeProps({
@@ -128,12 +136,16 @@ describe("FiltersPanel", () => {
     expect(onUpdate).toHaveBeenCalledWith("f1", { kinds: ["doc"] });
   });
 
-  it("warns inside the editor when the query has content terms", async () => {
+  it("keeps backend-backed filters highlightable in the editor", async () => {
+    const onUpdate = vi.fn();
     const screen = await render(
-      <FiltersPanel {...makeProps({ filters: [saved({ query: "body:secret" })] })} />,
+      <FiltersPanel {...makeProps({ filters: [saved({ query: "body:secret" })], onUpdate })} />,
     );
     await screen.getByRole("button", { name: "body:secret", exact: true }).click();
-    await expect.element(screen.getByText(/row highlights/)).toBeVisible();
+    const toggle = screen.getByRole("button", { name: "highlight" });
+    await expect.element(toggle).toBeEnabled();
+    await expect.element(toggle).toHaveClass("on");
+    expect(document.body.textContent).not.toContain("row highlights skip");
   });
 
   it("commits color and opacity together only after Apply", async () => {
@@ -226,12 +238,12 @@ describe("FiltersPanel", () => {
     expect(document.activeElement).toBe(trigger.element());
   });
 
-  it("disables the highlight toggle for cookie filters", async () => {
+  it("keeps the highlight toggle active for cookie filters", async () => {
     const screen = await render(
       <FiltersPanel {...makeProps({ filters: [saved({ query: "req-cookie:session=secret" })] })} />,
     );
     const toggle = screen.getByRole("button", { name: "highlight" });
-    await expect.element(toggle).toBeDisabled();
-    await expect.element(toggle).not.toHaveClass("on");
+    await expect.element(toggle).toBeEnabled();
+    await expect.element(toggle).toHaveClass("on");
   });
 });

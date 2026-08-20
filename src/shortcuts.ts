@@ -14,6 +14,7 @@ type ModifierKeys = Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shif
 export type CommandId =
   | "palette"
   | "focus-filter"
+  | "create-filter"
   | "toggle-filter-hide"
   | "save"
   | "open"
@@ -35,6 +36,7 @@ export interface ShortcutCommand {
 export const SHORTCUT_COMMANDS: readonly ShortcutCommand[] = [
   { id: "palette", label: "Open command palette", default: "Mod+K" },
   { id: "focus-filter", label: "Find in request / focus filter", default: "Mod+F" },
+  { id: "create-filter", label: "Create saved filter", default: "Mod+Shift+F" },
   { id: "toggle-filter-hide", label: "Hide / dim non-matching requests", default: "Mod+H" },
   { id: "save", label: "Save session", default: "Mod+S" },
   { id: "open", label: "Open session", default: "Mod+O" },
@@ -103,6 +105,7 @@ const PRETTY: Record<string, string> = {
 
 /** Human label for an accel, matching the help table's style. "Mod+K" → "Ctrl / ⌘ K". */
 export function prettyShortcut(accel: Accel): string {
+  if (!accel) return "";
   return accel
     .split("+")
     .map((p) => PRETTY[p] ?? p)
@@ -113,26 +116,118 @@ function isCommandId(id: string): id is CommandId {
   return (COMMAND_IDS as readonly string[]).includes(id);
 }
 
+interface BindingOverrides {
+  values: Partial<Bindings>;
+  explicit: Set<CommandId>;
+}
+
+function bindingOverrides(raw: unknown): BindingOverrides {
+  const values: Partial<Bindings> = {};
+  const explicit = new Set<CommandId>();
+  if (!raw || typeof raw !== "object") return { values, explicit };
+  for (const [id, accel] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isCommandId(id) || typeof accel !== "string") continue;
+    values[id] = accel;
+    explicit.add(id);
+  }
+  return { values, explicit };
+}
+
+function claimUniqueBinding(
+  bindings: Bindings,
+  explicit: ReadonlySet<CommandId>,
+  owners: Map<Accel, CommandId>,
+  id: CommandId,
+) {
+  const accel = bindings[id];
+  if (!accel) return;
+  const owner = owners.get(accel);
+  if (!owner) {
+    owners.set(accel, id);
+    return;
+  }
+  if (explicit.has(id) && !explicit.has(owner)) {
+    bindings[owner] = "";
+    owners.set(accel, id);
+    return;
+  }
+  bindings[id] = "";
+}
+
+function removeDuplicateBindings(bindings: Bindings, explicit: ReadonlySet<CommandId>) {
+  const owners = new Map<Accel, CommandId>();
+  for (const id of COMMAND_IDS) claimUniqueBinding(bindings, explicit, owners, id);
+}
+
 /**
  * Merge user overrides over the defaults, ignoring unknown ids and non-string
  * values — tolerant of hand-edited / version-skewed localStorage (like
  * `loadColumnOrder`). A command missing from the overrides keeps its default.
  */
 export function resolveBindings(overrides: unknown): Bindings {
-  const out: Bindings = { ...DEFAULT_SHORTCUTS };
-  if (overrides && typeof overrides === "object") {
-    for (const [id, accel] of Object.entries(overrides as Record<string, unknown>)) {
-      if (isCommandId(id) && typeof accel === "string" && accel) out[id] = accel;
-    }
-  }
+  const overridesById = bindingOverrides(overrides);
+  const out: Bindings = { ...DEFAULT_SHORTCUTS, ...overridesById.values };
+
+  // Older persisted objects do not contain newly-added commands. If a new
+  // default collides with an explicit user override, preserve the user's chord
+  // and leave the new command unbound. Duplicate hand-edits are resolved with
+  // the same explicit-over-default priority so one chord always has one owner.
+  removeDuplicateBindings(out, overridesById.explicit);
   return out;
 }
 
 /** accel → commandId index for O(1) dispatch. */
 export function reverseLookup(bindings: Bindings): Map<Accel, CommandId> {
   const map = new Map<Accel, CommandId>();
-  for (const id of COMMAND_IDS) map.set(bindings[id], id);
+  for (const id of COMMAND_IDS) {
+    const accel = bindings[id];
+    if (accel && !map.has(accel)) map.set(accel, id);
+  }
   return map;
+}
+
+/** Resolve one keyboard event through the reverse index. Kept pure so dispatch
+ *  and unbound-command behavior stay node-testable outside App's DOM handler. */
+export function commandFromEvent(
+  reverse: ReadonlyMap<Accel, CommandId>,
+  event: ModifierKeys,
+): CommandId | null {
+  const accel = accelFromEvent(event);
+  return accel ? (reverse.get(accel) ?? null) : null;
+}
+
+export interface ShortcutDispatchContext {
+  editing: boolean;
+  fromFilterInput: boolean;
+  modalOpen: boolean;
+}
+
+export type ShortcutDispatchResult = "none" | "ignored" | "handled";
+
+type DispatchEvent = ModifierKeys & Pick<KeyboardEvent, "preventDefault">;
+
+/** Dispatch one configurable chord. Direct filter creation remains available
+ *  from the app's startup-focused filter bar, stays out of unrelated editors,
+ *  and consumes its chord while another modal owns the window so browser-find
+ *  cannot appear over that modal. */
+export function dispatchShortcutCommand(
+  reverse: ReadonlyMap<Accel, CommandId>,
+  event: DispatchEvent,
+  actions: Readonly<Record<CommandId, () => void>>,
+  context: ShortcutDispatchContext,
+): ShortcutDispatchResult {
+  const command = commandFromEvent(reverse, event);
+  if (!command) return "none";
+  if (command === "create-filter") {
+    if (context.modalOpen) {
+      event.preventDefault();
+      return "handled";
+    }
+    if (context.editing && !context.fromFilterInput) return "ignored";
+  }
+  event.preventDefault();
+  actions[command]();
+  return "handled";
 }
 
 export type Conflict = { kind: "command"; id: CommandId } | { kind: "reserved" };
@@ -151,4 +246,33 @@ export function findConflict(
     if (id !== exceptId && bindings[id] === accel) return { kind: "command", id };
   }
   return null;
+}
+
+export type AssignBindingResult =
+  | { ok: true; bindings: Bindings; swappedWith: CommandId | null }
+  | { ok: false; conflict: { kind: "reserved" } };
+
+/** Assign or clear one command. Taking another command's chord swaps that
+ *  command onto the assignee's previous chord (or unbinds it when the assignee
+ *  was clear), so Ctrl/Cmd+F can genuinely move between filter actions. */
+export function assignBinding(
+  bindings: Bindings,
+  id: CommandId,
+  accel: Accel,
+): AssignBindingResult {
+  if (!accel) return { ok: true, bindings: { ...bindings, [id]: "" }, swappedWith: null };
+  const clash = findConflict(bindings, accel, id);
+  if (clash?.kind === "reserved") return { ok: false, conflict: clash };
+  if (!clash) {
+    return { ok: true, bindings: { ...bindings, [id]: accel }, swappedWith: null };
+  }
+  return {
+    ok: true,
+    bindings: {
+      ...bindings,
+      [id]: accel,
+      [clash.id]: bindings[id],
+    },
+    swappedWith: clash.id,
+  };
 }

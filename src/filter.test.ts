@@ -165,6 +165,45 @@ describe("parseFilter summary matching", () => {
 });
 
 describe("parseFilter content terms", () => {
+  it("turns each bare text, phrase, and regex into one all-location logical term", () => {
+    expect(parseFilter('alpha "beta gamma" -/delta.+/').contentTerms).toEqual([
+      { field: "all", side: "either", value: "alpha", regex: false, neg: false },
+      { field: "all", side: "either", value: "beta gamma", regex: false, neg: false },
+      { field: "all", side: "either", value: "delta.+", regex: true, neg: true },
+    ]);
+  });
+
+  it("keeps a fully quoted known-prefix phrase as one bare literal", () => {
+    expect(parseFilter('"host: api" -"content:value"').contentTerms).toEqual([
+      { field: "all", side: "either", value: "host: api", regex: false, neg: false },
+      { field: "all", side: "either", value: "content:value", regex: false, neg: true },
+    ]);
+  });
+
+  it("keeps url-only terms frontend-side and out of the backend candidate projection", () => {
+    const parsed = parseFilter("url:api.example needle");
+    expect(parsed.contentTerms).toEqual([
+      { field: "all", side: "either", value: "needle", regex: false, neg: false },
+    ]);
+    expect(parsed.matchCandidates(summary({ host: "api.example" }))).toBe(true);
+    expect(parsed.matchCandidates(summary({ host: "other.example" }))).toBe(false);
+  });
+
+  it("extracts header-OR-body content terms for either side", () => {
+    expect(parseFilter("content:a req-content:b -resp-content:/c/").contentTerms).toEqual([
+      { field: "content", side: "either", value: "a", regex: false, neg: false },
+      { field: "content", side: "request", value: "b", regex: false, neg: false },
+      { field: "content", side: "response", value: "c", regex: true, neg: true },
+    ]);
+  });
+
+  it("decodes escaped quotes and backslashes while keeping quoted slashes literal", () => {
+    expect(parseFilter('content:"a \\"b\\" \\\\ c" "/literal/"').contentTerms).toEqual([
+      { field: "content", side: "either", value: 'a "b" \\ c', regex: false, neg: false },
+      { field: "all", side: "either", value: "/literal/", regex: false, neg: false },
+    ]);
+  });
+
   it("extracts body terms without affecting summary matching", () => {
     const parsed = parseFilter("body:secret");
     expect(parsed.matchSummary(summary())).toBe(true);
@@ -250,6 +289,11 @@ describe("rawSegments", () => {
   it("round-trips back to the original query via join", () => {
     const q = 'host:example -status:200 "a b"';
     expect(rawSegments(q).join(" ")).toBe(q);
+  });
+
+  it("does not split at whitespace after escaped quotes or a trailing escaped backslash", () => {
+    const query = 'content:"a \\"b\\" \\\\" status:2xx';
+    expect(rawSegments(query)).toEqual(['content:"a \\"b\\" \\\\"', "status:2xx"]);
   });
 });
 

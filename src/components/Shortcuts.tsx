@@ -7,7 +7,7 @@ import { Modal } from "./ui/Modal";
 /** The configurable rows pull their keys from `bindings`; the rest (list
  *  navigation, undo/redo, the `/` and `?` aliases) are fixed and stay literal. */
 function buildGroups(b: Bindings): { title: string; rows: { keys: string; desc: string }[] }[] {
-  return [
+  const groups = [
     {
       title: "Global",
       rows: [
@@ -24,6 +24,10 @@ function buildGroups(b: Bindings): { title: string; rows: { keys: string; desc: 
         {
           keys: prettyShortcut(b["focus-filter"]),
           desc: "Find in the open request, else focus the filter",
+        },
+        {
+          keys: prettyShortcut(b["create-filter"]),
+          desc: "Create a saved filter",
         },
         {
           keys: prettyShortcut(b["toggle-filter-hide"]),
@@ -55,6 +59,7 @@ function buildGroups(b: Bindings): { title: string; rows: { keys: string; desc: 
       ],
     },
   ];
+  return groups.map((group) => ({ ...group, rows: group.rows.filter((row) => row.keys) }));
 }
 
 type ShortcutGroup = ReturnType<typeof buildGroups>[number];
@@ -106,10 +111,12 @@ export function Shortcuts({ bindings, onClose }: { bindings: Bindings; onClose: 
               ))}
             </div>
           </section>
-          <p className="muted small">
-            Tip: <kbd>{prettyShortcut(bindings.palette)}</kbd> opens the command palette for every
-            action. Rebind these under Settings → Shortcuts.
-          </p>
+          {bindings.palette && (
+            <p className="muted small">
+              Tip: <kbd>{prettyShortcut(bindings.palette)}</kbd> opens the command palette for every
+              action. Rebind these under Settings → Shortcuts.
+            </p>
+          )}
         </>
       )}
     </Modal>

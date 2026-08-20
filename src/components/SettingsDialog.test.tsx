@@ -806,3 +806,25 @@ describe("SettingsDialog", () => {
     await expectFirstFilterPreset(screen, "#11223380");
   });
 });
+
+describe("SettingsDialog in-app shortcuts", () => {
+  it("swaps Ctrl/Cmd+F in the draft and persists it only on Save", async () => {
+    const persist = vi.fn<(draft: SettingsDialogDraft) => Promise<void>>(() => Promise.resolve());
+    const screen = await render(<Harness persist={persist} />);
+    await screen.getByRole("button", { name: "Shortcuts" }).click();
+    const row = screen.getByText("Create saved filter").element().closest("li");
+    const record = row?.querySelectorAll("button")[0] as HTMLButtonElement;
+    record.click();
+    await userEvent.keyboard("{Control>}f{/Control}");
+    expect(persist).not.toHaveBeenCalled();
+
+    await screen.getByRole("button", { name: "Save" }).click();
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledOnce());
+    const persistedDraft = persist.mock.calls[0]?.[0];
+    expect(persistedDraft?.shortcuts).toEqual({
+      ...DEFAULT_SHORTCUTS,
+      "focus-filter": "Mod+Shift+F",
+      "create-filter": "Mod+F",
+    });
+  });
+});
