@@ -12,6 +12,7 @@
 //! accumulate. Request-phase actions run in `handle_request`; response-phase in
 //! `handle_response`.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::{LazyLock, Mutex};
@@ -91,10 +92,61 @@ impl Matcher {
         let url = format!("{}://{}{}", req.scheme, req.host, req.path);
         match self.url_match {
             MatchKind::Contains => self.url.is_empty() || url.contains(&self.url),
-            MatchKind::Exact => url == self.url,
+            MatchKind::Exact => exact_url_matches(&self.url, &url),
             MatchKind::Regex => cached_regex(&self.url).is_some_and(|re| re.is_match(&url)),
         }
     }
+}
+
+/// Compare exact URL matchers while treating an explicit scheme-default port
+/// as equivalent to its omitted form. Captures and imported HAR entries keep
+/// their original URL text for display/export; this canonical view exists only
+/// at the exact-match boundary.
+fn exact_url_matches(pattern: &str, request_url: &str) -> bool {
+    pattern == request_url
+        || without_explicit_default_port(pattern) == without_explicit_default_port(request_url)
+}
+
+/// Remove only `:80` from an HTTP authority or `:443` from an HTTPS authority.
+/// Everything else remains byte-for-byte unchanged so Exact keeps its existing
+/// semantics for paths, queries, host spelling, and non-default ports.
+fn without_explicit_default_port(url: &str) -> Cow<'_, str> {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Cow::Borrowed(url);
+    };
+    let port = if scheme.eq_ignore_ascii_case("http") {
+        ":80"
+    } else if scheme.eq_ignore_ascii_case("https") {
+        ":443"
+    } else {
+        return Cow::Borrowed(url);
+    };
+    let authority_end = rest
+        .char_indices()
+        .find_map(|(index, ch)| matches!(ch, '/' | '?' | '#').then_some(index))
+        .unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host_port)| host_port);
+    let Some(host) = host_port.strip_suffix(port) else {
+        return Cow::Borrowed(url);
+    };
+    let valid_host = if host.starts_with('[') {
+        host.ends_with(']')
+    } else {
+        !host.is_empty() && !host.contains(':')
+    };
+    if !valid_host {
+        return Cow::Borrowed(url);
+    }
+
+    let authority_end = scheme.len() + 3 + authority_end;
+    let port_start = authority_end - port.len();
+    let mut canonical = String::with_capacity(url.len() - port.len());
+    canonical.push_str(&url[..port_start]);
+    canonical.push_str(&url[authority_end..]);
+    Cow::Owned(canonical)
 }
 
 /// What a rule does when it matches.
@@ -2351,6 +2403,93 @@ mod tests {
         assert!(rule
             .matcher
             .matches(&req("POST", "http", "other.test", "/")));
+    }
+
+    #[test]
+    fn exact_match_treats_explicit_default_ports_as_equivalent() {
+        for (scheme, port) in [("https", 443), ("http", 80)] {
+            let implicit = Matcher {
+                method: None,
+                url: format!("{scheme}://example.test/items?q=1"),
+                url_match: MatchKind::Exact,
+            };
+            let explicit = Matcher {
+                method: None,
+                url: format!("{scheme}://example.test:{port}/items?q=1"),
+                url_match: MatchKind::Exact,
+            };
+
+            assert!(implicit.matches(&req(
+                "GET",
+                scheme,
+                &format!("example.test:{port}"),
+                "/items?q=1"
+            )));
+            assert!(explicit.matches(&req("GET", scheme, "example.test", "/items?q=1")));
+        }
+    }
+
+    #[test]
+    fn exact_default_port_matching_preserves_url_specificity() {
+        let matcher = Matcher {
+            method: None,
+            url: "https://[2001:db8::1]:443/items?q=1".into(),
+            url_match: MatchKind::Exact,
+        };
+
+        assert!(matcher.matches(&req("GET", "https", "[2001:db8::1]", "/items?q=1")));
+        assert!(!matcher.matches(&req("GET", "https", "[2001:db8::1]", "/items?q=2")));
+        assert!(!matcher.matches(&req("GET", "https", "[2001:db8::1]:8443", "/items?q=1")));
+
+        let non_default = Matcher {
+            method: None,
+            url: "https://example.test:8443/items?q=1".into(),
+            url_match: MatchKind::Exact,
+        };
+        assert!(!non_default.matches(&req("GET", "https", "example.test", "/items?q=1")));
+        assert!(non_default.matches(&req("GET", "https", "example.test:8443", "/items?q=1")));
+    }
+
+    #[test]
+    fn contains_and_regex_match_original_url_text() {
+        let request = req("GET", "https", "example.test", "/items");
+        let contains = Matcher {
+            method: None,
+            url: "https://example.test:443/items".into(),
+            url_match: MatchKind::Contains,
+        };
+        let regex = Matcher {
+            method: None,
+            url: r"^https://example\.test:443/items$".into(),
+            url_match: MatchKind::Regex,
+        };
+
+        assert!(!contains.matches(&request));
+        assert!(!regex.matches(&request));
+    }
+
+    #[test]
+    fn mock_rule_preserves_explicit_default_port_for_display_and_export() {
+        let flow = Flow {
+            id: "f".into(),
+            seq: 0,
+            request: req("GET", "https", "some.domain.com:443", "/Home.aspx"),
+            response: None,
+            matched_rule: None,
+            duration_ms: None,
+            ttfb_ms: None,
+            comment: None,
+            availability: None,
+            imported: true,
+        };
+
+        let rule = respond_rule_from_flow(&flow, "r".into());
+
+        assert_eq!(rule.matcher.url, "https://some.domain.com:443/Home.aspx");
+        assert_eq!(rule.label(), "https://some.domain.com:443/Home.aspx");
+        assert!(rule
+            .matcher
+            .matches(&req("GET", "https", "some.domain.com", "/Home.aspx")));
     }
 
     #[test]
