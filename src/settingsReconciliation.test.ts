@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { SettingsDialogDraft } from "./settingsDraft";
+import { DEFAULT_FILTER_COLOR_PRESETS } from "./filterColorPresets";
 import { reconcileSettingsDraft } from "./settingsReconciliation";
 import { DEFAULT_SHORTCUTS } from "./shortcuts";
 import type { ProxySettings } from "./types";
@@ -18,6 +19,7 @@ function settings(overrides: Partial<ProxySettings> = {}): ProxySettings {
     systemProxyHotkey: "",
     theme: "system",
     highlightColors: {},
+    filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
     ...overrides,
   };
 }
@@ -83,6 +85,40 @@ describe("modeless Settings reconciliation", () => {
     expect(reconcileSettingsDraft(baseline, edited, current)).toEqual({
       ok: false,
       conflicts: ["settings.highlightColors.selected"],
+    });
+  });
+
+  it("carries a child-owned filter palette through a newer main-owned snapshot", () => {
+    const baseline = draft(settings());
+    const customPresets = ["#11223380", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)];
+    const edited = draft(settings({ filterColorPresets: customPresets }));
+    const current = draft(settings({ excludedHosts: ["main.example"] }));
+
+    expect(reconcileSettingsDraft(baseline, edited, current)).toEqual({
+      ok: true,
+      draft: {
+        ...current,
+        settings: { ...current.settings, filterColorPresets: customPresets },
+      },
+    });
+  });
+
+  it("treats the fixed filter palette as one authoritative field on overlap", () => {
+    const baseline = draft(settings());
+    const edited = draft(
+      settings({
+        filterColorPresets: ["#11223380", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)],
+      }),
+    );
+    const current = draft(
+      settings({
+        filterColorPresets: ["#44556680", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)],
+      }),
+    );
+
+    expect(reconcileSettingsDraft(baseline, edited, current)).toEqual({
+      ok: false,
+      conflicts: ["settings.filterColorPresets"],
     });
   });
 });

@@ -888,6 +888,7 @@ export function App() {
               scriptsFlushRef={scriptsFlushRef}
               filters={{
                 filters: s.savedFilters.filters,
+                colorPresets: s.settings.settings.filterColorPresets,
                 soloId: s.savedFilters.soloId,
                 counts: s.savedFilters.counts,
                 canSaveCurrent: s.canSaveFilter,

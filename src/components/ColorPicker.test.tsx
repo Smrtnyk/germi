@@ -1,8 +1,9 @@
-import { userEvent } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
 import "../styles.css";
+import { DEFAULT_FILTER_COLOR_PRESETS, filterColorPresetParts } from "../filterColorPresets";
 import { ColorPicker } from "./ColorPicker";
 import { Modal } from "./ui/Modal";
 
@@ -30,6 +31,110 @@ function clickBackdrop(dialog: HTMLDialogElement) {
 }
 
 describe("ColorPicker", () => {
+  it("selects a complete preset by native radio keyboard interaction before one Apply", async () => {
+    const onPreview = vi.fn();
+    const onCommit = vi.fn();
+    const presets = filterColorPresetParts(DEFAULT_FILTER_COLOR_PRESETS.slice(0, 3));
+    const screen = await renderPicker({ value: presets[0], presets, onPreview, onCommit });
+    await screen.getByRole("button", { name: "Accent color" }).click();
+    const first = screen.getByRole("radio", { name: /^Preset 1,/ });
+    const second = screen.getByRole("radio", { name: /^Preset 2,/ });
+    const presetsGroup = screen.getByRole("group", { name: "Filter color presets" });
+
+    await expect.element(first).toBeChecked();
+    await expect.element(first).toHaveFocus();
+    const focusRule = [...document.styleSheets]
+      .flatMap((sheet) => [...sheet.cssRules])
+      .find((rule) => rule.cssText.includes("label:has(input:focus-visible)"));
+    expect(focusRule?.cssText).toContain("outline: 2px solid var(--accent)");
+    await userEvent.keyboard("{ArrowRight}");
+
+    await expect.element(second).toBeChecked();
+    await expect.element(presetsGroup.getByText("Preset 2 selected")).toBeVisible();
+    expect(onPreview).toHaveBeenLastCalledWith(presets[1]);
+    expect(onCommit).not.toHaveBeenCalled();
+    await screen.getByRole("button", { name: "Apply" }).click();
+    expect(onCommit).toHaveBeenCalledExactlyOnceWith(presets[1]);
+  });
+
+  it("keeps ten swatch-only radio targets compact and contained at default and narrow widths", async () => {
+    const originalViewport = { width: window.innerWidth, height: window.innerHeight };
+    await page.viewport(561, 800);
+
+    try {
+      const presets = filterColorPresetParts(DEFAULT_FILTER_COLOR_PRESETS);
+      const screen = await renderPicker({ value: presets[0], presets });
+      await screen.getByRole("button", { name: "Accent color" }).click();
+
+      const dialog = screen.getByRole("dialog", { name: "Accent color" }).element();
+      const grid = dialog.querySelector<HTMLElement>(".color-picker-preset-grid")!;
+      const labels = [...grid.querySelectorAll<HTMLLabelElement>("label")];
+      expect(labels).toHaveLength(10);
+      expect(grid.querySelector(".color-picker-preset-name")).toBeNull();
+
+      for (const [index, preset] of presets.entries()) {
+        const radio = screen.getByRole("radio", {
+          name: `Preset ${index + 1}, ${preset.hex}, ${preset.alphaPct}% opacity`,
+        });
+        await expect.element(radio).toBeVisible();
+        expect(radio.element().getBoundingClientRect().width).toBeGreaterThan(0);
+      }
+
+      const coarsePointerRule = [...document.styleSheets]
+        .flatMap((sheet) => [...sheet.cssRules])
+        .find(
+          (rule) =>
+            rule.cssText.includes("@media (pointer: coarse)") &&
+            rule.cssText.includes(".color-picker-preset-grid label"),
+        );
+      expect(coarsePointerRule?.cssText).toContain("min-block-size: 44px");
+
+      for (const width of [561, 320]) {
+        await page.viewport(width, 800);
+        const gridRect = grid.getBoundingClientRect();
+        expect(grid.scrollWidth, `${width}px grid overflow`).toBeLessThanOrEqual(grid.clientWidth);
+
+        for (const label of labels) {
+          const labelRect = label.getBoundingClientRect();
+          const swatchRect = label
+            .querySelector<HTMLElement>(".color-picker-preset-swatch")!
+            .getBoundingClientRect();
+          expect(labelRect.width, `${width}px target width`).toBeGreaterThanOrEqual(24);
+          expect(labelRect.height, `${width}px target height`).toBeGreaterThanOrEqual(36);
+          expect(labelRect.height, `${width}px compact target height`).toBeLessThanOrEqual(44);
+          expect(labelRect.left).toBeGreaterThanOrEqual(gridRect.left);
+          expect(labelRect.right).toBeLessThanOrEqual(gridRect.right);
+          expect(swatchRect.width, `${width}px compact swatch width`).toBeLessThanOrEqual(38);
+          expect(swatchRect.height, `${width}px compact swatch height`).toBeLessThanOrEqual(18);
+          expect(swatchRect.left).toBeGreaterThanOrEqual(labelRect.left);
+          expect(swatchRect.right).toBeLessThanOrEqual(labelRect.right);
+        }
+      }
+    } finally {
+      await page.viewport(originalViewport.width, originalViewport.height);
+    }
+  });
+
+  it("marks a manual value as custom and cancels a preset draft on Escape", async () => {
+    const onPreview = vi.fn();
+    const onCommit = vi.fn();
+    const onCancel = vi.fn();
+    const presets = filterColorPresetParts(DEFAULT_FILTER_COLOR_PRESETS.slice(0, 3));
+    const screen = await renderPicker({ presets, onPreview, onCommit, onCancel });
+    await screen.getByRole("button", { name: "Accent color" }).click();
+    const presetsGroup = screen.getByRole("group", { name: "Filter color presets" });
+
+    await expect.element(presetsGroup.getByText("Custom color selected")).toBeVisible();
+    for (const radio of screen.getByRole("radio").all())
+      await expect.element(radio).not.toBeChecked();
+
+    await screen.getByRole("radio", { name: /^Preset 3,/ }).click();
+    expect(onPreview).toHaveBeenLastCalledWith(presets[2]);
+    await userEvent.keyboard("{Escape}");
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
   it("opens from the keyboard and focuses the native hue control", async () => {
     const screen = await renderPicker();
     const trigger = screen.getByRole("button", { name: "Accent color" });

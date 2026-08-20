@@ -2,6 +2,7 @@ import { Fragment, useState, type DragEvent as ReactDragEvent } from "react";
 import { isEqual } from "es-toolkit";
 
 import { COLOR_DRAG_MIME, hasColorDrag } from "../dnd";
+import { DEFAULT_FILTER_COLOR_PRESETS } from "../filterColorPresets";
 import {
   applyAppearance,
   effectiveColor,
@@ -50,10 +51,16 @@ export function AppearanceSettings({
 
   function resetAll() {
     onPreviewAppearance({ theme: settings.theme, highlightColors: {} });
-    onChange({ ...settings, highlightColors: {} });
+    onChange({
+      ...settings,
+      highlightColors: {},
+      filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
+    });
   }
 
-  const anyOverridden = HIGHLIGHT_COLORS.some((s) => colors[s.key] !== undefined);
+  const anyOverridden =
+    HIGHLIGHT_COLORS.some((s) => colors[s.key] !== undefined) ||
+    !isEqual(settings.filterColorPresets, DEFAULT_FILTER_COLOR_PRESETS);
 
   return (
     <div className="settings-pane">
@@ -128,12 +135,70 @@ export function AppearanceSettings({
           </ul>
         </Fragment>
       ))}
-      <div className="col-add-list">
+      <div className="col-add-list appearance-reset-actions">
         <Button size="small" onClick={resetAll} disabled={!anyOverridden}>
           Reset all to defaults
         </Button>
       </div>
+      <FilterColorPresetSettings settings={settings} onChange={onChange} />
     </div>
+  );
+}
+
+function FilterColorPresetSettings({
+  settings,
+  onChange,
+}: {
+  settings: ProxySettings;
+  onChange: (settings: ProxySettings) => void;
+}) {
+  const presets = settings.filterColorPresets;
+
+  function updatePreset(index: number, value: string) {
+    if (presets[index] === value) return;
+    const next = [...presets];
+    next[index] = value;
+    onChange({ ...settings, filterColorPresets: next });
+  }
+
+  return (
+    <section className="filter-preset-settings" aria-labelledby="filter-preset-settings-title">
+      <div id="filter-preset-settings-title" className="col-section-label">
+        Filter color presets
+      </div>
+      <p className="muted small">
+        These complete color and opacity tints appear as one-step choices whenever you edit a saved
+        filter color.
+      </p>
+      <div className="filter-preset-settings-grid">
+        {presets.map((preset, index) => (
+          <div className="filter-preset-setting" key={index}>
+            <span>Preset {index + 1}</span>
+            <ColorPicker
+              label={`Filter preset ${index + 1}`}
+              value={splitHex8(preset)}
+              swatchBackground={preset}
+              dataKey={`filter-preset-${index + 1}`}
+              onCommit={(parts) => updatePreset(index, joinHex8(parts))}
+            />
+          </div>
+        ))}
+      </div>
+      <div className="col-add-list appearance-reset-actions">
+        <Button
+          size="small"
+          disabled={isEqual(presets, DEFAULT_FILTER_COLOR_PRESETS)}
+          onClick={() =>
+            onChange({
+              ...settings,
+              filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
+            })
+          }
+        >
+          Reset filter presets
+        </Button>
+      </div>
+    </section>
   );
 }
 

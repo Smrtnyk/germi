@@ -313,6 +313,8 @@ export interface ProxySettings {
   /** Highlight-color overrides keyed by semantic name (see `theme.ts`),
    *  values `#rrggbbaa`. Sparse — absent keys use the stylesheet default. */
   highlightColors: Record<string, string>;
+  /** Exactly ten complete saved-filter tints, normalized as `#rrggbbaa`. */
+  filterColorPresets: string[];
 }
 
 export type Theme = "dark" | "light";

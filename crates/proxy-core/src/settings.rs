@@ -2,6 +2,90 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
+use std::ops::Deref;
+
+pub const FILTER_COLOR_PRESET_COUNT: usize = 10;
+const DEFAULT_FILTER_COLOR_PRESETS_JSON: &str = include_str!("../../../filter-color-presets.json");
+
+/// Ten complete filter tints, serialized as normalized `#rrggbbaa` strings.
+/// The fixed-size wrapper makes an invalid settings file unable to leak a
+/// short or oversized palette into any frontend window.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct FilterColorPresets([String; FILTER_COLOR_PRESET_COUNT]);
+
+impl FilterColorPresets {
+    fn default_values() -> [String; FILTER_COLOR_PRESET_COUNT] {
+        let values: Vec<String> = serde_json::from_str(DEFAULT_FILTER_COLOR_PRESETS_JSON)
+            .expect("the bundled filter-color preset palette must be valid JSON");
+        let values: [String; FILTER_COLOR_PRESET_COUNT] = values
+            .try_into()
+            .expect("the bundled filter-color preset palette must contain exactly ten entries");
+        std::array::from_fn(|index| {
+            normalize_filter_color_preset(&values[index], "")
+                .expect("each bundled filter-color preset must be a complete valid #rrggbbaa tint")
+        })
+    }
+}
+
+impl Default for FilterColorPresets {
+    fn default() -> Self {
+        Self(Self::default_values())
+    }
+}
+
+impl Deref for FilterColorPresets {
+    type Target = [String; FILTER_COLOR_PRESET_COUNT];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Match the frontend picker's `Math.round(alpha * 100 / 255)` conversion.
+fn alpha_byte_to_percent(alpha: u8) -> u8 {
+    ((u16::from(alpha) * 100 + 127) / 255) as u8
+}
+
+/// Match the frontend picker's `Math.round(percent * 255 / 100)` conversion.
+fn alpha_percent_to_byte(alpha_percent: u8) -> u8 {
+    ((u16::from(alpha_percent) * 255 + 50) / 100) as u8
+}
+
+fn normalize_filter_color_preset(value: &str, fallback: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    let digits = normalized.strip_prefix('#')?;
+    if !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    match digits.len() {
+        8 => {
+            // Persist only bytes the whole-percent picker can represent, so a
+            // settings load followed by splitHex8/joinHex8 is stable.
+            let alpha = u8::from_str_radix(&digits[6..8], 16).ok()?;
+            let canonical_alpha = alpha_percent_to_byte(alpha_byte_to_percent(alpha));
+            Some(format!("#{}{canonical_alpha:02x}", &digits[..6]))
+        }
+        // A hue-only legacy value keeps this slot's deliberately usable alpha.
+        6 => Some(format!("#{digits}{}", fallback.get(7..9)?)),
+        _ => None,
+    }
+}
+
+impl<'de> Deserialize<'de> for FilterColorPresets {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let incoming = raw.as_array();
+        let defaults = Self::default_values();
+        Ok(Self(std::array::from_fn(|index| {
+            incoming
+                .and_then(|values| values.get(index))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| normalize_filter_color_preset(value, &defaults[index]))
+                .unwrap_or_else(|| defaults[index].clone())
+        })))
+    }
+}
 
 /// User-selected application color preference. Legacy settings without this
 /// field follow the operating system, matching the first-run UI default.
@@ -79,6 +163,10 @@ pub struct ProxySettings {
     /// with everything else (issue #93).
     #[serde(default)]
     pub highlight_colors: BTreeMap<String, String>,
+    /// Ten user-editable saved-filter presets. Each value carries hue and alpha
+    /// so choosing a preset is a complete, one-step tint choice.
+    #[serde(default)]
+    pub filter_color_presets: FilterColorPresets,
 }
 
 fn default_port() -> u16 {
@@ -111,6 +199,7 @@ impl Default for ProxySettings {
             system_proxy_hotkey: String::new(),
             theme: ColorTheme::default(),
             highlight_colors: BTreeMap::new(),
+            filter_color_presets: FilterColorPresets::default(),
         }
     }
 }
@@ -324,6 +413,110 @@ mod tests {
         assert_eq!(
             back.highlight_colors.get("selected").map(String::as_str),
             Some("#173a36ff")
+        );
+    }
+
+    #[test]
+    fn filter_color_presets_default_and_round_trip_as_ten_normalized_tints() {
+        let defaults = FilterColorPresets::default();
+        let bundled: Vec<String> = serde_json::from_str(DEFAULT_FILTER_COLOR_PRESETS_JSON)
+            .expect("parse bundled defaults in contract test");
+        assert_eq!(defaults.len(), FILTER_COLOR_PRESET_COUNT);
+        assert_eq!(defaults[0], "#ef444447");
+        assert!(
+            defaults.iter().eq(bundled.iter()),
+            "the bundled defaults must already be canonical"
+        );
+        assert!(defaults.iter().all(|value| {
+            value.len() == 9
+                && value.starts_with('#')
+                && value[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+                && value == &value.to_ascii_lowercase()
+        }));
+
+        let legacy: ProxySettings = serde_json::from_str("{}").expect("load legacy settings");
+        assert_eq!(legacy.filter_color_presets, defaults);
+
+        let json = serde_json::to_string(&legacy).expect("serialize settings");
+        let back: ProxySettings = serde_json::from_str(&json).expect("round-trip");
+        assert_eq!(back.filter_color_presets, defaults);
+    }
+
+    #[test]
+    fn filter_color_presets_canonicalize_every_alpha_byte_to_the_picker_domain() {
+        for alpha in u8::MIN..=u8::MAX {
+            // Integer forms of the frontend's Math.round(byte * 100 / 255),
+            // then Math.round(percent * 255 / 100).
+            let expected_percent = ((u16::from(alpha) * 100 + 127) / 255) as u8;
+            let expected_byte = ((u16::from(expected_percent) * 255 + 50) / 100) as u8;
+            assert_eq!(alpha_byte_to_percent(alpha), expected_percent);
+            assert_eq!(alpha_percent_to_byte(expected_percent), expected_byte);
+
+            let input = format!("#112233{alpha:02x}");
+            let expected = format!("#112233{expected_byte:02x}");
+            let canonical = normalize_filter_color_preset(&input, "#00000047")
+                .expect("normalize valid eight-digit tint");
+            assert_eq!(canonical, expected, "input {input}");
+            assert_eq!(
+                normalize_filter_color_preset(&canonical, "#00000047"),
+                Some(canonical),
+                "canonical output must be idempotent for input {input}"
+            );
+        }
+
+        assert_eq!(
+            normalize_filter_color_preset("#11223301", "#00000047").as_deref(),
+            Some("#11223300")
+        );
+        let settings: ProxySettings =
+            serde_json::from_str(r##"{"filterColorPresets":["#11223301"]}"##)
+                .expect("normalize through the authoritative serde boundary");
+        assert_eq!(settings.filter_color_presets[0], "#11223300");
+        assert!(
+            serde_json::to_string(&settings)
+                .expect("serialize canonical settings")
+                .contains("#11223300"),
+            "the unrepresentable input byte must never be written back"
+        );
+    }
+
+    #[test]
+    fn filter_color_presets_retain_valid_slots_and_repair_malformed_short_input() {
+        let settings: ProxySettings = serde_json::from_str(
+            r##"{"filterColorPresets":[" #ABCDEF80 ",7,"#123456","#oops",null]}"##,
+        )
+        .expect("sanitize palette");
+        let defaults = FilterColorPresets::default();
+
+        assert_eq!(
+            settings.filter_color_presets.len(),
+            FILTER_COLOR_PRESET_COUNT
+        );
+        assert_eq!(settings.filter_color_presets[0], "#abcdef80");
+        assert_eq!(settings.filter_color_presets[1], defaults[1]);
+        assert_eq!(settings.filter_color_presets[2], "#12345647");
+        assert_eq!(settings.filter_color_presets[3], defaults[3]);
+        assert_eq!(settings.filter_color_presets[4], defaults[4]);
+        assert_eq!(settings.filter_color_presets[9], defaults[9]);
+    }
+
+    #[test]
+    fn filter_color_presets_truncate_long_input_and_repair_non_array_input() {
+        let values: Vec<String> = (0..12).map(|index| format!("#{index:08x}")).collect();
+        let text = serde_json::json!({ "filterColorPresets": values }).to_string();
+        let settings: ProxySettings = serde_json::from_str(&text).expect("truncate palette");
+        assert_eq!(
+            settings.filter_color_presets.len(),
+            FILTER_COLOR_PRESET_COUNT
+        );
+        assert_eq!(settings.filter_color_presets[0], "#00000000");
+        assert_eq!(settings.filter_color_presets[9], "#0000000a");
+
+        let malformed: ProxySettings = serde_json::from_str(r#"{"filterColorPresets":"nope"}"#)
+            .expect("repair non-array palette");
+        assert_eq!(
+            malformed.filter_color_presets,
+            FilterColorPresets::default()
         );
     }
 

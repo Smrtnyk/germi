@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import "./styles.css";
 import { applyAppearance } from "./theme";
+import { DEFAULT_FILTER_COLOR_PRESETS } from "./filterColorPresets";
 import { initThemeSync } from "./themeSync";
 import type { ProxySettings, Theme } from "./types";
 
@@ -31,6 +32,7 @@ function settings(
     systemProxyHotkey: "",
     theme,
     highlightColors,
+    filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
   };
 }
 

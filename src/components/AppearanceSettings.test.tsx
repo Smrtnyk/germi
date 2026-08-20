@@ -16,6 +16,7 @@ import {
 } from "../theme";
 import type { ThemeContrastPair } from "../theme";
 import type { ProxySettings, Theme, ThemePreference } from "../types";
+import { DEFAULT_FILTER_COLOR_PRESETS } from "../filterColorPresets";
 import { AppearanceSettings } from "./AppearanceSettings";
 
 function settings(
@@ -34,6 +35,7 @@ function settings(
     systemProxyHotkey: "",
     theme,
     highlightColors: colors,
+    filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
   };
 }
 
@@ -392,6 +394,135 @@ describe("AppearanceSettings", () => {
     await expect.element(screen.getByText("13%")).toBeVisible();
   });
 
+  it("edits one complete filter preset without offering the filter preset chooser recursively", async () => {
+    const onChange = vi.fn();
+    const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
+    expect(screen.getByRole("button", { name: /Filter preset \d+ color/ }).all()).toHaveLength(10);
+    await screen.getByRole("button", { name: "Filter preset 1 color" }).click();
+
+    await expect.element(screen.getByRole("radio")).not.toBeInTheDocument();
+    await screen.getByLabelText("Hex").fill("#11223380");
+    expect(onChange).not.toHaveBeenCalled();
+    await screen.getByRole("button", { name: "Apply" }).click();
+
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onChange.mock.calls[0][0].filterColorPresets).toEqual([
+      "#11223380",
+      ...DEFAULT_FILTER_COLOR_PRESETS.slice(1),
+    ]);
+  });
+
+  it("resets all filter presets as one Settings draft change", async () => {
+    const onChange = vi.fn();
+    const custom = ["#11223380", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)];
+    const screen = await render(
+      <AppearanceSettings
+        settings={{ ...settings(), filterColorPresets: custom }}
+        onChange={onChange}
+      />,
+    );
+    await screen.getByRole("button", { name: "Reset filter presets" }).click();
+
+    expect(onChange).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS] }),
+    );
+  });
+
+  it("keeps all ten preset editors owned and clickable in the narrow one-column layout", async () => {
+    const screen = await render(
+      <div data-testid="narrow-settings" style={{ width: 300 }}>
+        <AppearanceSettings settings={settings()} onChange={vi.fn()} />
+      </div>,
+    );
+    const grid = document.querySelector<HTMLElement>(".filter-preset-settings-grid")!;
+    expect(getComputedStyle(grid).gridTemplateColumns.split(" ")).toHaveLength(1);
+    expect(grid.scrollWidth).toBeLessThanOrEqual(grid.clientWidth);
+
+    for (let index = 1; index <= 10; index += 1) {
+      const trigger = screen.getByRole("button", { name: `Filter preset ${index} color` });
+      const card = trigger.element().closest<HTMLElement>(".filter-preset-setting")!;
+      const triggerRect = trigger.element().getBoundingClientRect();
+      const cardRect = card.getBoundingClientRect();
+      expect(triggerRect.left).toBeGreaterThanOrEqual(cardRect.left);
+      expect(triggerRect.right).toBeLessThanOrEqual(cardRect.right);
+      await trigger.click();
+      const dialog = screen.getByRole("dialog", { name: `Filter preset ${index} color` });
+      await expect.element(dialog).toBeVisible();
+      await dialog.getByRole("button", { name: "Cancel" }).click();
+    }
+  });
+
+  it.each([434, 269])(
+    "groups reset-all with Compare before filter presets at %ipx",
+    async (width) => {
+      const current = {
+        ...settings({ selected: "#ff000080", diffRemoved: "#11223344" }),
+        filterColorPresets: ["#11223380", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)],
+      };
+      const screen = await render(
+        <div data-testid="appearance-width" style={{ width }}>
+          <AppearanceSettings settings={current} onChange={vi.fn()} />
+        </div>,
+      );
+      const wrapper = screen.getByTestId("appearance-width").element();
+      const trafficTitle = screen.getByText("Traffic rows").element();
+      const trafficList = trafficTitle.nextElementSibling as HTMLElement;
+      const filterTitle = screen.getByText("Filter color presets").element();
+      const filterSection = filterTitle.closest<HTMLElement>(".filter-preset-settings")!;
+      const compareTitle = screen.getByText("Compare & diff").element();
+      const compareList = compareTitle.nextElementSibling as HTMLElement;
+      const follows = (first: Element, second: Element) =>
+        Boolean(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+      expect(follows(trafficList, compareTitle)).toBe(true);
+      const resetAll = screen
+        .getByRole("button", { name: "Reset all to defaults" })
+        .element() as HTMLButtonElement;
+      expect(follows(compareList, resetAll)).toBe(true);
+      expect(follows(resetAll, filterSection)).toBe(true);
+      const allButtons = [...wrapper.querySelectorAll("button")];
+      const trafficButtons = [...trafficList.querySelectorAll("button")];
+      const filterButtons = [...filterSection.querySelectorAll("button")];
+      const compareButtons = [...compareList.querySelectorAll("button")];
+      expect(allButtons.indexOf(trafficButtons[trafficButtons.length - 1])).toBeLessThan(
+        allButtons.indexOf(compareButtons[0]),
+      );
+      expect(allButtons.indexOf(compareButtons[compareButtons.length - 1])).toBeLessThan(
+        allButtons.indexOf(resetAll),
+      );
+      expect(allButtons.indexOf(resetAll)).toBeLessThan(allButtons.indexOf(filterButtons[0]));
+
+      (compareButtons[compareButtons.length - 1] as HTMLButtonElement).focus();
+      await userEvent.tab();
+      expect(document.activeElement).toBe(resetAll);
+      await userEvent.tab();
+      expect(document.activeElement).toBe(filterButtons[0]);
+
+      const presetGrid = filterSection.querySelector<HTMLElement>(".filter-preset-settings-grid")!;
+      const presetCards = [...presetGrid.querySelectorAll<HTMLElement>(".filter-preset-setting")];
+      const presetBottom = Math.max(
+        ...presetCards.map((card) => card.getBoundingClientRect().bottom),
+      );
+      const presetReset = screen.getByRole("button", { name: "Reset filter presets" }).element();
+      expect(presetReset.getBoundingClientRect().top - presetBottom).toBeGreaterThanOrEqual(12);
+
+      const lastDiffRow = compareList.lastElementChild as HTMLElement;
+      expect(
+        resetAll.getBoundingClientRect().top - lastDiffRow.getBoundingClientRect().bottom,
+      ).toBeGreaterThanOrEqual(12);
+      expect(
+        filterTitle.getBoundingClientRect().top - resetAll.getBoundingClientRect().bottom,
+      ).toBeGreaterThanOrEqual(12);
+      expect(allButtons.indexOf(resetAll)).toBeLessThan(allButtons.indexOf(filterButtons[0]));
+      expect(wrapper.scrollWidth, `${width}px appearance overflow`).toBeLessThanOrEqual(
+        wrapper.clientWidth,
+      );
+      expect(getComputedStyle(presetGrid).gridTemplateColumns.split(" ")).toHaveLength(
+        width <= 320 ? 1 : 2,
+      );
+    },
+  );
+
   it("previews each applied output over the same traffic backdrop", async () => {
     const colors = Object.fromEntries(HIGHLIGHT_COLORS.map((spec) => [spec.key, "#33669980"]));
     applyHighlightColors(colors);
@@ -542,16 +673,46 @@ describe("AppearanceSettings", () => {
     expect(rootStyle().getPropertyValue("--sel-bg")).toBe("");
   });
 
-  it("resets everything at once", async () => {
+  it("resets highlight overrides and filter presets together", async () => {
     const onChange = vi.fn();
+    const onPreviewAppearance = vi.fn();
+    const customPresets = ["#11223380", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)];
     const screen = await render(
       <AppearanceSettings
-        settings={settings({ selected: "#ff000080", diffAdded: "#11223344" })}
+        settings={{
+          ...settings({ selected: "#ff000080", diffAdded: "#11223344" }),
+          filterColorPresets: customPresets,
+        }}
         onChange={onChange}
+        onPreviewAppearance={onPreviewAppearance}
       />,
     );
     await screen.getByRole("button", { name: "Reset all to defaults" }).click();
-    expect(onChange.mock.calls[0][0].highlightColors).toEqual({});
+    expect(onPreviewAppearance).toHaveBeenCalledExactlyOnceWith({
+      theme: "dark",
+      highlightColors: {},
+    });
+    expect(onChange).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        highlightColors: {},
+        filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
+      }),
+    );
+  });
+
+  it("enables Reset all when only filter presets differ", async () => {
+    const screen = await render(
+      <AppearanceSettings
+        settings={{
+          ...settings(),
+          filterColorPresets: ["#11223380", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)],
+        }}
+        onChange={vi.fn()}
+      />,
+    );
+    await expect
+      .element(screen.getByRole("button", { name: "Reset all to defaults" }))
+      .toBeEnabled();
   });
 
   it("disables Reset all when nothing is overridden", async () => {

@@ -49,7 +49,7 @@ pub const SETTINGS_SECTIONS: &[SettingsSection] = &[
     SettingsSection {
         id: "appearance",
         label: "Appearance",
-        keys: &["theme", "highlightColors"],
+        keys: &["theme", "highlightColors", "filterColorPresets"],
     },
     SettingsSection {
         id: "columns",
@@ -136,6 +136,12 @@ fn section_detail(id: &str, s: &ProxySettings, present: &Map<String, Value>) -> 
             }
             if has("highlightColors") {
                 parts.push(count_noun(s.highlight_colors.len(), "color override"));
+            }
+            if has("filterColorPresets") {
+                parts.push(count_noun(
+                    s.filter_color_presets.len(),
+                    "filter color preset",
+                ));
             }
         }
         "columns" => parts.push(count_noun(s.header_columns.len(), "pinned column")),
@@ -313,7 +319,10 @@ mod tests {
         );
         assert_eq!(by_id("throttling"), "500 ms response delay");
         assert_eq!(by_id("shortcuts"), "Ctrl+Shift+P");
-        assert_eq!(by_id("appearance"), "system theme · 1 color override");
+        assert_eq!(
+            by_id("appearance"),
+            "system theme · 1 color override · 10 filter color presets"
+        );
         assert_eq!(by_id("columns"), "1 pinned column");
     }
 
@@ -342,6 +351,20 @@ mod tests {
             merge_import(&sample(), r#"{"theme":"light"}"#, &ids(&["appearance"])).unwrap();
         assert_eq!(merged.theme, crate::settings::ColorTheme::Light);
         assert_eq!(merged.highlight_colors.len(), 1);
+    }
+
+    #[test]
+    fn appearance_import_normalizes_filter_color_presets_before_merging() {
+        let file = r##"{"filterColorPresets":["#ABCDEF01","bad"]}"##;
+        let found = import_preview(file).unwrap();
+        assert_eq!(found[0].id, "appearance");
+        assert_eq!(found[0].detail, "10 filter color presets");
+
+        let merged = merge_import(&sample(), file, &ids(&["appearance"])).unwrap();
+        let defaults = crate::settings::FilterColorPresets::default();
+        assert_eq!(merged.filter_color_presets[0], "#abcdef00");
+        assert_eq!(merged.filter_color_presets[1], defaults[1]);
+        assert_eq!(merged.filter_color_presets.len(), 10);
     }
 
     #[test]

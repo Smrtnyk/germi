@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook } from "vitest-browser-react";
 
 import type { SettingsDialogDraft } from "./settingsDraft";
+import { DEFAULT_FILTER_COLOR_PRESETS } from "./filterColorPresets";
 import { baselineFromSnapshot } from "./settingsReconciliation";
 import type { SettingsWindowSnapshot } from "./settingsWindowProtocol";
 import { DEFAULT_SHORTCUTS } from "./shortcuts";
@@ -101,6 +102,7 @@ function settings(overrides: Partial<ProxySettings> = {}): ProxySettings {
     systemProxyHotkey: "",
     theme: "dark",
     highlightColors: { selected: "saved" },
+    filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
     ...overrides,
   };
 }
@@ -178,6 +180,7 @@ describe("main-owned Settings window controller", () => {
       port: 9090,
       theme: "light",
       highlightColors: { selected: "draft" },
+      filterColorPresets: ["#11223380", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)],
     });
     dispatch("operation", {
       sessionId,
@@ -229,6 +232,38 @@ describe("main-owned Settings window controller", () => {
       port: 7070,
       excludedHosts: ["main.example"],
       responseDelayMs: 500,
+    });
+    expect(controllerOptions.save).toHaveBeenCalledWith(draft(merged));
+    expect(eventMocks.sendResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ok: true,
+        snapshot: expect.objectContaining({ settings: merged }),
+      }),
+    );
+  });
+
+  it("merges a child preset palette with an unrelated main-owned mutation", async () => {
+    const { hook, controllerOptions, sessionId } = await openController();
+    const baseline = await seedController(sessionId);
+    controllerOptions.settings = settings({ excludedHosts: ["main.example"] });
+    await hook.rerender();
+    await vi.waitFor(() => expect(eventMocks.sendState).toHaveBeenCalledTimes(2));
+    const childPresets = ["#11223380", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)];
+
+    dispatch("operation", {
+      sessionId,
+      requestId: "save-presets-merged",
+      action: {
+        kind: "save",
+        baseline: baselineFromSnapshot(baseline),
+        draft: draft(settings({ filterColorPresets: childPresets })),
+      },
+    });
+
+    await vi.waitFor(() => expect(eventMocks.sendResult).toHaveBeenCalledOnce());
+    const merged = settings({
+      excludedHosts: ["main.example"],
+      filterColorPresets: childPresets,
     });
     expect(controllerOptions.save).toHaveBeenCalledWith(draft(merged));
     expect(eventMocks.sendResult).toHaveBeenCalledWith(
@@ -344,6 +379,38 @@ describe("main-owned Settings window controller", () => {
         error: expect.stringContaining("draft was kept open"),
         snapshot: expect.objectContaining({
           settings: expect.objectContaining({ port: 7070, excludedHosts: ["main.example"] }),
+        }),
+      }),
+    );
+  });
+
+  it("rejects divergent child and main filter palettes as one atomic field", async () => {
+    const { hook, controllerOptions, sessionId } = await openController();
+    const baseline = await seedController(sessionId);
+    const mainPresets = ["#44556680", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)];
+    controllerOptions.settings = settings({ filterColorPresets: mainPresets });
+    await hook.rerender();
+    await vi.waitFor(() => expect(eventMocks.sendState).toHaveBeenCalledTimes(2));
+    const childPresets = ["#11223380", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)];
+
+    dispatch("operation", {
+      sessionId,
+      requestId: "save-presets-conflict",
+      action: {
+        kind: "save",
+        baseline: baselineFromSnapshot(baseline),
+        draft: draft(settings({ filterColorPresets: childPresets })),
+      },
+    });
+
+    await vi.waitFor(() => expect(eventMocks.sendResult).toHaveBeenCalledOnce());
+    expect(controllerOptions.save).not.toHaveBeenCalled();
+    expect(eventMocks.sendResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ok: false,
+        conflicts: ["settings.filterColorPresets"],
+        snapshot: expect.objectContaining({
+          settings: expect.objectContaining({ filterColorPresets: mainPresets }),
         }),
       }),
     );

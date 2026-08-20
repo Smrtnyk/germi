@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  alphaByteToPercent,
+  alphaPercentToByte,
   compositeHex8,
   contrastRatio,
   cssVarUpdates,
@@ -62,6 +64,24 @@ describe("splitHex8 / joinHex8", () => {
     expect(splitHex8("#173a3600").alphaPct).toBe(0);
     expect(joinHex8({ hex: "#173A36", alphaPct: 250 })).toBe("#173a36ff");
     expect(joinHex8({ hex: "#173a36", alphaPct: -4 })).toBe("#173a3600");
+  });
+
+  it("canonicalizes every alpha byte through the stable whole-percent contract", () => {
+    for (let alphaByte = 0; alphaByte <= 255; alphaByte += 1) {
+      // Integer forms of round(byte * 100 / 255), then
+      // round(percent * 255 / 100), shared with proxy-core.
+      const expectedPercent = Math.floor((alphaByte * 100 + 127) / 255);
+      const expectedByte = Math.floor((expectedPercent * 255 + 50) / 100);
+      const input = `#112233${alphaByte.toString(16).padStart(2, "0")}`;
+      const canonical = `#112233${expectedByte.toString(16).padStart(2, "0")}`;
+
+      expect(alphaByteToPercent(alphaByte), input).toBe(expectedPercent);
+      expect(alphaPercentToByte(expectedPercent), input).toBe(expectedByte);
+      expect(joinHex8(splitHex8(input)), input).toBe(canonical);
+      expect(joinHex8(splitHex8(canonical)), input).toBe(canonical);
+    }
+
+    expect(joinHex8(splitHex8("#11223301"))).toBe("#11223300");
   });
 });
 

@@ -6,6 +6,7 @@ import { render } from "vitest-browser-react";
 
 import "../styles.css";
 import { resolvePresentedTint, type SavedFilter } from "../savedFilters";
+import { DEFAULT_FILTER_COLOR_PRESETS } from "../filterColorPresets";
 import { useSavedFilters } from "../useSavedFilters";
 import { FilterChips } from "./FilterChips";
 import { FiltersPanel } from "./FiltersPanel";
@@ -80,6 +81,7 @@ function SavedFilterColorHarness({
   return (
     <>
       <FiltersPanel
+        colorPresets={DEFAULT_FILTER_COLOR_PRESETS}
         filters={savedFilters.filters}
         soloId={savedFilters.soloId}
         counts={savedFilters.counts}

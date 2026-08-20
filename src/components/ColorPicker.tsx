@@ -1,5 +1,6 @@
 import { useId, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 
+import { sameColorParts } from "../filterColorPresets";
 import { joinHex8, parseHexEntry, type ColorParts } from "../theme";
 import { Button } from "./ui/Button";
 import { Modal } from "./ui/Modal";
@@ -19,11 +20,13 @@ export interface ColorPickerProps {
   onCommit: (value: ColorParts) => void;
   /** Escape or explicit Cancel. */
   onCancel?: () => void;
+  /** Optional complete tints shown as a fast path inside filter pickers. */
+  presets?: readonly ColorParts[];
 }
 
 interface DialogProps extends Pick<
   ColorPickerProps,
-  "label" | "value" | "onPreview" | "onCommit" | "onCancel"
+  "label" | "value" | "onPreview" | "onCommit" | "onCancel" | "presets"
 > {
   onDismiss: () => void;
 }
@@ -34,6 +37,7 @@ function ColorPickerDialog({
   onPreview,
   onCommit,
   onCancel,
+  presets,
   onDismiss,
 }: DialogProps) {
   const titleId = useId();
@@ -41,10 +45,12 @@ function ColorPickerDialog({
   const hexId = useId();
   const opacityId = useId();
   const errorId = useId();
+  const presetGroupName = useId();
   const outcomeRef = useRef<ColorParts | null>(null);
   const [draft, setDraft] = useState(value);
   const [hexDraft, setHexDraft] = useState(() => joinHex8(value));
   const parsedDraft = parseHexEntry(hexDraft, draft.alphaPct);
+  const selectedPreset = presets?.findIndex((preset) => sameColorParts(preset, draft)) ?? -1;
 
   function preview(next: ColorParts, syncHex = true) {
     setDraft(next);
@@ -73,6 +79,41 @@ function ColorPickerDialog({
           <span className="color-picker-dialog-preview" aria-hidden="true">
             <span style={{ background: joinHex8(draft) }} />
           </span>
+          {presets && presets.length > 0 && (
+            <fieldset className="color-picker-presets">
+              <legend>Filter color presets</legend>
+              <div className="color-picker-preset-grid">
+                {presets.map((preset, index) => (
+                  <label
+                    key={`${preset.hex}-${preset.alphaPct}-${index}`}
+                    htmlFor={`${presetGroupName}-${index}`}
+                  >
+                    <input
+                      id={`${presetGroupName}-${index}`}
+                      type="radio"
+                      name={presetGroupName}
+                      value={index}
+                      checked={selectedPreset === index}
+                      aria-labelledby={`${presetGroupName}-${index}-label`}
+                      autoFocus={index === (selectedPreset >= 0 ? selectedPreset : 0)}
+                      onChange={() => preview(preset)}
+                    />
+                    <span className="color-picker-preset-swatch" aria-hidden="true">
+                      <span style={{ background: joinHex8(preset) }} />
+                    </span>
+                    <span id={`${presetGroupName}-${index}-label`} className="visually-hidden">
+                      Preset {index + 1}, {preset.hex}, {preset.alphaPct}% opacity
+                    </span>
+                  </label>
+                ))}
+              </div>
+              <p className="color-picker-preset-status" role="status" aria-live="polite">
+                {selectedPreset >= 0
+                  ? `Preset ${selectedPreset + 1} selected`
+                  : "Custom color selected"}
+              </p>
+            </fieldset>
+          )}
           <div className="color-picker-fields">
             <label htmlFor={hueId}>Color</label>
             <input
@@ -80,7 +121,7 @@ function ColorPickerDialog({
               type="color"
               value={draft.hex}
               aria-label={`${label} hue`}
-              autoFocus
+              autoFocus={!presets || presets.length === 0}
               onChange={(event) => preview({ ...draft, hex: event.target.value })}
             />
             <label htmlFor={hexId}>Hex</label>
@@ -147,6 +188,7 @@ export function ColorPicker({
   onPreview,
   onCommit,
   onCancel,
+  presets,
 }: ColorPickerProps) {
   const [open, setOpen] = useState(false);
 
@@ -174,6 +216,7 @@ export function ColorPicker({
           onPreview={onPreview}
           onCommit={onCommit}
           onCancel={onCancel}
+          presets={presets}
           onDismiss={() => setOpen(false)}
         />
       )}
