@@ -37,7 +37,13 @@ import { ComparePane, type ComparePaneProps } from "./ComparePane";
 import { CaptureDropOverlay } from "./CaptureDropOverlay";
 import { Button } from "./ui/Button";
 import { IconArrowLeft, IconChevronRight, IconCompare, IconDiff, IconOpen } from "./icons";
-import { readFileAsBase64, useCaptureDrop } from "../captureDrop";
+import { useCaptureDrop } from "../captureDrop";
+import {
+  CaptureImportProgress,
+  readCaptureForImport,
+  useCaptureImport,
+  type CaptureImportRunContext,
+} from "../captureImport";
 import type { CaptureExt } from "../dnd";
 import type { FlowSummary, ResourceKind } from "../types";
 
@@ -237,34 +243,54 @@ function useComparePanes(initialLeft: FlowSummary[], initialRight: FlowSummary[]
 /** "Load file…": append a HAR / SAZ to the session and feed the new
  *  rows to the right pane. */
 function useCompareFile(appendRight: (flows: FlowSummary[]) => void, notify: Notify) {
-  const [loading, setLoading] = useState(false);
+  const captureImport = useCaptureImport();
 
-  async function ingest(load: () => Promise<FlowSummary[] | null>) {
-    setLoading(true);
+  async function ingest(
+    load: (context: CaptureImportRunContext) => Promise<{
+      count: number;
+    } | null>,
+  ) {
+    let received = 0;
     try {
-      const flows = await load();
-      if (flows === null) return;
-      if (flows.length === 0) {
+      const outcome = await captureImport.run(load, (summaries) => {
+        received += summaries.length;
+        appendRight(summaries);
+      });
+      if (outcome.cancelled || outcome.value === null) return;
+      if (outcome.value.count === 0) {
         notify("info", "The file contained no requests");
         return;
       }
-      appendRight(flows);
+      if (received !== outcome.value.count) {
+        throw new Error(
+          `Loaded ${outcome.value.count} requests, but only received ${received} summaries`,
+        );
+      }
       notify(
         "success",
-        `Loaded ${flows.length} request${flows.length === 1 ? "" : "s"} to compare against`,
+        `Loaded ${outcome.value.count} request${outcome.value.count === 1 ? "" : "s"} to compare against`,
       );
     } catch (e) {
       notify("error", String(e));
-    } finally {
-      setLoading(false);
     }
   }
 
-  const loadFile = () => ingest(() => api.appendCapture());
+  const loadFile = () =>
+    ingest(({ operationId, onEvent }) => api.appendCapture(operationId, onEvent));
   const loadDropped = (file: File, ext: CaptureExt) =>
-    ingest(async () => api.appendDroppedCapture(await readFileAsBase64(file), ext));
+    ingest(async (context) => {
+      const data = await readCaptureForImport(file, context);
+      const { onEvent } = context;
+      return api.appendDroppedCapture(context.operationId, data, ext, onEvent);
+    });
 
-  return { loading, loadFile, loadDropped };
+  return {
+    loading: captureImport.status !== null,
+    status: captureImport.status,
+    cancel: captureImport.cancel,
+    loadFile,
+    loadDropped,
+  };
 }
 
 function useCompareKeys(actions: CompareKeyActions): void {
@@ -369,7 +395,7 @@ export function CompareView({ initialLeft, initialRight, onClose }: CompareViewP
   const fileDrop = useCaptureDrop({
     onFile: file.loadDropped,
     onReject: (reason) => notify("info", reason),
-    disabled: diffOpen,
+    disabled: diffOpen || file.loading,
   });
 
   const { left, right } = panes.sides;
@@ -452,6 +478,8 @@ export function CompareView({ initialLeft, initialRight, onClose }: CompareViewP
           />
         </div>
       )}
+
+      <CaptureImportProgress status={file.status} onCancel={file.cancel} />
 
       <CompareFoot
         diffOpen={diffOpen}

@@ -5,16 +5,18 @@
 //! is pushed over a [`Channel`] in batches (see `subscribe_flows`) rather than
 //! one IPC message per request — the bridge, not the proxy, is the bottleneck.
 
+use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use proxy_core::{
-    AutoResponderSummary, BodyComparison, FlowDetail, FlowEvent, FlowSummary,
-    GeneralRulesImportMode, HistoryStep, HistoryTag, MockBatch, MockResult, ProxyController,
-    ProxySettings, Rule, RuleSearchScope, RuleSummary, Scenario, ScenarioSummary, Script,
-    ScriptDiagnostic, SearchSide, TestInput, TestResult, GENERAL_SCENARIO_ID,
+    AutoResponderSummary, BodyComparison, CaptureImportHandle, CaptureImportProgress,
+    CaptureImportStage, FlowDetail, FlowEvent, FlowSummary, GeneralRulesImportMode, HistoryStep,
+    HistoryTag, MockBatch, MockResult, ProxyController, ProxySettings, Rule, RuleSearchScope,
+    RuleSummary, Scenario, ScenarioSummary, Script, ScriptDiagnostic, SearchSide, TestInput,
+    TestResult, CAPTURE_IMPORT_CANCELLED, GENERAL_SCENARIO_ID,
 };
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -1202,22 +1204,108 @@ pub struct OpenedCapture {
     pub embedded_rules: Option<Vec<proxy_core::ScenarioPreview>>,
 }
 
-/// Peek an opened capture for an embedded `_germiRules` bundle and park it for
-/// `apply_har_rules`. A file without a usable bundle CLEARS the mailbox, so a
-/// stale offer can never apply rules from an earlier file.
+/// Bounded side channel for a capture import. Progress messages are tiny and
+/// throttled; Compare receives its exact appended summaries in small batches
+/// after the atomic commit instead of one giant invoke response.
+#[derive(Serialize, Clone)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum CaptureImportEvent {
+    Started {
+        operation_id: u64,
+    },
+    Progress {
+        operation_id: u64,
+        stage: CaptureImportStage,
+        completed: u64,
+        total: Option<u64>,
+        cancelable: bool,
+    },
+    Summaries {
+        operation_id: u64,
+        batch_index: u64,
+        summaries: Vec<FlowSummary>,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedCapture {
+    pub count: usize,
+}
+
+struct CaptureProgressSender {
+    operation_id: u64,
+    channel: Channel<CaptureImportEvent>,
+    last_stage: Option<CaptureImportStage>,
+    last_completed: u64,
+    last_sent: Instant,
+}
+
+impl CaptureProgressSender {
+    fn new(operation_id: u64, channel: Channel<CaptureImportEvent>) -> Self {
+        Self {
+            operation_id,
+            channel,
+            last_stage: None,
+            last_completed: 0,
+            last_sent: Instant::now(),
+        }
+    }
+
+    /// Keep the UI fresh without turning byte/item callbacks into an IPC flood.
+    /// Stage boundaries and exact completions are always delivered.
+    fn report(&mut self, progress: CaptureImportProgress) -> bool {
+        if self
+            .last_stage
+            .is_some_and(|stage| (progress.stage as u8) < (stage as u8))
+            || self.last_stage == Some(progress.stage) && progress.completed < self.last_completed
+        {
+            return true;
+        }
+        let stage_changed = self.last_stage != Some(progress.stage);
+        let completed = progress.total == Some(progress.completed);
+        if !stage_changed && !completed && self.last_sent.elapsed() < Duration::from_millis(75) {
+            return true;
+        }
+        if self
+            .channel
+            .send(CaptureImportEvent::Progress {
+                operation_id: self.operation_id,
+                stage: progress.stage,
+                completed: progress.completed,
+                total: progress.total,
+                cancelable: progress.cancelable,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        self.last_stage = Some(progress.stage);
+        self.last_completed = progress.completed;
+        self.last_sent = Instant::now();
+        true
+    }
+}
+
+/// Park the embedded `_germiRules` bundle already extracted by proxy-core's
+/// single HAR parse. Version the mailbox so out-of-order shell completions from
+/// overlapping imports cannot restore an older offer.
 fn stash_embedded_rules(
-    state: &AppState,
-    bytes: &[u8],
-    ext: &str,
+    pending: &std::sync::Mutex<crate::state::PendingHarRules>,
+    operation_id: u64,
+    bundle: Option<Vec<u8>>,
 ) -> Option<Vec<proxy_core::ScenarioPreview>> {
-    let bundle = if ext == "har" {
-        proxy_core::har_embedded_rules(bytes)
-    } else {
-        None
-    };
     let preview = bundle.as_deref().and_then(proxy_core::preview_rules);
-    if let Ok(mut slot) = state.pending_har_rules.lock() {
-        *slot = if preview.is_some() { bundle } else { None };
+    if let Ok(mut slot) = pending.lock() {
+        if operation_id < slot.import_id {
+            return None;
+        }
+        slot.import_id = operation_id;
+        slot.bundle = if preview.is_some() { bundle } else { None };
     }
     preview
 }
@@ -1236,8 +1324,44 @@ fn pick_capture_file(app: &tauri::AppHandle) -> Result<Option<PathBuf>, String> 
     picked.into_path().map(Some).map_err(|e| e.to_string())
 }
 
-fn read_capture_file(path: &Path) -> Result<(Vec<u8>, String), String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+fn read_capture_file(
+    path: &Path,
+    handle: &CaptureImportHandle,
+    progress: &mut CaptureProgressSender,
+) -> Result<(Vec<u8>, String), String> {
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let total = file.metadata().ok().map(|metadata| metadata.len());
+    if !progress.report(CaptureImportProgress {
+        stage: CaptureImportStage::Reading,
+        completed: 0,
+        total,
+        cancelable: true,
+    }) {
+        return Err(CAPTURE_IMPORT_CANCELLED.to_string());
+    }
+    let capacity = total
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut chunk = vec![0_u8; 64 * 1024];
+    loop {
+        if handle.is_cancelled() {
+            return Err(CAPTURE_IMPORT_CANCELLED.to_string());
+        }
+        let read = file.read(&mut chunk).map_err(|e| e.to_string())?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        if !progress.report(CaptureImportProgress {
+            stage: CaptureImportStage::Reading,
+            completed: bytes.len() as u64,
+            total,
+            cancelable: true,
+        }) {
+            return Err(CAPTURE_IMPORT_CANCELLED.to_string());
+        }
+    }
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -1246,25 +1370,407 @@ fn read_capture_file(path: &Path) -> Result<(Vec<u8>, String), String> {
     Ok((bytes, ext))
 }
 
-/// The one source of shell-level open semantics for picker, drag/drop, and OS
-/// launch paths. Parsing and flow replacement remain in `proxy-core`.
-fn open_capture_bytes(state: &AppState, bytes: &[u8], ext: &str) -> Result<OpenedCapture, String> {
-    let count = state
-        .controller
-        .open_capture(bytes, ext)
-        .map_err(|e| e.to_string())?;
-    Ok(OpenedCapture {
-        count,
-        embedded_rules: stash_embedded_rules(state, bytes, ext),
-    })
+fn claim_capture_import(
+    controller: &ProxyController,
+    operation_id: u64,
+    channel: Channel<CaptureImportEvent>,
+) -> Result<(CaptureImportHandle, CaptureProgressSender), String> {
+    let handle = controller
+        .claim_capture_import(operation_id)
+        .map_err(|error| error.to_string())?;
+    if channel
+        .send(CaptureImportEvent::Started { operation_id })
+        .is_err()
+    {
+        controller.finish_capture_import(&handle);
+        return Err(CAPTURE_IMPORT_CANCELLED.to_string());
+    }
+    Ok((
+        handle.clone(),
+        CaptureProgressSender::new(operation_id, channel),
+    ))
 }
 
-fn open_capture_path(state: &AppState, path: &Path) -> Result<OpenedCapture, String> {
-    let display = path.display();
-    let (bytes, ext) =
-        read_capture_file(path).map_err(|e| format!("Could not open capture '{display}': {e}"))?;
-    open_capture_bytes(state, &bytes, &ext)
-        .map_err(|e| format!("Could not open capture '{display}': {e}"))
+fn decode_dropped_capture(
+    data_b64: &str,
+    ext: &str,
+    handle: &CaptureImportHandle,
+    progress: &mut CaptureProgressSender,
+) -> Result<(Vec<u8>, String), String> {
+    const CHUNK: usize = 256 * 1024;
+    let total = data_b64.len() as u64;
+    let mut bytes = Vec::with_capacity(data_b64.len().saturating_mul(3) / 4);
+    if !progress.report(CaptureImportProgress {
+        stage: CaptureImportStage::Decoding,
+        completed: 0,
+        total: Some(total),
+        cancelable: true,
+    }) {
+        return Err(CAPTURE_IMPORT_CANCELLED.to_string());
+    }
+    for (index, encoded) in data_b64.as_bytes().chunks(CHUNK).enumerate() {
+        if handle.is_cancelled() {
+            return Err(CAPTURE_IMPORT_CANCELLED.to_string());
+        }
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|e| format!("could not decode the dropped file: {e}"))?;
+        bytes.extend_from_slice(&decoded);
+        let completed = ((index + 1) * CHUNK).min(data_b64.len()) as u64;
+        if !progress.report(CaptureImportProgress {
+            stage: CaptureImportStage::Decoding,
+            completed,
+            total: Some(total),
+            cancelable: true,
+        }) {
+            return Err(CAPTURE_IMPORT_CANCELLED.to_string());
+        }
+    }
+    Ok((bytes, ext.to_ascii_lowercase()))
+}
+
+fn run_capture_bytes(
+    controller: &ProxyController,
+    handle: &CaptureImportHandle,
+    bytes: &[u8],
+    ext: &str,
+    replace: bool,
+    progress: &mut CaptureProgressSender,
+) -> Result<proxy_core::CaptureImportResult, String> {
+    controller
+        .run_capture_import(handle, bytes, ext, replace, |update| {
+            progress.report(update)
+        })
+        .map_err(|error| error.to_string())
+}
+
+enum PathImportError {
+    Read(String),
+    Import(String),
+}
+
+fn reserve_capture_import_delivery(
+    acknowledgements: &crate::state::CaptureImportBatchAcks,
+    operation_id: u64,
+) {
+    acknowledgements
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            operation_id,
+            crate::state::CaptureImportBatchDelivery::Reserved,
+        );
+}
+
+fn abandon_capture_import_delivery(
+    acknowledgements: &crate::state::CaptureImportBatchAcks,
+    operation_id: u64,
+) {
+    acknowledgements
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&operation_id);
+}
+
+async fn run_path_import(
+    controller: std::sync::Arc<ProxyController>,
+    handle: CaptureImportHandle,
+    mut progress: CaptureProgressSender,
+    path: PathBuf,
+    replace: bool,
+    delivery: Option<crate::state::CaptureImportBatchAcks>,
+) -> Result<(u64, proxy_core::CaptureImportResult), String> {
+    let display = path.display().to_string();
+    let operation_id = handle.id();
+    if let Some(delivery) = delivery.as_ref() {
+        reserve_capture_import_delivery(delivery, operation_id);
+    }
+    let worker_controller = controller.clone();
+    let worker_handle = handle.clone();
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let (bytes, ext) = match read_capture_file(&path, &worker_handle, &mut progress) {
+            Ok(read) => read,
+            Err(error) => {
+                worker_controller.finish_capture_import(&worker_handle);
+                return Err(PathImportError::Read(error));
+            }
+        };
+        run_capture_bytes(
+            &worker_controller,
+            &worker_handle,
+            &bytes,
+            &ext,
+            replace,
+            &mut progress,
+        )
+        .map_err(PathImportError::Import)
+    })
+    .await;
+    let result = match joined {
+        Ok(Ok(result)) => Ok((operation_id, result)),
+        Ok(Err(PathImportError::Read(error))) => {
+            Err(format!("Could not open capture '{display}': {error}"))
+        }
+        Ok(Err(PathImportError::Import(error))) if replace => {
+            Err(format!("Could not open capture '{display}': {error}"))
+        }
+        Ok(Err(PathImportError::Import(error))) => Err(error),
+        Err(error) => {
+            controller.finish_capture_import(&handle);
+            Err(format!(
+                "Could not open capture '{display}': import task failed: {error}"
+            ))
+        }
+    };
+    if result.is_err() {
+        if let Some(delivery) = delivery.as_ref() {
+            abandon_capture_import_delivery(delivery, operation_id);
+        }
+    }
+    result
+}
+
+async fn run_dropped_import(
+    controller: std::sync::Arc<ProxyController>,
+    operation_id: u64,
+    data_b64: String,
+    ext: String,
+    replace: bool,
+    channel: Channel<CaptureImportEvent>,
+    delivery: Option<crate::state::CaptureImportBatchAcks>,
+) -> Result<(u64, proxy_core::CaptureImportResult), String> {
+    let (handle, mut progress) = claim_capture_import(&controller, operation_id, channel)?;
+    if let Some(delivery) = delivery.as_ref() {
+        reserve_capture_import_delivery(delivery, operation_id);
+    }
+    let worker_controller = controller.clone();
+    let worker_handle = handle.clone();
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let (bytes, ext) =
+            match decode_dropped_capture(&data_b64, &ext, &worker_handle, &mut progress) {
+                Ok(decoded) => decoded,
+                Err(error) => {
+                    worker_controller.finish_capture_import(&worker_handle);
+                    return Err(error);
+                }
+            };
+        run_capture_bytes(
+            &worker_controller,
+            &worker_handle,
+            &bytes,
+            &ext,
+            replace,
+            &mut progress,
+        )
+    })
+    .await;
+    let result = match joined {
+        Ok(result) => result.map(|result| (operation_id, result)),
+        Err(error) => {
+            controller.finish_capture_import(&handle);
+            Err(format!("capture import task failed: {error}"))
+        }
+    };
+    if result.is_err() {
+        if let Some(delivery) = delivery.as_ref() {
+            abandon_capture_import_delivery(delivery, operation_id);
+        }
+    }
+    result
+}
+
+async fn stream_imported_summaries(
+    acknowledgements: &crate::state::CaptureImportBatchAcks,
+    channel: &Channel<CaptureImportEvent>,
+    operation_id: u64,
+    summaries: &[FlowSummary],
+) -> Result<(), String> {
+    stream_imported_summaries_with_timeout(
+        acknowledgements,
+        channel,
+        operation_id,
+        summaries,
+        Duration::from_secs(30),
+    )
+    .await
+}
+
+async fn stream_imported_summaries_with_timeout(
+    acknowledgements: &crate::state::CaptureImportBatchAcks,
+    channel: &Channel<CaptureImportEvent>,
+    operation_id: u64,
+    summaries: &[FlowSummary],
+    ack_timeout: Duration,
+) -> Result<(), String> {
+    let (ack_tx, mut ack_rx) = tokio::sync::mpsc::unbounded_channel();
+    let expected = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::state::CaptureImportBatchExpectation::default(),
+    ));
+    {
+        let mut deliveries = acknowledgements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match deliveries.remove(&operation_id) {
+            Some(crate::state::CaptureImportBatchDelivery::Reserved) => {
+                deliveries.insert(
+                    operation_id,
+                    crate::state::CaptureImportBatchDelivery::Waiting(
+                        crate::state::CaptureImportBatchAck {
+                            expected: expected.clone(),
+                            sender: ack_tx,
+                        },
+                    ),
+                );
+            }
+            Some(crate::state::CaptureImportBatchDelivery::Cancelled) => {
+                return Err("Compare summary delivery was cancelled".to_string());
+            }
+            Some(crate::state::CaptureImportBatchDelivery::Waiting(_)) | None => {
+                return Err("Compare summary delivery was not reserved".to_string());
+            }
+        }
+    }
+
+    let result = async {
+        for (batch_index, chunk) in summaries.chunks(200).enumerate() {
+            let batch_index = batch_index as u64;
+            *expected
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                crate::state::CaptureImportBatchExpectation {
+                    batch_index,
+                    acknowledged: false,
+                };
+            channel
+                .send(CaptureImportEvent::Summaries {
+                    operation_id,
+                    batch_index,
+                    summaries: chunk.to_vec(),
+                })
+                .map_err(|error| format!("could not deliver imported requests: {error}"))?;
+
+            loop {
+                let acknowledged = tokio::time::timeout(ack_timeout, ack_rx.recv())
+                    .await
+                    .map_err(|_| {
+                        format!(
+                            "Requests were imported, but Compare did not acknowledge batch {} within {ack_timeout:?}",
+                            batch_index + 1,
+                        )
+                    })?
+                    .ok_or_else(|| "Compare summary delivery was cancelled".to_string())?;
+                if acknowledged == batch_index {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    acknowledgements
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&operation_id);
+    result
+}
+
+fn acknowledge_capture_import_batch(
+    acknowledgements: &crate::state::CaptureImportBatchAcks,
+    operation_id: u64,
+    batch_index: u64,
+) -> bool {
+    let acknowledgements = acknowledgements
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(crate::state::CaptureImportBatchDelivery::Waiting(acknowledgement)) =
+        acknowledgements.get(&operation_id)
+    else {
+        return false;
+    };
+    let mut expected = acknowledgement
+        .expected
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if expected.batch_index != batch_index || expected.acknowledged {
+        return false;
+    }
+    if acknowledgement.sender.send(batch_index).is_err() {
+        return false;
+    }
+    expected.acknowledged = true;
+    true
+}
+
+fn cancel_capture_import_delivery(
+    acknowledgements: &crate::state::CaptureImportBatchAcks,
+    operation_id: u64,
+) -> bool {
+    let mut acknowledgements = acknowledgements
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match acknowledgements.remove(&operation_id) {
+        Some(crate::state::CaptureImportBatchDelivery::Reserved) => {
+            acknowledgements.insert(
+                operation_id,
+                crate::state::CaptureImportBatchDelivery::Cancelled,
+            );
+            true
+        }
+        Some(crate::state::CaptureImportBatchDelivery::Waiting(_)) => true,
+        Some(crate::state::CaptureImportBatchDelivery::Cancelled) => {
+            acknowledgements.insert(
+                operation_id,
+                crate::state::CaptureImportBatchDelivery::Cancelled,
+            );
+            false
+        }
+        None => false,
+    }
+}
+
+#[tauri::command]
+pub fn ack_capture_import_batch(
+    state: State<'_, AppState>,
+    operation_id: u64,
+    batch_index: u64,
+) -> bool {
+    acknowledge_capture_import_batch(&state.capture_import_batch_acks, operation_id, batch_index)
+}
+
+/// Reserve a monotonic import intent before the frontend opens a picker or
+/// reads a dropped file. This does not disturb an active import until the token
+/// is claimed by exactly one command; late commands with older tokens reject.
+#[tauri::command]
+pub fn reserve_capture_import(state: State<'_, AppState>) -> u64 {
+    state.controller.reserve_capture_import()
+}
+
+/// Take the one-shot launch mailbox before reserving. An ordinary reload with
+/// no launch path therefore cannot disturb a real import in another window.
+fn prepare_launch_capture_import(
+    controller: &ProxyController,
+    launch_capture: &crate::launch::PendingCapture,
+    prepared_launch: &std::sync::Mutex<Option<crate::state::PreparedLaunchCapture>>,
+) -> Result<Option<u64>, String> {
+    let Some(path) = launch_capture.take()? else {
+        return Ok(None);
+    };
+    let operation_id = controller.reserve_capture_import();
+    prepared_launch
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .replace(crate::state::PreparedLaunchCapture { operation_id, path });
+    Ok(Some(operation_id))
+}
+
+#[tauri::command]
+pub fn reserve_launch_capture_import(state: State<'_, AppState>) -> Result<Option<u64>, String> {
+    prepare_launch_capture_import(
+        &state.controller,
+        &state.launch_capture,
+        &state.prepared_launch_capture,
+    )
 }
 
 /// Open a capture file — a HAR or a Fiddler SAZ archive —
@@ -1274,11 +1780,30 @@ fn open_capture_path(state: &AppState, path: &Path) -> Result<OpenedCapture, Str
 pub async fn open_capture(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    operation_id: u64,
+    progress: Channel<CaptureImportEvent>,
 ) -> Result<Option<OpenedCapture>, String> {
-    let Some(path) = pick_capture_file(&app)? else {
-        return Ok(None);
+    let controller = state.controller.clone();
+    let pending_rules = state.pending_har_rules.clone();
+    let path = match pick_capture_file(&app) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            controller.cancel_capture_import(operation_id);
+            return Ok(None);
+        }
+        Err(error) => {
+            controller.cancel_capture_import(operation_id);
+            return Err(error);
+        }
     };
-    open_capture_path(state.inner(), &path).map(Some)
+    let (handle, progress) = claim_capture_import(&controller, operation_id, progress)?;
+    let (operation_id, result) =
+        run_path_import(controller, handle, progress, path, true, None).await?;
+    let embedded_rules = stash_embedded_rules(&pending_rules, operation_id, result.embedded_rules);
+    Ok(Some(OpenedCapture {
+        count: result.summaries.len(),
+        embedded_rules,
+    }))
 }
 
 /// A file supplied by the OS at process launch. The path is taken from the
@@ -1294,47 +1819,80 @@ pub struct LaunchCapture {
 #[tauri::command]
 pub async fn consume_launch_capture(
     state: State<'_, AppState>,
+    operation_id: u64,
+    progress: Channel<CaptureImportEvent>,
 ) -> Result<Option<LaunchCapture>, String> {
-    let Some(path) = state.launch_capture.take()? else {
-        return Ok(None);
+    let controller = state.controller.clone();
+    let pending_rules = state.pending_har_rules.clone();
+    let prepared_launch = state.prepared_launch_capture.clone();
+    let viewer = state.viewer;
+    let prepared = {
+        let mut prepared = prepared_launch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        prepared.take_if(|prepared| prepared.operation_id == operation_id)
     };
-    let opened = open_capture_path(state.inner(), &path)?;
-    Ok(Some(LaunchCapture {
-        opened,
-        viewer: state.viewer,
-    }))
+    let Some(prepared) = prepared else {
+        controller.cancel_capture_import(operation_id);
+        return Err(CAPTURE_IMPORT_CANCELLED.to_string());
+    };
+    let path = prepared.path;
+    let (handle, progress) = claim_capture_import(&controller, operation_id, progress)?;
+    let (operation_id, result) =
+        run_path_import(controller, handle, progress, path, true, None).await?;
+    let opened = OpenedCapture {
+        count: result.summaries.len(),
+        embedded_rules: stash_embedded_rules(&pending_rules, operation_id, result.embedded_rules),
+    };
+    Ok(Some(LaunchCapture { opened, viewer }))
 }
 
 /// Append a capture file to the current traffic WITHOUT replacing it — loads a
 /// reference session into the compare view's right side (issue #86). Returns
-/// the appended flows' summaries, or `None` if the user cancels the picker.
+/// the appended flow count, or `None` if the user cancels the picker. The invoke
+/// remains pending until every bounded summary batch is acknowledged; its
+/// settlement is the authoritative terminal signal for the frontend.
 #[tauri::command]
 pub async fn append_capture(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> Result<Option<Vec<FlowSummary>>, String> {
-    let Some(path) = pick_capture_file(&app)? else {
-        return Ok(None);
+    operation_id: u64,
+    progress: Channel<CaptureImportEvent>,
+) -> Result<Option<ImportedCapture>, String> {
+    let controller = state.controller.clone();
+    let acknowledgements = state.capture_import_batch_acks.clone();
+    let summary_channel = progress.clone();
+    let path = match pick_capture_file(&app) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            controller.cancel_capture_import(operation_id);
+            return Ok(None);
+        }
+        Err(error) => {
+            controller.cancel_capture_import(operation_id);
+            return Err(error);
+        }
     };
-    let (bytes, ext) = read_capture_file(&path)
-        .map_err(|e| format!("Could not open capture '{}': {e}", path.display()))?;
-    state
-        .controller
-        .append_capture(&bytes, &ext)
-        .map(Some)
-        .map_err(|e| e.to_string())
-}
-
-/// Decode a capture file dragged from the OS file manager onto the webview.
-/// An HTML5 file drop hands the frontend the File's *bytes* (base64 over IPC),
-/// not a filesystem path like the native picker — so there is nothing to
-/// `std::fs::read` here. `ext` (the dropped file's extension) tells HAR and
-/// SAZ apart.
-fn decode_dropped_capture(data_b64: &str, ext: &str) -> Result<(Vec<u8>, String), String> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data_b64)
-        .map_err(|e| format!("could not decode the dropped file: {e}"))?;
-    Ok((bytes, ext.to_ascii_lowercase()))
+    let (handle, progress) = claim_capture_import(&controller, operation_id, progress)?;
+    let (operation_id, result) = run_path_import(
+        controller,
+        handle,
+        progress,
+        path,
+        false,
+        Some(acknowledgements.clone()),
+    )
+    .await?;
+    stream_imported_summaries(
+        &acknowledgements,
+        &summary_channel,
+        operation_id,
+        &result.summaries,
+    )
+    .await?;
+    Ok(Some(ImportedCapture {
+        count: result.summaries.len(),
+    }))
 }
 
 /// Open a capture file dropped onto the main window, REPLACING the current
@@ -1343,11 +1901,27 @@ fn decode_dropped_capture(data_b64: &str, ext: &str) -> Result<(Vec<u8>, String)
 #[tauri::command]
 pub async fn open_dropped_capture(
     state: State<'_, AppState>,
+    operation_id: u64,
     data_b64: String,
     ext: String,
+    progress: Channel<CaptureImportEvent>,
 ) -> Result<OpenedCapture, String> {
-    let (bytes, ext) = decode_dropped_capture(&data_b64, &ext)?;
-    open_capture_bytes(state.inner(), &bytes, &ext)
+    let controller = state.controller.clone();
+    let pending_rules = state.pending_har_rules.clone();
+    let (operation_id, result) = run_dropped_import(
+        controller,
+        operation_id,
+        data_b64,
+        ext,
+        true,
+        progress,
+        None,
+    )
+    .await?;
+    Ok(OpenedCapture {
+        count: result.summaries.len(),
+        embedded_rules: stash_embedded_rules(&pending_rules, operation_id, result.embedded_rules),
+    })
 }
 
 /// Append a capture file dropped onto the compare window WITHOUT replacing the
@@ -1356,14 +1930,47 @@ pub async fn open_dropped_capture(
 #[tauri::command]
 pub async fn append_dropped_capture(
     state: State<'_, AppState>,
+    operation_id: u64,
     data_b64: String,
     ext: String,
-) -> Result<Vec<FlowSummary>, String> {
-    let (bytes, ext) = decode_dropped_capture(&data_b64, &ext)?;
-    state
-        .controller
-        .append_capture(&bytes, &ext)
-        .map_err(|e| e.to_string())
+    progress: Channel<CaptureImportEvent>,
+) -> Result<ImportedCapture, String> {
+    let controller = state.controller.clone();
+    let acknowledgements = state.capture_import_batch_acks.clone();
+    let summary_channel = progress.clone();
+    let (operation_id, result) = run_dropped_import(
+        controller,
+        operation_id,
+        data_b64,
+        ext,
+        false,
+        progress,
+        Some(acknowledgements.clone()),
+    )
+    .await?;
+    stream_imported_summaries(
+        &acknowledgements,
+        &summary_channel,
+        operation_id,
+        &result.summaries,
+    )
+    .await?;
+    Ok(ImportedCapture {
+        count: result.summaries.len(),
+    })
+}
+
+#[tauri::command]
+pub fn cancel_capture_import(state: State<'_, AppState>, operation_id: u64) -> bool {
+    let parsing = state.controller.cancel_capture_import(operation_id);
+    let prepared_launch = state
+        .prepared_launch_capture
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take_if(|prepared| prepared.operation_id == operation_id)
+        .is_some();
+    let delivery = cancel_capture_import_delivery(&state.capture_import_batch_acks, operation_id);
+    parsing || prepared_launch || delivery
 }
 
 /// Byte-equality of two flows' decoded bodies, per side, for the compare view
@@ -1535,6 +2142,7 @@ pub async fn apply_har_rules(
         .map_err(|_| "Pending mock rules lock is poisoned".to_string())?;
     let count = {
         let bytes = pending
+            .bundle
             .as_deref()
             .ok_or_else(|| "No pending mock rules to import".to_string())?;
         import_rules_and_persist(
@@ -1548,7 +2156,7 @@ pub async fn apply_har_rules(
     };
     // Consume the parked bundle only after both the live import and SQLite
     // transaction succeed, so a persistence error remains retryable.
-    pending.take();
+    pending.bundle = None;
     Ok(count)
 }
 
@@ -1735,6 +2343,253 @@ mod tests {
                 content_encoding: None,
             },
         }
+    }
+
+    #[test]
+    fn older_import_completion_cannot_overwrite_newer_embedded_rules_mailbox() {
+        let pending = std::sync::Mutex::new(crate::state::PendingHarRules::default());
+        let bundle = serde_json::to_vec(&proxy_core::RulesExport::new(vec![Scenario {
+            id: "newer".to_string(),
+            name: "Newer".to_string(),
+            rules: vec![mock_rule("newer")],
+        }]))
+        .expect("serialize bundle");
+
+        let preview = stash_embedded_rules(&pending, 2, Some(bundle.clone()))
+            .expect("valid embedded rules preview");
+        assert_eq!(preview[0].name, "Newer");
+        assert!(stash_embedded_rules(&pending, 1, None).is_none());
+
+        let slot = pending.lock().expect("mailbox");
+        assert_eq!(slot.import_id, 2);
+        assert_eq!(slot.bundle.as_deref(), Some(bundle.as_slice()));
+    }
+
+    #[test]
+    fn empty_launch_preflight_does_not_supersede_an_active_import() {
+        let controller = controller();
+        let active = controller.start_capture_import();
+        let launch = crate::launch::PendingCapture::new(None);
+        let prepared = std::sync::Mutex::new(None);
+
+        assert_eq!(
+            prepare_launch_capture_import(&controller, &launch, &prepared)
+                .expect("empty preflight"),
+            None
+        );
+        let result = controller.run_capture_import(
+            &active,
+            br#"{"log":{"entries":[{"request":{"url":"https://active.test/"},"response":{}}]}}"#,
+            "har",
+            true,
+            |_| true,
+        );
+        assert!(result.is_ok(), "empty reload must not cancel Compare work");
+        assert!(prepared.lock().expect("prepared launch").is_none());
+    }
+
+    #[test]
+    fn capture_progress_sender_is_monotonic_and_keeps_stage_completions() {
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received = messages.clone();
+        let channel = Channel::new(move |body| {
+            received
+                .lock()
+                .expect("messages")
+                .push(body.deserialize::<serde_json::Value>()?);
+            Ok(())
+        });
+        let mut sender = CaptureProgressSender::new(7, channel);
+
+        for progress in [
+            CaptureImportProgress {
+                stage: CaptureImportStage::Reading,
+                completed: 50,
+                total: Some(100),
+                cancelable: true,
+            },
+            CaptureImportProgress {
+                stage: CaptureImportStage::Reading,
+                completed: 10,
+                total: Some(100),
+                cancelable: true,
+            },
+            CaptureImportProgress {
+                stage: CaptureImportStage::Parsing,
+                completed: 0,
+                total: Some(100),
+                cancelable: true,
+            },
+            CaptureImportProgress {
+                stage: CaptureImportStage::Reading,
+                completed: 100,
+                total: Some(100),
+                cancelable: true,
+            },
+            CaptureImportProgress {
+                stage: CaptureImportStage::Parsing,
+                completed: 100,
+                total: Some(100),
+                cancelable: true,
+            },
+        ] {
+            assert!(sender.report(progress));
+        }
+
+        let messages = messages.lock().expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["stage"], "reading");
+        assert_eq!(messages[0]["completed"], 50);
+        assert_eq!(messages[1]["stage"], "parsing");
+        assert_eq!(messages[1]["completed"], 0);
+        assert_eq!(messages[2]["stage"], "parsing");
+        assert_eq!(messages[2]["completed"], 100);
+    }
+
+    #[tokio::test]
+    async fn compare_summary_stream_settles_only_after_frontend_acknowledgement() {
+        let acknowledgements: crate::state::CaptureImportBatchAcks = std::sync::Arc::default();
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received = messages.clone();
+        let channel = Channel::new(move |body| {
+            received
+                .lock()
+                .expect("messages")
+                .push(body.deserialize::<serde_json::Value>()?);
+            Ok(())
+        });
+        let controller = controller();
+        let template = controller
+            .append_capture(
+                br#"{"log":{"entries":[{"request":{"url":"https://example.test/"},"response":{}}]}}"#,
+                "har",
+            )
+            .expect("capture imports")
+            .into_iter()
+            .next()
+            .expect("one summary");
+        let summaries: Vec<_> = (0..201)
+            .map(|index| {
+                let mut summary = template.clone();
+                summary.id = format!("imported-{index}");
+                summary.seq = index + 1;
+                summary
+            })
+            .collect();
+        reserve_capture_import_delivery(&acknowledgements, 91);
+
+        let delivery = stream_imported_summaries(&acknowledgements, &channel, 91, &summaries);
+        tokio::pin!(delivery);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut delivery)
+                .await
+                .is_err(),
+            "delivery must remain pending after send but before frontend consumption"
+        );
+        {
+            let messages = messages.lock().expect("messages");
+            assert_eq!(messages.len(), 1, "batch 1 waits for batch 0's ACK");
+            assert_eq!(messages[0]["batchIndex"], 0);
+            assert_eq!(messages[0]["summaries"].as_array().map(Vec::len), Some(200));
+        }
+
+        assert!(!acknowledge_capture_import_batch(&acknowledgements, 91, 1));
+        assert!(acknowledge_capture_import_batch(&acknowledgements, 91, 0));
+        assert!(
+            !acknowledge_capture_import_batch(&acknowledgements, 91, 0),
+            "duplicate acknowledgements are rejected"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut delivery)
+                .await
+                .is_err(),
+            "second batch also waits for frontend consumption"
+        );
+        {
+            let messages = messages.lock().expect("messages");
+            assert_eq!(messages.len(), 2);
+            assert_eq!(messages[1]["batchIndex"], 1);
+            assert_eq!(messages[1]["summaries"].as_array().map(Vec::len), Some(1));
+        }
+        assert!(!acknowledge_capture_import_batch(&acknowledgements, 91, 0));
+        assert!(!acknowledge_capture_import_batch(&acknowledgements, 91, 2));
+        assert!(acknowledge_capture_import_batch(&acknowledgements, 91, 1));
+        delivery.await.expect("acknowledged delivery completes");
+
+        assert!(
+            !acknowledgements
+                .lock()
+                .expect("acknowledgements")
+                .contains_key(&91),
+            "terminal delivery removes its acknowledgement mailbox"
+        );
+        let messages = messages.lock().expect("messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["batchIndex"], 0);
+        assert_eq!(messages[1]["batchIndex"], 1);
+    }
+
+    #[tokio::test]
+    async fn compare_summary_ack_timeout_cleans_its_mailbox() {
+        let acknowledgements: crate::state::CaptureImportBatchAcks = std::sync::Arc::default();
+        let channel = Channel::new(|_| Ok(()));
+        let controller = controller();
+        let summaries = controller
+            .append_capture(
+                br#"{"log":{"entries":[{"request":{"url":"https://example.test/"},"response":{}}]}}"#,
+                "har",
+            )
+            .expect("capture imports");
+        reserve_capture_import_delivery(&acknowledgements, 94);
+
+        let error = stream_imported_summaries_with_timeout(
+            &acknowledgements,
+            &channel,
+            94,
+            &summaries,
+            Duration::from_millis(5),
+        )
+        .await
+        .expect_err("missing frontend ACK times out");
+
+        assert!(error.contains("batch 1"));
+        assert!(error.contains("5ms"));
+        assert!(!acknowledgements
+            .lock()
+            .expect("acknowledgements")
+            .contains_key(&94));
+    }
+
+    #[tokio::test]
+    async fn disposing_compare_delivery_closes_its_waiter_and_mailbox() {
+        let acknowledgements: crate::state::CaptureImportBatchAcks = std::sync::Arc::default();
+        let channel = Channel::new(|_| Ok(()));
+        let controller = controller();
+        let summaries = controller
+            .append_capture(
+                br#"{"log":{"entries":[{"request":{"url":"https://example.test/"},"response":{}}]}}"#,
+                "har",
+            )
+            .expect("capture imports");
+        reserve_capture_import_delivery(&acknowledgements, 92);
+
+        let delivery = stream_imported_summaries(&acknowledgements, &channel, 92, &summaries);
+        tokio::pin!(delivery);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut delivery)
+                .await
+                .is_err()
+        );
+        assert!(cancel_capture_import_delivery(&acknowledgements, 92));
+        let error = delivery
+            .await
+            .expect_err("disposed delivery fails promptly");
+
+        assert!(error.contains("cancelled"));
+        assert!(!acknowledgements
+            .lock()
+            .expect("acknowledgements")
+            .contains_key(&92));
     }
 
     #[test]
@@ -2054,6 +2909,24 @@ mod tests {
             !is_germi_system_proxy(&proxy(true, "127.0.0.1", 8080, ""), 8888),
             "a different loopback port belongs to another proxy"
         );
+    }
+
+    #[tokio::test]
+    async fn disposing_reserved_compare_delivery_prevents_a_late_waiter() {
+        let acknowledgements: crate::state::CaptureImportBatchAcks = std::sync::Arc::default();
+        let channel = Channel::new(|_| Ok(()));
+        reserve_capture_import_delivery(&acknowledgements, 93);
+
+        assert!(cancel_capture_import_delivery(&acknowledgements, 93));
+        let error = stream_imported_summaries(&acknowledgements, &channel, 93, &[])
+            .await
+            .expect_err("disposed reservation never becomes a waiter");
+
+        assert!(error.contains("cancelled"));
+        assert!(!acknowledgements
+            .lock()
+            .expect("acknowledgements")
+            .contains_key(&93));
     }
 
     #[test]

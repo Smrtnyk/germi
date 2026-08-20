@@ -259,7 +259,21 @@ impl Shared {
     /// Assign fresh ids/request numbers and insert a parsed capture as one
     /// contiguous flow-document operation. `replace` clears the old document
     /// and resets numbering before the first imported row.
+    #[cfg(test)]
     pub fn import_flows(&self, flows: Vec<Flow>, replace: bool) -> Vec<crate::flow::FlowSummary> {
+        self.import_flows_with_progress(flows, replace, |_, _| {})
+    }
+
+    /// Progress-aware form of [`Self::import_flows`]. The store mutation remains
+    /// one non-cancellable critical section; progress is observational only.
+    /// A single `Resync` replaces the former event-per-row flood so a large file
+    /// cannot overrun the live broadcast buffer or monopolize the IPC bridge.
+    pub fn import_flows_with_progress(
+        &self,
+        flows: Vec<Flow>,
+        replace: bool,
+        mut on_progress: impl FnMut(usize, usize),
+    ) -> Vec<crate::flow::FlowSummary> {
         let _flow_op = self
             .flow_ops
             .lock()
@@ -270,24 +284,25 @@ impl Shared {
         };
         if replace {
             store.clear();
-            let _ = self.events.send(FlowEvent::Cleared);
             self.reset_seq();
         }
 
-        let mut summaries = Vec::with_capacity(flows.len());
+        let total = flows.len();
+        let mut summaries = Vec::with_capacity(total);
+        on_progress(0, total);
         for mut flow in flows {
             flow.id = self.next_id();
             flow.seq = self.next_seq();
             let mut summary = flow.summary();
             summary.extra = extract_header_columns(&flow.request, flow.response.as_ref(), &cols);
-            let evicted = store.insert(flow);
-            if !evicted.is_empty() {
-                let _ = self.events.send(FlowEvent::Removed { ids: evicted });
-            }
-            let _ = self.events.send(FlowEvent::Completed {
-                summary: summary.clone(),
-            });
+            // The final authoritative resync covers cap-driven evictions together
+            // with the imported rows, avoiding per-flow IPC pressure.
+            let _ = store.insert(flow);
             summaries.push(summary);
+            on_progress(summaries.len(), total);
+        }
+        if replace || !summaries.is_empty() {
+            let _ = self.events.send(FlowEvent::Resync);
         }
         summaries
     }
@@ -669,5 +684,37 @@ mod tests {
             "store order and request numbers must agree without duplicates"
         );
         assert_eq!(stored[0].seq, 1);
+    }
+
+    #[test]
+    fn batch_import_emits_one_resync_instead_of_a_completed_event_storm() {
+        let shared = Shared::new(500, AutoResponder::example(), ProxySettings::default());
+        let mut events = shared.events.subscribe();
+        let imported = (0..250)
+            .map(|index| {
+                let mut item = flow(&format!("import-{index}"));
+                item.imported = true;
+                item.response = Some(resp());
+                item
+            })
+            .collect();
+
+        let summaries = shared.import_flows(imported, true);
+        assert_eq!(summaries.len(), 250);
+
+        let mut resyncs = 0;
+        let mut completed = 0;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                FlowEvent::Resync => resyncs += 1,
+                FlowEvent::Completed { .. } => completed += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(resyncs, 1, "the UI gets one authoritative refresh signal");
+        assert_eq!(
+            completed, 0,
+            "imported rows never flood the live IPC stream"
+        );
     }
 }

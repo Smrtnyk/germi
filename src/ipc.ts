@@ -7,12 +7,14 @@ import type {
   BoundAddr,
   BulkMockEvent,
   CaInfo,
+  CaptureImportEvent,
   CompareSeed,
   FlowDetail,
   FlowEvent,
   FlowSummary,
   GeneralRulesImportMode,
   HistoryTag,
+  ImportedCapture,
   LaunchCapture,
   MockResult,
   OpenedCapture,
@@ -29,6 +31,26 @@ import type {
   TestInput,
   TestResult,
 } from "./types";
+
+function captureImportChannel(onEvent: (event: CaptureImportEvent) => void) {
+  const progress = new Channel<CaptureImportEvent>();
+  progress.onmessage = (event) => {
+    try {
+      onEvent(event);
+    } finally {
+      // Rust keeps a Compare append invoke pending until each bounded batch has
+      // reached this callback. This also acknowledges stale batches after a
+      // component has unmounted, allowing backend cleanup to finish.
+      if (event.type === "summaries") {
+        void invoke<boolean>("ack_capture_import_batch", {
+          operationId: event.operationId,
+          batchIndex: event.batchIndex,
+        }).catch(() => {});
+      }
+    }
+  };
+  return progress;
+}
 
 /** Typed wrappers around the Tauri commands in `src-tauri/src/commands.rs`. */
 export const api = {
@@ -108,13 +130,50 @@ export const api = {
   pickFile: () => invoke<string | null>("pick_file"),
   fileExists: (path: string) => invoke<boolean>("file_exists", { path }),
   saveSession: (includeRules: boolean) => invoke<boolean>("save_session", { includeRules }),
-  openCapture: () => invoke<OpenedCapture | null>("open_capture"),
-  consumeLaunchCapture: () => invoke<LaunchCapture | null>("consume_launch_capture"),
-  appendCapture: () => invoke<FlowSummary[] | null>("append_capture"),
-  openDroppedCapture: (dataB64: string, ext: string) =>
-    invoke<OpenedCapture>("open_dropped_capture", { dataB64, ext }),
-  appendDroppedCapture: (dataB64: string, ext: string) =>
-    invoke<FlowSummary[]>("append_dropped_capture", { dataB64, ext }),
+  reserveCaptureImport: () => invoke<number>("reserve_capture_import"),
+  reserveLaunchCaptureImport: () => invoke<number | null>("reserve_launch_capture_import"),
+  openCapture: (operationId: number, onEvent: (event: CaptureImportEvent) => void) => {
+    const progress = captureImportChannel(onEvent);
+    return invoke<OpenedCapture | null>("open_capture", { operationId, progress });
+  },
+  consumeLaunchCapture: (operationId: number, onEvent: (event: CaptureImportEvent) => void) => {
+    const progress = captureImportChannel(onEvent);
+    return invoke<LaunchCapture | null>("consume_launch_capture", { operationId, progress });
+  },
+  appendCapture: (operationId: number, onEvent: (event: CaptureImportEvent) => void) => {
+    const progress = captureImportChannel(onEvent);
+    return invoke<ImportedCapture | null>("append_capture", { operationId, progress });
+  },
+  openDroppedCapture: (
+    operationId: number,
+    dataB64: string,
+    ext: string,
+    onEvent: (event: CaptureImportEvent) => void,
+  ) => {
+    const progress = captureImportChannel(onEvent);
+    return invoke<OpenedCapture>("open_dropped_capture", {
+      operationId,
+      dataB64,
+      ext,
+      progress,
+    });
+  },
+  appendDroppedCapture: (
+    operationId: number,
+    dataB64: string,
+    ext: string,
+    onEvent: (event: CaptureImportEvent) => void,
+  ) => {
+    const progress = captureImportChannel(onEvent);
+    return invoke<ImportedCapture>("append_dropped_capture", {
+      operationId,
+      dataB64,
+      ext,
+      progress,
+    });
+  },
+  cancelCaptureImport: (operationId: number) =>
+    invoke<boolean>("cancel_capture_import", { operationId }),
   compareFlowBodies: (idA: string, idB: string) =>
     invoke<BodyComparison | null>("compare_flow_bodies", { idA, idB }),
   setCompareSeed: (seed: CompareSeed) => invoke<void>("set_compare_seed", { seed }),

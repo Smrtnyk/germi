@@ -55,7 +55,7 @@ import {
 } from "./settingsDraft";
 import { emitSettingsChanged } from "./themeSync";
 import { OrderedTaskQueue } from "./orderedTaskQueue";
-import { readFileAsBase64 } from "./captureDrop";
+import { readCaptureForImport, useCaptureImport } from "./captureImport";
 import type { CaptureExt } from "./dnd";
 import {
   appendBulkRuleSummaries,
@@ -139,16 +139,126 @@ function applyFlowEvents(
  *  (capture) order. The resync path uses this so a flow the backend restored
  *  (undo) or reordered lands at its real position instead of being appended at
  *  the tail, and a row the backend dropped can't linger as a ghost. */
-function rebuildFromSnapshot(
-  map: Map<string, FlowSummary>,
-  order: string[],
+async function yieldToBrowser(): Promise<void> {
+  const scheduler = (
+    globalThis as typeof globalThis & { scheduler?: { yield?: () => Promise<void> } }
+  ).scheduler;
+  if (scheduler?.yield) {
+    await scheduler.yield();
+  } else {
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, 0);
+    });
+  }
+}
+
+async function rebuildFromSnapshot(
   fresh: FlowSummary[],
-): void {
-  map.clear();
-  order.length = 0;
+): Promise<{ map: Map<string, FlowSummary>; order: string[] }> {
+  const map = new Map<string, FlowSummary>();
+  const order: string[] = [];
+  let deadline = performance.now() + 50;
   for (const s of fresh) {
     order.push(s.id);
     map.set(s.id, s);
+    if (performance.now() >= deadline) {
+      await yieldToBrowser();
+      deadline = performance.now() + 50;
+    }
+  }
+  return { map, order };
+}
+
+type FlowSnapshot = { map: Map<string, FlowSummary>; order: string[] };
+
+export interface PendingFlowBatch {
+  generation: number;
+  events: FlowEvent[];
+}
+
+/** Replay only events owned by the subscription that bracketed a snapshot.
+ * Older batches are stale; genuinely newer batches stay queued for the retry
+ * that installs their generation's authoritative snapshot. */
+export function drainPendingFlowEventsForGeneration(
+  pending: PendingFlowBatch[],
+  generation: number,
+  map: Map<string, FlowSummary>,
+  order: string[],
+): boolean {
+  let resync = false;
+  const newer: PendingFlowBatch[] = [];
+  for (const batch of pending.splice(0)) {
+    if (batch.generation < generation) continue;
+    if (batch.generation > generation) {
+      newer.push(batch);
+      resync = true;
+      continue;
+    }
+    if (applyFlowEvents(map, order, batch.events)) resync = true;
+  }
+  pending.push(...newer);
+  return resync;
+}
+
+function routeSubscribedFlowEvents({
+  generation,
+  currentGeneration,
+  events,
+  reconciling,
+  resyncNeeded,
+  pending,
+  map,
+  order,
+  bump,
+  reconcile,
+}: {
+  generation: number;
+  currentGeneration: number;
+  events: FlowEvent[];
+  reconciling: boolean;
+  resyncNeeded: { current: boolean };
+  pending: PendingFlowBatch[];
+  map: Map<string, FlowSummary>;
+  order: string[];
+  bump: () => void;
+  reconcile: () => Promise<void>;
+}): void {
+  if (generation !== currentGeneration) return;
+  if (reconciling) {
+    pending.push({ generation, events });
+    return;
+  }
+  if (resyncNeeded.current) {
+    resyncNeeded.current = false;
+    pending.push({ generation, events });
+    void reconcile();
+    return;
+  }
+  const resync = applyFlowEvents(map, order, events);
+  bump();
+  if (resync) void reconcile();
+}
+
+/** Load a snapshot bracketed by one installed subscription. Snapshot building
+ * may yield repeatedly, so ownership must be checked after that await as well
+ * as after the backend list. A stale build is never installed. */
+export async function loadStableFlowSnapshotForSubscription(
+  currentReady: () => Promise<void>,
+  listFlows: () => Promise<FlowSummary[]>,
+  install: (snapshot: FlowSnapshot) => void,
+  drainPending: () => boolean,
+  build: (fresh: FlowSummary[]) => Promise<FlowSnapshot> = rebuildFromSnapshot,
+): Promise<void> {
+  for (;;) {
+    const ready = currentReady();
+    await ready;
+    if (ready !== currentReady()) continue;
+    const fresh = await listFlows();
+    if (ready !== currentReady()) continue;
+    const rebuilt = await build(fresh);
+    if (ready !== currentReady()) continue;
+    install(rebuilt);
+    if (!drainPending()) return;
   }
 }
 
@@ -404,7 +514,7 @@ function useFlowStore(setError: SetError, mutationQueue: OrderedTaskQueue) {
   const RECONCILE_RETRY_MAX_MS = 5_000;
   const flowsRef = useRef<Map<string, FlowSummary>>(new Map());
   const orderRef = useRef<string[]>([]);
-  const pendingRef = useRef<FlowEvent[][]>([]);
+  const pendingRef = useRef<PendingFlowBatch[]>([]);
   const reconciliationRef = useRef<Promise<void> | null>(null);
   const resyncNeededRef = useRef(false);
   const retryTimerRef = useRef<number | null>(null);
@@ -413,37 +523,42 @@ function useFlowStore(setError: SetError, mutationQueue: OrderedTaskQueue) {
   const mountedRef = useRef(true);
   const subscriptionReadyRef = useRef<Promise<void>>(Promise.resolve());
   const subscriptionStateRef = useRef<"idle" | "pending" | "ready" | "failed">("idle");
-  const subscriptionRef = useRef<ReturnType<typeof subscribeFlows> | null>(null);
+  const subscriptionRef = useRef<{
+    generation: number;
+    subscription: ReturnType<typeof subscribeFlows> | null;
+  }>({ generation: 0, subscription: null });
   const [tick, bump] = useReducer((n: number) => n + 1, 0);
 
-  function handleFlowEvents(events: FlowEvent[]) {
-    if (reconciliationRef.current) {
-      pendingRef.current.push(events);
-      return;
-    }
-    if (resyncNeededRef.current) {
-      resyncNeededRef.current = false;
-      pendingRef.current.push(events);
-      void reconcile();
-      return;
-    }
-    const resync = applyFlowEvents(flowsRef.current, orderRef.current, events);
-    bump();
-    if (resync) void reconcile();
+  function handleFlowEvents(generation: number, events: FlowEvent[]) {
+    routeSubscribedFlowEvents({
+      generation,
+      currentGeneration: subscriptionRef.current.generation,
+      events,
+      reconciling: reconciliationRef.current !== null,
+      resyncNeeded: resyncNeededRef,
+      pending: pendingRef.current,
+      map: flowsRef.current,
+      order: orderRef.current,
+      bump,
+      reconcile,
+    });
   }
 
   function installSubscription() {
-    if (subscriptionRef.current) subscriptionRef.current.channel.onmessage = () => {};
-    const subscription = subscribeFlows(handleFlowEvents);
-    subscriptionRef.current = subscription;
+    const previous = subscriptionRef.current;
+    if (previous.subscription) previous.subscription.channel.onmessage = () => {};
+    const generation = previous.generation + 1;
+    const subscription = subscribeFlows((events) => handleFlowEvents(generation, events));
+    const installed = { generation, subscription };
+    subscriptionRef.current = installed;
     subscriptionReadyRef.current = subscription.ready;
     subscriptionStateRef.current = "pending";
     void subscription.ready.then(
       () => {
-        if (subscriptionRef.current === subscription) subscriptionStateRef.current = "ready";
+        if (subscriptionRef.current === installed) subscriptionStateRef.current = "ready";
       },
       () => {
-        if (subscriptionRef.current === subscription) subscriptionStateRef.current = "failed";
+        if (subscriptionRef.current === installed) subscriptionStateRef.current = "failed";
       },
     );
     return subscription;
@@ -460,26 +575,24 @@ function useFlowStore(setError: SetError, mutationQueue: OrderedTaskQueue) {
   }
 
   function drainPendingFlowEvents(): boolean {
-    let resync = false;
-    for (let batch = pendingRef.current.shift(); batch; batch = pendingRef.current.shift()) {
-      if (applyFlowEvents(flowsRef.current, orderRef.current, batch)) resync = true;
-    }
-    return resync;
+    return drainPendingFlowEventsForGeneration(
+      pendingRef.current,
+      subscriptionRef.current.generation,
+      flowsRef.current,
+      orderRef.current,
+    );
   }
 
   async function loadStableFlowSnapshot(): Promise<void> {
-    for (;;) {
-      const ready = subscriptionReadyRef.current;
-      await ready;
-      // React Strict Mode can replace the subscription while its first
-      // readiness promise or snapshot is in flight. Only accept a snapshot
-      // bracketed by the same installed channel.
-      if (ready !== subscriptionReadyRef.current) continue;
-      const fresh = await api.listFlows();
-      if (ready !== subscriptionReadyRef.current) continue;
-      rebuildFromSnapshot(flowsRef.current, orderRef.current, fresh);
-      if (!drainPendingFlowEvents()) return;
-    }
+    await loadStableFlowSnapshotForSubscription(
+      () => subscriptionReadyRef.current,
+      api.listFlows,
+      (rebuilt) => {
+        flowsRef.current = rebuilt.map;
+        orderRef.current = rebuilt.order;
+      },
+      drainPendingFlowEvents,
+    );
   }
 
   function prepareFlowReconciliation(): void {
@@ -547,8 +660,9 @@ function useFlowStore(setError: SetError, mutationQueue: OrderedTaskQueue) {
         window.clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
       }
-      if (subscriptionRef.current) subscriptionRef.current.channel.onmessage = () => {};
-      subscriptionRef.current = null;
+      const installed = subscriptionRef.current;
+      if (installed.subscription) installed.subscription.channel.onmessage = () => {};
+      subscriptionRef.current = { generation: installed.generation, subscription: null };
       subscriptionStateRef.current = "idle";
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1731,6 +1845,7 @@ function useSession(
   viewer: boolean,
 ) {
   const [harRulesOffer, setHarRulesOffer] = useState<ScenarioPreview[] | null>(null);
+  const captureImport = useCaptureImport();
 
   function opened(result: OpenedCapture, openedInViewer = viewer) {
     onOpened();
@@ -1749,7 +1864,11 @@ function useSession(
   }
   async function openCapture() {
     try {
-      const result = await api.openCapture();
+      const outcome = await captureImport.run(({ operationId, onEvent }) =>
+        api.openCapture(operationId, onEvent),
+      );
+      if (outcome.cancelled) return;
+      const result = outcome.value;
       if (result === null) return;
       opened(result);
     } catch (e) {
@@ -1760,7 +1879,19 @@ function useSession(
    *  subscriber. The backend owns at-most-once delivery across webview reloads. */
   async function openLaunchCapture() {
     try {
-      const result = await api.consumeLaunchCapture();
+      const outcome = await captureImport.run(
+        ({ operationId, onEvent }) => api.consumeLaunchCapture(operationId, onEvent),
+        undefined,
+        async () => {
+          const operationId = await api.reserveLaunchCaptureImport();
+          if (operationId === null) {
+            throw new DOMException("Capture import cancelled", "AbortError");
+          }
+          return operationId;
+        },
+      );
+      if (outcome.cancelled) return;
+      const result = outcome.value;
       if (result === null) return;
       opened(result.opened, result.viewer);
     } catch (e) {
@@ -1772,7 +1903,12 @@ function useSession(
    *  native picker. */
   async function openDropped(file: File, ext: CaptureExt) {
     try {
-      opened(await api.openDroppedCapture(await readFileAsBase64(file), ext));
+      const outcome = await captureImport.run(async (context) => {
+        const data = await readCaptureForImport(file, context);
+        const { onEvent } = context;
+        return api.openDroppedCapture(context.operationId, data, ext, onEvent);
+      });
+      if (!outcome.cancelled) opened(outcome.value);
     } catch (e) {
       setError(String(e));
     }
@@ -1803,6 +1939,8 @@ function useSession(
     harRulesOffer,
     applyHarRules,
     dismissHarRules,
+    importStatus: captureImport.status,
+    cancelImport: captureImport.cancel,
   };
 }
 

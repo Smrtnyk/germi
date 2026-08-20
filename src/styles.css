@@ -3039,6 +3039,48 @@ code {
 }
 
 /* ---- status bar ---- */
+.capture-import-progress {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.65fr) minmax(180px, 1fr) auto;
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-4) var(--space-6);
+  border-top: 1px solid var(--line);
+  background: var(--bg-2);
+  font-size: var(--fs-sm);
+}
+.capture-import-copy {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.capture-import-copy strong,
+.capture-import-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.capture-import-progress progress {
+  width: 100%;
+  height: 8px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+  color: var(--accent);
+  background: var(--bg);
+  accent-color: var(--accent);
+}
+.capture-import-progress progress::-webkit-progress-bar {
+  background: var(--bg);
+}
+.capture-import-progress progress::-webkit-progress-value {
+  background: var(--accent);
+}
+.capture-import-progress progress::-moz-progress-bar {
+  background: var(--accent);
+}
+
 .statusbar {
   display: flex;
   align-items: center;

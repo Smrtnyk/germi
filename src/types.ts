@@ -228,6 +228,35 @@ export interface OpenedCapture {
   embeddedRules: ScenarioPreview[] | null;
 }
 
+export type CaptureImportStage =
+  | "reading"
+  | "decoding"
+  | "parsing"
+  | "extracting"
+  | "processing"
+  | "finalizing";
+
+export type CaptureImportEvent =
+  | { type: "started"; operationId: number }
+  | {
+      type: "progress";
+      operationId: number;
+      stage: CaptureImportStage;
+      completed: number;
+      total: number | null;
+      cancelable: boolean;
+    }
+  | {
+      type: "summaries";
+      operationId: number;
+      batchIndex: number;
+      summaries: FlowSummary[];
+    };
+
+export interface ImportedCapture {
+  count: number;
+}
+
 /** One-shot capture delivered by an OS file-association launch. */
 export interface LaunchCapture {
   opened: OpenedCapture;
