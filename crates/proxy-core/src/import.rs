@@ -745,6 +745,25 @@ mod tests {
     }
 
     #[test]
+    fn har_mock_with_default_https_port_matches_implicit_runtime_url() {
+        let har = br#"{"log":{"entries":[{
+          "request":{"method":"GET","url":"https://some.domain.com:443/Home.aspx"},
+          "response":{}
+        }]}}"#;
+        let flows = parse_har(har).unwrap();
+        let imported = &flows[0];
+        assert_eq!(imported.request.host, "some.domain.com:443");
+
+        let rule = crate::rules::respond_rule_from_flow(imported, "rule".into());
+        assert_eq!(rule.matcher.url, "https://some.domain.com:443/Home.aspx");
+
+        let mut live_request = imported.request.clone();
+        live_request.uri = "https://some.domain.com/Home.aspx".into();
+        live_request.host = "some.domain.com".into();
+        assert!(rule.matcher.matches(&live_request));
+    }
+
+    #[test]
     fn har_decoded_bodies_drop_stale_wire_encoding_and_length_headers() {
         let har = r#"{"log":{"entries":[{
           "request":{"method":"POST","url":"https://a/upload",
