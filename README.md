@@ -111,10 +111,11 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   (export/regenerate), Interception (host exclusions, tunneled), Capture (max flows,
   record-only filter, auto-start on launch), Throttling (response delay), Shortcuts
   (incl. a global system-proxy toggle hotkey), Appearance
-  (**configurable highlight colors** — selected/multi-selected rows, filter matches,
-  mocked/imported tints, compare-pane match tints, diff added/removed — each a
-  color + opacity pair with direct hex entry, live preview, per-row reset, and
-  drag-a-swatch-onto-another-row to copy a hue). Import/export as JSON.
+  (persisted **system/dark/light theme** plus configurable highlight colors —
+  selected/multi-selected rows, filter matches, mocked/imported tints,
+  compare-pane match tints, diff added/removed — each a color + opacity pair
+  with direct hex entry, live preview, per-row reset, and drag-a-swatch-onto-another-row
+  to copy a hue). Import/export as JSON.
 - **Sessions** — traffic is **not** auto-persisted (privacy). **Save** exports a
   standard **HAR 1.2** archive any HTTP tool can open (bodies decoded, binary as
   base64, timings/comments/mock provenance included — a Germi-written HAR reopens

@@ -17,6 +17,7 @@ function settings(): ProxySettings {
     autoStartOnLaunch: true,
     responseDelayMs: 0,
     systemProxyHotkey: "",
+    theme: "dark",
     highlightColors: {},
   };
 }

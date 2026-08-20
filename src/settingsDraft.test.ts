@@ -20,6 +20,7 @@ function draft(): SettingsDialogDraft {
       autoStartOnLaunch: true,
       responseDelayMs: 0,
       systemProxyHotkey: "",
+      theme: "system",
       highlightColors: {},
     },
     columnOrder: ["method", "url"],

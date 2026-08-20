@@ -1,6 +1,8 @@
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 
-type WindowOptions = ConstructorParameters<typeof WebviewWindow>[1];
+import { getTheme } from "./theme";
+
+type WindowOptions = NonNullable<ConstructorParameters<typeof WebviewWindow>[1]>;
 
 /**
  * Bring an existing secondary window to the front, or create it. Creation
@@ -17,7 +19,12 @@ export async function openOrFocusWindow(
     await existing.setFocus();
     return "focused";
   }
-  const win = new WebviewWindow(label, options);
+  const url = options.url;
+  const themedOptions =
+    typeof url === "string"
+      ? { ...options, url: `${url}${url.includes("?") ? "&" : "?"}theme=${getTheme()}` }
+      : options;
+  const win = new WebviewWindow(label, themedOptions);
   await new Promise<void>((resolve, reject) => {
     void win.once("tauri://created", () => resolve());
     void win.once("tauri://error", (e) => reject(new Error(String(e.payload))));
