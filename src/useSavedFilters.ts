@@ -6,19 +6,83 @@ import {
   combineMatches,
   compileFilters,
   computeFilterMatches,
+  DEFAULT_FILTER_OPACITY,
+  hasContentTerms,
   nextFilterColor,
+  normalizeFilterOpacity,
   sanitizeSavedFilters,
   savedFilterLabel,
   type FilterViewMode,
+  type RowTintPresentation,
   type SavedFilter,
 } from "./savedFilters";
 import { useFilterMatch } from "./useTrafficFilter";
+import type { ColorParts } from "./theme";
 import type { FlowSummary, ResourceKind } from "./types";
 
 const FILTERS_KEY = "germi.savedFilters";
 const MODE_KEY = "germi.filterMode";
 
 type SetError = (value: string | null) => void;
+
+interface FilterColorPreview {
+  id: string;
+  color: string;
+  opacity: number;
+}
+
+function presentFilters(filters: SavedFilter[], preview: FilterColorPreview | null): SavedFilter[] {
+  if (!preview || !filters.some((f) => f.id === preview.id)) return filters;
+  return filters.map((f) =>
+    f.id === preview.id ? { ...f, color: preview.color, opacity: preview.opacity } : f,
+  );
+}
+
+function tintPresentations(filters: SavedFilter[]): Map<string, RowTintPresentation> {
+  const presentations = new Map<string, RowTintPresentation>();
+  for (const filter of filters) {
+    if (!filter.highlight || hasContentTerms(filter.query)) continue;
+    presentations.set(filter.id, {
+      color: filter.color,
+      opacity: filter.opacity,
+      label: savedFilterLabel(filter),
+    });
+  }
+  return presentations;
+}
+
+function useFilterColorPresentation(filters: SavedFilter[]) {
+  // One explicit, ephemeral presentation overlay. Picker drafts never enter
+  // `filters`, so they cannot trigger matching or persistence.
+  const [preview, setPreview] = useState<FilterColorPreview | null>(null);
+  const presentedFilters = useMemo(() => presentFilters(filters, preview), [filters, preview]);
+  const presentedById = useMemo(
+    () => new Map(presentedFilters.map((f) => [f.id, f])),
+    [presentedFilters],
+  );
+  const presentations = useMemo(() => tintPresentations(presentedFilters), [presentedFilters]);
+
+  function previewFilterColor(id: string, value: ColorParts) {
+    setPreview(
+      filters.some((f) => f.id === id)
+        ? { id, color: value.hex, opacity: normalizeFilterOpacity(value.alphaPct) }
+        : null,
+    );
+  }
+
+  function cancelFilterColorPreview(id: string) {
+    setPreview((current) => (current?.id === id ? null : current));
+  }
+
+  return {
+    filters: presentedFilters,
+    byId: presentedById,
+    tintPresentations: presentations,
+    previewFilterColor,
+    cancelFilterColorPreview,
+    clear: () => setPreview(null),
+  };
+}
 
 /** The solo'd ("only") filter fed through the full match pipeline, so its
  *  body:/header: terms hit the backend scan like the bar filter's do. The chip
@@ -91,6 +155,10 @@ export function useSavedFilters(
     () => computeFilterMatches(flows, deferredFilters, compiled),
     [flows, deferredFilters, compiled],
   );
+  // Matching stays deferred and committed-state-only, while tint presentation
+  // follows the current committed/preview color immediately. The filter id on
+  // each mark preserves first-match precedence when filters overlap.
+  const colorPresentation = useFilterColorPresentation(filters);
   const combinedMatchedIds = useMemo(
     () => combineMatches(barMatchedIds, soloMatch.matchedIds),
     [barMatchedIds, soloMatch.matchedIds],
@@ -99,6 +167,7 @@ export function useSavedFilters(
     () => applyVisibility(flows, viewMode, barMatchedIds, soloMatch.matchedIds),
     [flows, viewMode, barMatchedIds, soloMatch.matchedIds],
   );
+  const presentedSolo = solo ? (colorPresentation.byId.get(solo.id) ?? solo) : null;
 
   function addFilter(query: string, kinds: ResourceKind[], statuses: string[]): SavedFilter {
     const created: SavedFilter = {
@@ -107,38 +176,55 @@ export function useSavedFilters(
       kinds,
       statuses,
       color: nextFilterColor(filters),
+      opacity: DEFAULT_FILTER_OPACITY,
       highlight: true,
     };
+    colorPresentation.clear();
     setFilters((prev) => [...prev, created]);
     return created;
   }
 
   function updateFilter(id: string, patch: Partial<Omit<SavedFilter, "id">>) {
-    setFilters((prev) => prev.map((f) => (f.id === id ? { ...f, ...patch } : f)));
+    const normalized =
+      patch.opacity === undefined
+        ? patch
+        : { ...patch, opacity: normalizeFilterOpacity(patch.opacity) };
+    colorPresentation.clear();
+    setFilters((prev) => prev.map((f) => (f.id === id ? { ...f, ...normalized } : f)));
   }
 
   function removeFilter(id: string) {
+    colorPresentation.clear();
     setFilters((prev) => prev.filter((f) => f.id !== id));
     setSoloId((prev) => (prev === id ? null : prev));
   }
 
   return {
-    filters,
+    filters: colorPresentation.filters,
     soloId,
     setSolo: setSoloId,
     clearSolo: () => setSoloId(null),
     /** The chips-row "only: …" chip payload, or null when nothing is solo'd. */
-    soloChip: solo ? { label: savedFilterLabel(solo), color: solo.color } : null,
+    soloChip: presentedSolo
+      ? {
+          label: savedFilterLabel(presentedSolo),
+          color: presentedSolo.color,
+          opacity: presentedSolo.opacity,
+        }
+      : null,
     viewMode,
     setViewMode,
     toggleViewMode: () => setViewMode(viewMode === "hide" ? "dim" : "hide"),
     tints: marks.tints,
+    tintPresentations: colorPresentation.tintPresentations,
     counts: marks.counts,
     soloSearching: soloMatch.searching,
     combinedMatchedIds,
     visibleFlows: view.visible,
     listMatchedIds: view.listMatched,
     addFilter,
+    previewFilterColor: colorPresentation.previewFilterColor,
+    cancelFilterColorPreview: colorPresentation.cancelFilterColorPreview,
     updateFilter,
     removeFilter,
   };

@@ -824,6 +824,7 @@ export function App() {
               view={{
                 matchedIds: s.savedFilters.listMatchedIds,
                 savedTints: s.savedFilters.tints,
+                savedTintPresentations: s.savedFilters.tintPresentations,
                 totalCount: s.flowStore.flows.length,
               }}
               columns={s.columns.visibleColumns}
@@ -873,6 +874,8 @@ export function App() {
                 counts: s.savedFilters.counts,
                 canSaveCurrent: s.canSaveFilter,
                 onSaveCurrent: s.saveCurrentFilter,
+                onColorPreview: s.savedFilters.previewFilterColor,
+                onColorPreviewCancel: s.savedFilters.cancelFilterColorPreview,
                 onUpdate: s.savedFilters.updateFilter,
                 onRemove: s.savedFilters.removeFilter,
                 onSolo: s.savedFilters.setSolo,

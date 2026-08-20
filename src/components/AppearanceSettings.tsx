@@ -1,11 +1,4 @@
-import {
-  Fragment,
-  useEffect,
-  useRef,
-  useState,
-  type DragEvent as ReactDragEvent,
-  type MutableRefObject,
-} from "react";
+import { Fragment, useState, type DragEvent as ReactDragEvent } from "react";
 import { isEqual } from "es-toolkit";
 
 import { COLOR_DRAG_MIME, hasColorDrag } from "../dnd";
@@ -17,10 +10,10 @@ import {
   parseHexEntry,
   splitHex8,
   withOverride,
-  type ColorParts,
   type HighlightColorSpec,
 } from "../theme";
 import type { ProxySettings } from "../types";
+import { ColorPicker } from "./ColorPicker";
 import { Button } from "./ui/Button";
 
 const GROUPS: { id: HighlightColorSpec["group"]; label: string }[] = [
@@ -30,9 +23,9 @@ const GROUPS: { id: HighlightColorSpec["group"]; label: string }[] = [
 
 /**
  * Settings → Appearance (issue #93): every highlight tint the app uses, as a
- * swatch + opacity pair. Edits preview live by writing the custom properties
- * directly; the dialog draft updates once per interaction, on the input's
- * native `change` (picker closed / slider released), not on every drag tick.
+ * shared color + opacity picker. Drafts preview by writing the custom
+ * properties directly; Apply updates the Settings draft and Settings Save
+ * persists it.
  */
 export function AppearanceSettings({
   settings,
@@ -61,8 +54,8 @@ export function AppearanceSettings({
       <h4>Appearance</h4>
       <p className="muted small">
         Highlight tints for the traffic list and the compare window. Most are translucent by design,
-        so the opacity slider is part of the color. Changes preview live and follow into every
-        window. Save applies them everywhere; dismissing Settings restores the saved colors.
+        so each color picker includes opacity. Drafts preview live; Apply keeps a choice in this
+        Settings draft. Save applies everything; dismissing Settings restores the saved colors.
       </p>
       {GROUPS.map((g) => (
         <Fragment key={g.id}>
@@ -75,6 +68,7 @@ export function AppearanceSettings({
                 effective={effectiveColor(colors, spec)}
                 overridden={colors[spec.key] !== undefined}
                 onPreview={(v) => applyHighlightColors({ ...colors, [spec.key]: v })}
+                onCancel={() => applyHighlightColors(colors)}
                 onCommit={(v) => commit(spec, v)}
               />
             ))}
@@ -90,95 +84,31 @@ export function AppearanceSettings({
   );
 }
 
-/** React's onChange on color/range inputs fires on every drag tick (`input`);
- *  the native `change` fires once the interaction ends — that's the commit. */
-function useCommitOnNativeChange(commitRef: MutableRefObject<() => void>) {
-  const ref = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const handler = () => commitRef.current();
-    el.addEventListener("change", handler);
-    return () => el.removeEventListener("change", handler);
-  }, [commitRef]);
-  return ref;
-}
-
-/** Direct hex entry (issue #93 follow-up): commits on Enter/blur, reverting
- *  to the current value when the text doesn't parse. */
-function HexField({
-  value,
-  label,
-  onCommit,
-}: {
-  value: string;
-  label: string;
-  onCommit: (text: string) => void;
-}) {
-  const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
-  return (
-    <input
-      className="color-hex"
-      value={draft}
-      spellCheck={false}
-      aria-label={`${label} hex`}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={() => {
-        onCommit(draft);
-        setDraft(value);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-      }}
-    />
-  );
-}
-
 function ColorRow({
   spec,
   effective,
   overridden,
   onPreview,
+  onCancel,
   onCommit,
 }: {
   spec: HighlightColorSpec;
   effective: string;
   overridden: boolean;
   onPreview: (value: string) => void;
+  onCancel: () => void;
   onCommit: (value: string | null) => void;
 }) {
-  const [draft, setDraft] = useState(() => splitHex8(effective));
   const [dragOver, setDragOver] = useState(false);
-  useEffect(() => setDraft(splitHex8(effective)), [effective]);
-
-  const commitRef = useRef(() => {});
-  commitRef.current = () => onCommit(joinHex8(draft));
-  const colorRef = useCommitOnNativeChange(commitRef);
-  const rangeRef = useCommitOnNativeChange(commitRef);
-
-  function update(parts: ColorParts) {
-    setDraft(parts);
-    onPreview(joinHex8(parts));
-  }
-
-  function commitParts(parts: ColorParts) {
-    update(parts);
-    onCommit(joinHex8(parts));
-  }
-
-  function commitHexText(text: string) {
-    const parts = parseHexEntry(text, draft.alphaPct);
-    if (parts) commitParts(parts);
-  }
+  const value = splitHex8(effective);
 
   function dropColor(e: ReactDragEvent) {
     e.preventDefault();
     setDragOver(false);
     const payload = e.dataTransfer.getData(COLOR_DRAG_MIME) || e.dataTransfer.getData("text/plain");
-    const parsed = parseHexEntry(payload, draft.alphaPct);
+    const parsed = parseHexEntry(payload, value.alphaPct);
     // Dropping copies the hue only — each tint's opacity encodes its role.
-    if (parsed) commitParts({ hex: parsed.hex, alphaPct: draft.alphaPct });
+    if (parsed) onCommit(joinHex8({ hex: parsed.hex, alphaPct: value.alphaPct }));
   }
 
   return (
@@ -194,39 +124,22 @@ function ColorRow({
       onDrop={dropColor}
     >
       <span className="color-label">{spec.label}</span>
-      <span
-        className="color-sample"
-        style={{
-          background: `linear-gradient(var(${spec.cssVar}), var(${spec.cssVar})), var(--bg)`,
-        }}
-        aria-hidden="true"
+      <ColorPicker
+        label={spec.label}
+        value={value}
+        swatchBackground={`var(${spec.cssVar})`}
+        dataKey={spec.key}
         draggable
-        title="Drag onto another row to copy this hue"
+        dragTitle="Drag onto another row to copy this hue"
         onDragStart={(e) => {
-          e.dataTransfer.setData(COLOR_DRAG_MIME, joinHex8(draft));
-          e.dataTransfer.setData("text/plain", joinHex8(draft));
+          e.dataTransfer.setData(COLOR_DRAG_MIME, effective);
+          e.dataTransfer.setData("text/plain", effective);
           e.dataTransfer.effectAllowed = "copy";
         }}
+        onPreview={(parts) => onPreview(joinHex8(parts))}
+        onCancel={onCancel}
+        onCommit={(parts) => onCommit(joinHex8(parts))}
       />
-      <input
-        ref={colorRef}
-        type="color"
-        value={draft.hex}
-        aria-label={`${spec.label} color`}
-        onChange={(e) => update({ ...draft, hex: e.target.value })}
-      />
-      <HexField value={joinHex8(draft)} label={spec.label} onCommit={commitHexText} />
-      <input
-        ref={rangeRef}
-        type="range"
-        min={0}
-        max={100}
-        step={1}
-        value={draft.alphaPct}
-        aria-label={`${spec.label} opacity`}
-        onChange={(e) => update({ ...draft, alphaPct: Number(e.target.value) })}
-      />
-      <span className="color-pct">{draft.alphaPct}%</span>
       <Button size="small" onClick={() => onCommit(null)} disabled={!overridden}>
         Reset
       </Button>

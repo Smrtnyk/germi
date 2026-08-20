@@ -4,7 +4,7 @@ import { render } from "vitest-browser-react";
 import { delay } from "es-toolkit";
 
 import "../styles.css";
-import { HIGHLIGHT_COLORS } from "../theme";
+import { applyHighlightColors, HIGHLIGHT_COLORS } from "../theme";
 import type { ProxySettings } from "../types";
 import { AppearanceSettings } from "./AppearanceSettings";
 
@@ -41,6 +41,40 @@ async function setColorInput(el: HTMLInputElement, hex: string) {
 
 const rootStyle = () => document.documentElement.style;
 
+const OUTPUT_CLASSES: Record<string, string> = {
+  selected: "flow-row selected",
+  multiSelected: "flow-row checked",
+  filterMatch: "flow-row match",
+  mockedRow: "flow-row ruled",
+  importedRow: "flow-row imported",
+  compareMatchLeft: "compare-row hit-a",
+  compareMatchRight: "compare-row hit-b",
+  diffAdded: "diff-line add",
+  diffRemoved: "diff-line del",
+};
+
+function AppliedHighlightSurfaces() {
+  return (
+    <div>
+      <div className="flow-canvas" data-color-surface style={{ background: "var(--bg)" }}>
+        {HIGHLIGHT_COLORS.filter((spec) => spec.group === "rows").map((spec) => (
+          <div key={spec.key} className={OUTPUT_CLASSES[spec.key]} data-output-key={spec.key} />
+        ))}
+      </div>
+      <div className="compare-pane" data-color-surface>
+        {HIGHLIGHT_COLORS.filter((spec) => spec.key.startsWith("compareMatch")).map((spec) => (
+          <div key={spec.key} className={OUTPUT_CLASSES[spec.key]} data-output-key={spec.key} />
+        ))}
+      </div>
+      <div className="diff-section" data-color-surface>
+        {HIGHLIGHT_COLORS.filter((spec) => spec.key.startsWith("diff")).map((spec) => (
+          <div key={spec.key} className={OUTPUT_CLASSES[spec.key]} data-output-key={spec.key} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 beforeEach(() => {
   document.documentElement.removeAttribute("style");
 });
@@ -56,34 +90,99 @@ describe("HIGHLIGHT_COLORS vs styles.css", () => {
 });
 
 describe("AppearanceSettings", () => {
-  it("renders a picker, slider and readout per highlight color", async () => {
+  it("renders the shared picker for every highlight color", async () => {
     const screen = await render(<AppearanceSettings settings={settings()} onChange={vi.fn()} />);
     await expect.element(screen.getByText("Traffic rows")).toBeVisible();
     await expect.element(screen.getByText("Compare & diff")).toBeVisible();
     for (const s of HIGHLIGHT_COLORS) {
-      await expect
-        .element(screen.getByRole("slider", { name: `${s.label} opacity` }))
-        .toBeVisible();
+      await expect.element(screen.getByRole("button", { name: `${s.label} color` })).toBeVisible();
     }
+    expect(document.querySelectorAll('input[type="range"]')).toHaveLength(0);
+    await screen.getByRole("button", { name: "Multi-selected rows color" }).click();
+    await expect
+      .element(screen.getByRole("slider", { name: "Multi-selected rows opacity" }))
+      .toBeVisible();
     await expect.element(screen.getByText("13%")).toBeVisible();
   });
 
-  it("commits a slider change once, on release, and applies the override", async () => {
+  it("previews each applied output over the same traffic backdrop", async () => {
+    const colors = Object.fromEntries(HIGHLIGHT_COLORS.map((spec) => [spec.key, "#33669980"]));
+    applyHighlightColors(colors);
+    await render(
+      <>
+        <AppearanceSettings settings={settings(colors)} onChange={vi.fn()} />
+        <AppliedHighlightSurfaces />
+      </>,
+    );
+
+    for (const spec of HIGHLIGHT_COLORS) {
+      const picker = document.querySelector<HTMLElement>(`[data-color-key="${spec.key}"]`)!;
+      const preview = picker.querySelector<HTMLElement>(".color-picker-swatch")!;
+      const previewTint = picker.querySelector<HTMLElement>(".color-picker-swatch-tint")!;
+      const output = document.querySelector<HTMLElement>(`[data-output-key="${spec.key}"]`)!;
+      const outputSurface = output.closest<HTMLElement>("[data-color-surface]")!;
+      expect(getComputedStyle(previewTint).backgroundColor, spec.key).toBe(
+        getComputedStyle(output).backgroundColor,
+      );
+      expect(getComputedStyle(preview).backgroundColor, spec.key).toBe(
+        getComputedStyle(outputSurface).backgroundColor,
+      );
+      expect(getComputedStyle(preview).backgroundColor, spec.key).toBe("rgb(14, 17, 22)");
+    }
+  });
+
+  it("previews opacity live but commits it only once on Apply", async () => {
     const onChange = vi.fn();
     const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
+    await screen.getByRole("button", { name: "Selected row color" }).click();
     const slider = screen.getByRole("slider", { name: "Selected row opacity" });
     (slider.element() as HTMLInputElement).focus();
     await userEvent.keyboard("{ArrowLeft}");
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(rootStyle().getPropertyValue("--sel-bg")).toBe("#173a36fc");
+    await screen.getByRole("button", { name: "Apply" }).click();
     expect(onChange).toHaveBeenCalledOnce();
     expect(onChange.mock.calls[0][0].highlightColors).toEqual({ selected: "#173a36fc" });
     expect(rootStyle().getPropertyValue("--sel-bg")).toBe("#173a36fc");
   });
 
-  it("commits a picker change keeping the row's opacity and derives the diff mark", async () => {
+  it("reverts a live preview on Cancel without persisting it", async () => {
     const onChange = vi.fn();
     const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
-    const picker = screen.getByLabelText("Diff — added lines color");
-    await setColorInput(picker.element() as HTMLInputElement, "#112233");
+    await screen.getByRole("button", { name: "Selected row color" }).click();
+    const slider = screen.getByRole("slider", { name: "Selected row opacity" });
+    (slider.element() as HTMLInputElement).focus();
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(rootStyle().getPropertyValue("--sel-bg")).toBe("#173a36fc");
+
+    await screen.getByRole("button", { name: "Cancel" }).click();
+    expect(onChange).not.toHaveBeenCalled();
+    expect(rootStyle().getPropertyValue("--sel-bg")).toBe("");
+  });
+
+  it("reverts a live preview on Escape and returns focus without persisting it", async () => {
+    const onChange = vi.fn();
+    const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
+    const trigger = screen.getByRole("button", { name: "Selected row color" });
+    await trigger.click();
+    await screen.getByRole("slider", { name: "Selected row opacity" }).fill("40");
+    expect(rootStyle().getPropertyValue("--sel-bg")).toBe("#173a3666");
+
+    await userEvent.keyboard("{Escape}");
+    expect(onChange).not.toHaveBeenCalled();
+    expect(rootStyle().getPropertyValue("--sel-bg")).toBe("");
+    expect(document.activeElement).toBe(trigger.element());
+  });
+
+  it("commits a hue keeping the row's opacity and derives the diff mark", async () => {
+    const onChange = vi.fn();
+    const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
+    await screen.getByRole("button", { name: "Diff — added lines color" }).click();
+    const hue = screen.getByLabelText("Diff — added lines hue");
+    await setColorInput(hue.element() as HTMLInputElement, "#112233");
+    expect(onChange).not.toHaveBeenCalled();
+    await screen.getByRole("button", { name: "Apply" }).click();
     expect(onChange.mock.calls[0][0].highlightColors).toEqual({ diffAdded: "#11223317" });
     expect(rootStyle().getPropertyValue("--diff-add-bg")).toBe("#11223317");
     expect(rootStyle().getPropertyValue("--diff-add-hl")).toBe("#11223345");
@@ -92,46 +191,54 @@ describe("AppearanceSettings", () => {
   it("commits a typed 6-digit hex keeping the row's opacity", async () => {
     const onChange = vi.fn();
     const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
-    await screen.getByLabelText("Diff — added lines hex").fill("#112233");
-    await userEvent.keyboard("{Enter}");
+    await screen.getByRole("button", { name: "Diff — added lines color" }).click();
+    await screen.getByLabelText("Hex").fill("#112233");
+    await screen.getByRole("button", { name: "Apply" }).click();
     expect(onChange.mock.calls[0][0].highlightColors).toEqual({ diffAdded: "#11223317" });
   });
 
   it("commits a typed 8-digit hex including its alpha", async () => {
     const onChange = vi.fn();
     const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
-    await screen.getByLabelText("Selected row hex").fill("11223380");
-    await userEvent.keyboard("{Enter}");
+    await screen.getByRole("button", { name: "Selected row color" }).click();
+    await screen.getByLabelText("Hex").fill("11223380");
+    expect(onChange).not.toHaveBeenCalled();
+    await screen.getByRole("button", { name: "Apply" }).click();
     expect(onChange.mock.calls[0][0].highlightColors).toEqual({ selected: "#11223380" });
   });
 
-  it("reverts an unparseable hex entry without saving", async () => {
+  it("does not allow an unparseable hex entry to save", async () => {
     const onChange = vi.fn();
     const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
-    const field = screen.getByLabelText("Selected row hex");
+    await screen.getByRole("button", { name: "Selected row color" }).click();
+    const field = screen.getByLabelText("Hex");
     await field.fill("bogus");
-    await userEvent.keyboard("{Enter}");
+    await expect.element(screen.getByRole("button", { name: "Apply" })).toBeDisabled();
+    await screen.getByRole("button", { name: "Cancel" }).click();
     expect(onChange).not.toHaveBeenCalled();
-    await expect.element(field).toHaveValue("#173a36ff");
+    expect(rootStyle().getPropertyValue("--sel-bg")).toBe("");
   });
 
   it("copies the hue onto another row on drop, keeping the target's opacity", async () => {
     const onChange = vi.fn();
     const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
     const rows = screen.getByRole("listitem").all();
-    const source = rows[0].element().querySelector(".color-sample")!;
-    const dt = new DataTransfer();
-    source.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: dt }));
-    rows[1].element().dispatchEvent(new DragEvent("drop", { bubbles: true, dataTransfer: dt }));
+    const source = rows[0].getByRole("button", { name: "Selected row color" });
+    await userEvent.dragAndDrop(source, rows[1]);
+
     expect(onChange.mock.calls[0][0].highlightColors).toEqual({ multiSelected: "#173a3621" });
     expect(rootStyle().getPropertyValue("--sel-multi-bg")).toBe("#173a3621");
+    await expect
+      .element(screen.getByRole("dialog", { name: "Selected row color" }))
+      .not.toBeInTheDocument();
+    await expect.element(source).toHaveAttribute("aria-expanded", "false");
   });
 
   it("does not save when the committed value equals the current one", async () => {
     const onChange = vi.fn();
     const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
-    const picker = screen.getByLabelText("Selected row color");
-    await setColorInput(picker.element() as HTMLInputElement, "#173a36");
+    await screen.getByRole("button", { name: "Selected row color" }).click();
+    await screen.getByRole("button", { name: "Apply" }).click();
     expect(onChange).not.toHaveBeenCalled();
   });
 

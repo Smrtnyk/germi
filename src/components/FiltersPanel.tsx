@@ -4,6 +4,8 @@ import { xor } from "es-toolkit";
 
 import { KIND_CHIPS, STATUS_CHIPS } from "../filter";
 import { hasContentTerms, savedFilterLabel, type SavedFilter } from "../savedFilters";
+import type { ColorParts } from "../theme";
+import { ColorPicker } from "./ColorPicker";
 import { IconChevronDown, IconChevronRight, IconClose } from "./icons";
 import { Button } from "./ui/Button";
 import { FilterChip } from "./ui/FilterChip";
@@ -16,6 +18,8 @@ export interface FiltersPanelProps {
   /** Whether the filter bar / chips currently hold anything worth saving. */
   canSaveCurrent: boolean;
   onSaveCurrent: () => void;
+  onColorPreview: (id: string, value: ColorParts) => void;
+  onColorPreviewCancel: (id: string) => void;
   onUpdate: (id: string, patch: Partial<Omit<SavedFilter, "id">>) => void;
   onRemove: (id: string) => void;
   onSolo: (id: string | null) => void;
@@ -118,6 +122,8 @@ function SavedFilterRow({
   count,
   expanded,
   onToggleExpand,
+  onColorPreview,
+  onColorPreviewCancel,
   onUpdate,
   onRemove,
   onSolo,
@@ -127,6 +133,8 @@ function SavedFilterRow({
   count: number | null;
   expanded: boolean;
   onToggleExpand: () => void;
+  onColorPreview: FiltersPanelProps["onColorPreview"];
+  onColorPreviewCancel: FiltersPanelProps["onColorPreviewCancel"];
   onUpdate: FiltersPanelProps["onUpdate"];
   onRemove: FiltersPanelProps["onRemove"];
   onSolo: FiltersPanelProps["onSolo"];
@@ -135,13 +143,13 @@ function SavedFilterRow({
   return (
     <div className={`sf-item ${expanded ? "expanded" : ""}`}>
       <div className="sf-row">
-        <input
-          type="color"
-          className="sf-color"
-          value={f.color}
-          aria-label="Highlight color"
-          title="Highlight color — matching rows are tinted with it"
-          onChange={(e) => onUpdate(f.id, { color: e.target.value })}
+        <ColorPicker
+          label={`Saved filter ${label}`}
+          value={{ hex: f.color, alphaPct: f.opacity }}
+          swatchBackground={`color-mix(in srgb, ${f.color} ${f.opacity}%, transparent)`}
+          onPreview={(value) => onColorPreview(f.id, value)}
+          onCancel={() => onColorPreviewCancel(f.id)}
+          onCommit={({ hex, alphaPct }) => onUpdate(f.id, { color: hex, opacity: alphaPct })}
         />
         <button
           className="sf-label"
@@ -180,6 +188,8 @@ export function FiltersPanel({
   counts,
   canSaveCurrent,
   onSaveCurrent,
+  onColorPreview,
+  onColorPreviewCancel,
   onUpdate,
   onRemove,
   onSolo,
@@ -225,6 +235,8 @@ export function FiltersPanel({
               count={counts.get(f.id) ?? null}
               expanded={expandedId === f.id}
               onToggleExpand={() => setExpandedId((cur) => (cur === f.id ? null : f.id))}
+              onColorPreview={onColorPreview}
+              onColorPreviewCancel={onColorPreviewCancel}
               onUpdate={onUpdate}
               onRemove={onRemove}
               onSolo={onSolo}

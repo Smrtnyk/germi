@@ -1,4 +1,4 @@
-import { uniqBy } from "es-toolkit";
+import { clamp, uniqBy } from "es-toolkit";
 
 import type { FlowSummary, ResourceKind } from "./types";
 import { KIND_CHIPS, matchesFilter, parseFilter, STATUS_CHIPS, type ParsedFilter } from "./filter";
@@ -19,13 +19,43 @@ export interface SavedFilter {
   kinds: ResourceKind[];
   statuses: string[];
   color: string;
+  opacity: number;
   highlight: boolean;
 }
 
 export interface RowTint {
+  filterId: string;
   color: string;
+  opacity: number;
   label: string;
 }
+
+export type RowTintPresentation = Pick<RowTint, "color" | "opacity" | "label">;
+
+/** Resolve one virtualized row against the current filter presentation. The
+ *  base ownership map is only read by key; live picker ticks never copy or
+ *  iterate all matching flow ids. A missing presentation means the owning
+ *  filter was removed or is no longer highlightable. */
+export function resolvePresentedTint(
+  flowId: string,
+  tints: ReadonlyMap<string, RowTint>,
+  presentations: ReadonlyMap<string, RowTintPresentation>,
+): RowTint | undefined {
+  const tint = tints.get(flowId);
+  if (!tint) return undefined;
+  const presentation = presentations.get(tint.filterId);
+  if (!presentation) return undefined;
+  if (
+    presentation.color === tint.color &&
+    presentation.opacity === tint.opacity &&
+    presentation.label === tint.label
+  ) {
+    return tint;
+  }
+  return { ...tint, ...presentation };
+}
+
+export const DEFAULT_FILTER_OPACITY = 16;
 
 /** Distinct hues that read against the dark rows and stay clear of the
  *  status/accent/imported tokens. New filters take the first unused one. */
@@ -48,6 +78,12 @@ export function nextFilterColor(existing: SavedFilter[]): string {
 }
 
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+/** Persisted filters predating opacity used the stylesheet's fixed 16% tint. */
+export function normalizeFilterOpacity(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_FILTER_OPACITY;
+  return Math.round(clamp(value, 0, 100));
+}
 
 /** Human label for an entry: the query text plus the chip names, so a
  *  chips-only filter (e.g. just "xhr") still reads as something. */
@@ -84,6 +120,7 @@ function sanitizeOne(raw: unknown): SavedFilter | null {
     kinds: knownValues<ResourceKind>(o.kinds, KNOWN_KINDS),
     statuses: knownValues<string>(o.statuses, KNOWN_STATUSES),
     color: typeof o.color === "string" && HEX_COLOR.test(o.color) ? o.color : FILTER_COLORS[0],
+    opacity: normalizeFilterOpacity(o.opacity),
     highlight: o.highlight !== false,
   };
 }
@@ -142,7 +179,12 @@ export function computeFilterMatches(
       if (!matchesFilter(s, c.parsed, c.kinds, c.statuses)) continue;
       counts.set(c.f.id, (counts.get(c.f.id) ?? 0) + 1);
       if (c.f.highlight && !tints.has(s.id)) {
-        tints.set(s.id, { color: c.f.color, label: c.label });
+        tints.set(s.id, {
+          filterId: c.f.id,
+          color: c.f.color,
+          opacity: c.f.opacity,
+          label: c.label,
+        });
       }
     }
   }
