@@ -11,6 +11,7 @@ describe("ConfirmDialog", () => {
         title="Delete scenario?"
         message="This cannot be undone."
         confirmLabel="Delete it"
+        cancelLabel="Keep editing"
         onConfirm={vi.fn()}
         onCancel={vi.fn()}
       />,
@@ -18,6 +19,7 @@ describe("ConfirmDialog", () => {
     await expect.element(screen.getByRole("heading", { name: "Delete scenario?" })).toBeVisible();
     await expect.element(screen.getByText("This cannot be undone.")).toBeVisible();
     await expect.element(screen.getByRole("button", { name: "Delete it" })).toBeVisible();
+    await expect.element(screen.getByRole("button", { name: "Keep editing" })).toBeVisible();
   });
 
   it("calls onConfirm (and not onCancel) when the confirm button is clicked", async () => {

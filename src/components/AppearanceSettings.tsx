@@ -31,7 +31,7 @@ const GROUPS: { id: HighlightColorSpec["group"]; label: string }[] = [
 /**
  * Settings → Appearance (issue #93): every highlight tint the app uses, as a
  * swatch + opacity pair. Edits preview live by writing the custom properties
- * directly; the settings save happens once per interaction, on the input's
+ * directly; the dialog draft updates once per interaction, on the input's
  * native `change` (picker closed / slider released), not on every drag tick.
  */
 export function AppearanceSettings({
@@ -62,7 +62,7 @@ export function AppearanceSettings({
       <p className="muted small">
         Highlight tints for the traffic list and the compare window. Most are translucent by design,
         so the opacity slider is part of the color. Changes preview live and follow into every
-        window.
+        window. Save applies them everywhere; dismissing Settings restores the saved colors.
       </p>
       {GROUPS.map((g) => (
         <Fragment key={g.id}>

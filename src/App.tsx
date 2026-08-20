@@ -967,18 +967,15 @@ export function App() {
           settingsReady={s.settingsReady}
           settingsProps={{
             settings: s.settings.settings,
-            onChange: s.saveSettings,
             onImportApplied: s.applyImportedSettings,
             columnOrder: s.columns.columnOrder,
-            onColumnOrderChange: s.columns.setColumnOrder,
             shortcuts: s.shortcuts,
-            onShortcutsChange: s.setShortcuts,
             autoLayout: s.autoLayout,
-            onAutoLayoutChange: s.setAutoLayout,
             running: s.proxy.running,
             portError: s.proxy.listenerError,
             onCaChanged: s.refreshCa,
             onFlushSettings: s.flushSettings,
+            onSave: s.saveSettingsDialog,
             onClose: () => {
               s.settings.setSettingsOpen(false);
               s.proxy.clearListenerError();
