@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { clamp } from "es-toolkit";
 
-import { api } from "../ipc";
 import { accelFromKeyboardEvent, prettyAccel } from "../hotkey";
 import {
   accelFromEvent,
@@ -32,6 +31,8 @@ interface SectionProps {
   onChange: (s: ProxySettings) => void;
 }
 
+type SettingsAppearance = Pick<ProxySettings, "theme" | "highlightColors">;
+
 interface SectionCtx extends SectionProps {
   columnOrder: string[];
   onColumnOrderChange: (order: string[]) => void;
@@ -42,6 +43,10 @@ interface SectionCtx extends SectionProps {
   running: boolean;
   portError: string | null;
   onCaChanged: () => void;
+  onExportCa: () => Promise<boolean>;
+  onRegenerateCa: () => Promise<void>;
+  onPreviewAppearance: (appearance: SettingsAppearance) => void;
+  onNumericDraftChange: (field: string, dirty: boolean) => void;
 }
 
 interface Section {
@@ -63,6 +68,7 @@ function NumberField({
   step,
   width,
   onCommit,
+  onDirtyChange,
 }: {
   value: number;
   min: number;
@@ -71,16 +77,24 @@ function NumberField({
   step?: number;
   width?: number;
   onCommit: (n: number) => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [draft, setDraft] = useState(String(value));
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  onDirtyChangeRef.current = onDirtyChange;
   // Resync when the committed value changes from outside (e.g. import settings).
-  useEffect(() => setDraft(String(value)), [value]);
+  useEffect(() => {
+    setDraft(String(value));
+    onDirtyChangeRef.current?.(false);
+  }, [value]);
+  useEffect(() => () => onDirtyChangeRef.current?.(false), []);
   const commit = () => {
     const parsed = Math.trunc(Number(draft));
     let n = draft.trim() !== "" && Number.isFinite(parsed) ? parsed : fallback;
     n = clamp(n, min, max ?? Infinity);
     onCommit(n);
     setDraft(String(n));
+    onDirtyChange?.(false);
   };
   return (
     <input
@@ -90,7 +104,11 @@ function NumberField({
       step={step}
       style={{ width }}
       value={draft}
-      onChange={(e) => setDraft(e.target.value)}
+      onChange={(e) => {
+        const next = e.target.value;
+        setDraft(next);
+        onDirtyChange?.(next !== String(value));
+      }}
       onBlur={commit}
       onKeyDown={(e) => {
         if (e.key === "Enter") (e.target as HTMLInputElement).blur();
@@ -111,13 +129,21 @@ const SECTIONS: Section[] = [
         onChange={c.onChange}
         running={c.running}
         portError={c.portError}
+        onNumericDraftChange={(dirty) => c.onNumericDraftChange("port", dirty)}
       />
     ),
   },
   {
     id: "certificates",
     label: "Certificates",
-    render: (c) => <CertificatesSection running={c.running} onCaChanged={c.onCaChanged} />,
+    render: (c) => (
+      <CertificatesSection
+        running={c.running}
+        onCaChanged={c.onCaChanged}
+        onExportCa={c.onExportCa}
+        onRegenerateCa={c.onRegenerateCa}
+      />
+    ),
   },
   {
     id: "interception",
@@ -127,12 +153,24 @@ const SECTIONS: Section[] = [
   {
     id: "capture",
     label: "Capture",
-    render: (c) => <CaptureSection settings={c.settings} onChange={c.onChange} />,
+    render: (c) => (
+      <CaptureSection
+        settings={c.settings}
+        onChange={c.onChange}
+        onNumericDraftChange={(dirty) => c.onNumericDraftChange("maxFlows", dirty)}
+      />
+    ),
   },
   {
     id: "throttling",
     label: "Throttling",
-    render: (c) => <ThrottlingSection settings={c.settings} onChange={c.onChange} />,
+    render: (c) => (
+      <ThrottlingSection
+        settings={c.settings}
+        onChange={c.onChange}
+        onNumericDraftChange={(dirty) => c.onNumericDraftChange("responseDelayMs", dirty)}
+      />
+    ),
   },
   {
     id: "autoresponder",
@@ -142,7 +180,13 @@ const SECTIONS: Section[] = [
   {
     id: "appearance",
     label: "Appearance",
-    render: (c) => <AppearanceSettings settings={c.settings} onChange={c.onChange} />,
+    render: (c) => (
+      <AppearanceSettings
+        settings={c.settings}
+        onChange={c.onChange}
+        onPreviewAppearance={c.onPreviewAppearance}
+      />
+    ),
   },
   {
     id: "shortcuts",
@@ -173,7 +217,12 @@ function ConnectionsSection({
   onChange,
   running,
   portError,
-}: SectionProps & { running: boolean; portError: string | null }) {
+  onNumericDraftChange,
+}: SectionProps & {
+  running: boolean;
+  portError: string | null;
+  onNumericDraftChange: (dirty: boolean) => void;
+}) {
   return (
     <div className="settings-pane">
       <h4>Connections</h4>
@@ -186,6 +235,7 @@ function ConnectionsSection({
           fallback={8080}
           width={90}
           onCommit={(port) => onChange({ ...settings, port })}
+          onDirtyChange={onNumericDraftChange}
         />
         <span className="muted small">
           {running ? "rebinds the proxy when you Save" : "applied on next Start after you Save"}
@@ -219,7 +269,11 @@ function ConnectionsSection({
   );
 }
 
-function CaptureSection({ settings, onChange }: SectionProps) {
+function CaptureSection({
+  settings,
+  onChange,
+  onNumericDraftChange,
+}: SectionProps & { onNumericDraftChange: (dirty: boolean) => void }) {
   const [draft, setDraft] = useState("");
   const filter = settings.captureFilter;
 
@@ -245,6 +299,7 @@ function CaptureSection({ settings, onChange }: SectionProps) {
           step={100}
           width={100}
           onCommit={(maxFlows) => onChange({ ...settings, maxFlows })}
+          onDirtyChange={onNumericDraftChange}
         />
         <span className="muted small">flows in memory (oldest evicted)</span>
       </div>
@@ -312,7 +367,11 @@ function CaptureSection({ settings, onChange }: SectionProps) {
   );
 }
 
-function ThrottlingSection({ settings, onChange }: SectionProps) {
+function ThrottlingSection({
+  settings,
+  onChange,
+  onNumericDraftChange,
+}: SectionProps & { onNumericDraftChange: (dirty: boolean) => void }) {
   const presets = [0, 200, 500, 1000, 2000, 5000];
   return (
     <div className="settings-pane">
@@ -330,6 +389,7 @@ function ThrottlingSection({ settings, onChange }: SectionProps) {
           step={100}
           width={100}
           onCommit={(responseDelayMs) => onChange({ ...settings, responseDelayMs })}
+          onDirtyChange={onNumericDraftChange}
         />
         <span className="muted small">ms {settings.responseDelayMs === 0 ? "(off)" : ""}</span>
       </div>
@@ -551,16 +611,20 @@ function InAppShortcutsSection({
 function CertificatesSection({
   running,
   onCaChanged,
+  onExportCa,
+  onRegenerateCa,
 }: {
   running: boolean;
   onCaChanged: () => void;
+  onExportCa: () => Promise<boolean>;
+  onRegenerateCa: () => Promise<void>;
 }) {
   const notify = useToast();
   const [pendingRegen, setPendingRegen] = useState(false);
 
   async function doExport() {
     try {
-      const ok = await api.exportCa();
+      const ok = await onExportCa();
       if (ok) notify("success", "CA certificate exported");
     } catch (e) {
       notify("error", String(e));
@@ -569,7 +633,7 @@ function CertificatesSection({
   async function doRegenerate() {
     setPendingRegen(false);
     try {
-      await api.regenerateCa();
+      await onRegenerateCa();
       onCaChanged();
       notify("success", "New CA generated — re-trust it (CA cert button) and restart apps.");
     } catch (e) {
@@ -684,6 +748,8 @@ function InterceptionSection({ settings, onChange }: SectionProps) {
 
 export interface SettingsDialogProps {
   settings: ProxySettings;
+  /** Immutable transaction base captured when the modeless window was seeded. */
+  baselineDraft?: SettingsDialogDraft;
   columnOrder: string[];
   shortcuts: Bindings;
   autoLayout: AutoLayout;
@@ -692,8 +758,19 @@ export interface SettingsDialogProps {
   onCaChanged: () => void;
   onImportApplied: (s: ProxySettings) => void;
   onFlushSettings: () => Promise<void>;
-  onSave: (draft: SettingsDialogDraft) => Promise<void>;
-  onClose: () => void;
+  onSave: (draft: SettingsDialogDraft) => Promise<SettingsDialogDraft | void>;
+  onClose: () => void | Promise<void>;
+  onGetSettingsSections: () => Promise<SettingsSectionSummary[]>;
+  onExportSettings: (sections: string[]) => Promise<boolean>;
+  onPeekSettingsImport: () => Promise<SettingsSectionSummary[] | null>;
+  onApplySettingsImport: (sections: string[]) => Promise<ProxySettings>;
+  onExportCa: () => Promise<boolean>;
+  onRegenerateCa: () => Promise<void>;
+  onPreviewAppearance?: (appearance: SettingsAppearance) => void;
+  standalone?: boolean;
+  closeRequest?: number;
+  onCloseRequestCancelled?: () => void;
+  onSavingChange?: (saving: boolean) => void;
 }
 
 function loadSection(): string {
@@ -709,6 +786,10 @@ function useSettingsTransfer(
   onFlushSettings: () => Promise<void>,
   onImportApplied: (settings: ProxySettings) => void,
   onImported: (settings: ProxySettings) => void,
+  operations: Pick<
+    SettingsDialogProps,
+    "onGetSettingsSections" | "onExportSettings" | "onPeekSettingsImport" | "onApplySettingsImport"
+  >,
 ) {
   const notify = useToast();
   const [exportSections, setExportSections] = useState<SettingsSectionSummary[] | null>(null);
@@ -717,7 +798,7 @@ function useSettingsTransfer(
   async function startExport() {
     try {
       await onFlushSettings();
-      setExportSections(await api.getSettingsSections());
+      setExportSections(await operations.onGetSettingsSections());
     } catch (error) {
       notify("error", String(error));
     }
@@ -727,7 +808,7 @@ function useSettingsTransfer(
     setExportSections(null);
     try {
       await onFlushSettings();
-      if (await api.exportSettings(sections)) notify("success", "Settings exported");
+      if (await operations.onExportSettings(sections)) notify("success", "Settings exported");
     } catch (error) {
       notify("error", String(error));
     }
@@ -736,7 +817,7 @@ function useSettingsTransfer(
   async function startImport() {
     try {
       await onFlushSettings();
-      setImportPreview(await api.peekSettingsImport());
+      setImportPreview(await operations.onPeekSettingsImport());
     } catch (error) {
       notify("error", String(error));
     }
@@ -746,7 +827,7 @@ function useSettingsTransfer(
     setImportPreview(null);
     try {
       await onFlushSettings();
-      const imported = await api.applySettingsImport(sections);
+      const imported = await operations.onApplySettingsImport(sections);
       onImportApplied(imported);
       onImported(imported);
       notify("success", "Settings imported");
@@ -769,6 +850,7 @@ function useSettingsTransfer(
 
 function useSettingsDialogState({
   settings,
+  baselineDraft,
   onImportApplied,
   columnOrder,
   shortcuts,
@@ -776,6 +858,11 @@ function useSettingsDialogState({
   onFlushSettings,
   onSave,
   onClose,
+  onGetSettingsSections,
+  onExportSettings,
+  onPeekSettingsImport,
+  onApplySettingsImport,
+  onPreviewAppearance = ({ theme, highlightColors }) => applyAppearance(theme, highlightColors),
 }: SettingsDialogProps) {
   const [active, setActive] = useState(loadSection);
   const [draftSettings, setDraftSettings] = useState(settings);
@@ -784,6 +871,16 @@ function useSettingsDialogState({
   const [draftAutoLayout, setDraftAutoLayout] = useState(autoLayout);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [pendingNumericEdits, setPendingNumericEdits] = useState<Record<string, boolean>>({});
+  const onNumericDraftChange = useCallback((field: string, dirty: boolean) => {
+    setPendingNumericEdits((current) => {
+      if (Boolean(current[field]) === dirty) return current;
+      if (dirty) return { ...current, [field]: true };
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
+  }, []);
   const durableAppearanceRef = useRef({
     theme: settings.theme,
     highlightColors: settings.highlightColors,
@@ -805,10 +902,19 @@ function useSettingsDialogState({
     setDraftAutoLayout(autoLayout);
     setActive(loadSection());
     setSaveError(null);
-    applyAppearance(imported.theme, imported.highlightColors);
+    setPendingNumericEdits({});
+    onPreviewAppearance({
+      theme: imported.theme,
+      highlightColors: imported.highlightColors,
+    });
   }
 
-  const transfer = useSettingsTransfer(onFlushSettings, onImportApplied, resetAfterImport);
+  const transfer = useSettingsTransfer(onFlushSettings, onImportApplied, resetAfterImport, {
+    onGetSettingsSections,
+    onExportSettings,
+    onPeekSettingsImport,
+    onApplySettingsImport,
+  });
 
   const currentDraft: SettingsDialogDraft = {
     settings: draftSettings,
@@ -817,7 +923,7 @@ function useSettingsDialogState({
     autoLayout: draftAutoLayout,
     activeSection: active,
   };
-  const savedDraft: SettingsDialogDraft = {
+  const savedDraft: SettingsDialogDraft = baselineDraft ?? {
     settings,
     columnOrder,
     shortcuts,
@@ -834,21 +940,33 @@ function useSettingsDialogState({
 
   function discard() {
     const appearance = durableAppearanceRef.current;
-    applyAppearance(appearance.theme, appearance.highlightColors);
-    onClose();
+    onPreviewAppearance(appearance);
+    void Promise.resolve(onClose()).catch((error: unknown) =>
+      setSaveError(error instanceof Error ? error.message : String(error)),
+    );
   }
 
   async function save() {
     setSaving(true);
     setSaveError(null);
     try {
-      await onSave(currentDraft);
-      savedAppearanceRef.current = {
-        theme: draftSettings.theme,
-        highlightColors: draftSettings.highlightColors,
+      const persisted = (await onSave(currentDraft)) ?? currentDraft;
+      setDraftSettings(persisted.settings);
+      setDraftColumnOrder(persisted.columnOrder);
+      setDraftShortcuts(persisted.shortcuts);
+      setDraftAutoLayout(persisted.autoLayout);
+      setActive(persisted.activeSection);
+      setPendingNumericEdits({});
+      durableAppearanceRef.current = {
+        theme: persisted.settings.theme,
+        highlightColors: persisted.settings.highlightColors,
       };
-      applyAppearance(draftSettings.theme, draftSettings.highlightColors);
-      onClose();
+      savedAppearanceRef.current = {
+        theme: persisted.settings.theme,
+        highlightColors: persisted.settings.highlightColors,
+      };
+      applyAppearance(persisted.settings.theme, persisted.settings.highlightColors);
+      await onClose();
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
       setSaving(false);
@@ -868,15 +986,42 @@ function useSettingsDialogState({
     setDraftAutoLayout,
     saving,
     saveError,
-    dirty: hasUnsavedSettingsChanges(currentDraft, savedDraft),
+    dirty:
+      hasUnsavedSettingsChanges(currentDraft, savedDraft) ||
+      Object.keys(pendingNumericEdits).length > 0,
+    onNumericDraftChange,
     transfer,
     discard,
     save,
   };
 }
 
-export function SettingsDialog({ running, portError, onCaChanged, ...props }: SettingsDialogProps) {
-  const state = useSettingsDialogState({ running, portError, onCaChanged, ...props });
+export function SettingsDialog({
+  running,
+  portError,
+  onCaChanged,
+  onExportCa,
+  onRegenerateCa,
+  onPreviewAppearance = ({ theme, highlightColors }) => applyAppearance(theme, highlightColors),
+  standalone = false,
+  closeRequest = 0,
+  onCloseRequestCancelled,
+  onSavingChange,
+  ...props
+}: SettingsDialogProps) {
+  const state = useSettingsDialogState({
+    running,
+    portError,
+    onCaChanged,
+    onExportCa,
+    onRegenerateCa,
+    onPreviewAppearance,
+    standalone,
+    closeRequest,
+    onCloseRequestCancelled,
+    onSavingChange,
+    ...props,
+  });
   const section = SECTIONS.find((s) => s.id === state.active) ?? SECTIONS[0];
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -897,11 +1042,141 @@ export function SettingsDialog({ running, portError, onCaChanged, ...props }: Se
   function keepEditing() {
     restoreFocusRef.current = true;
     setConfirmDiscard(false);
+    onCloseRequestCancelled?.();
   }
+
+  function requestClose(returnFocus: HTMLElement | null) {
+    if (state.saving) return;
+    if (state.dirty) requestDiscardConfirmation(returnFocus);
+    else state.discard();
+  }
+
+  useEffect(() => onSavingChange?.(state.saving), [onSavingChange, state.saving]);
+
+  useEffect(() => {
+    if (closeRequest > 0)
+      requestClose(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    // A monotonically increasing request token deliberately triggers this effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [closeRequest]);
 
   // Escape is routed to the topmost native dialog. Dirty Settings intercepts
   // its close request before native dismissal; while the confirmation is
   // topmost, Escape keeps the draft and restores the prior Settings focus.
+
+  const content = (close: () => void) => (
+    <>
+      <div className="settings-head">
+        {standalone ? <h1 id="settings-title">Settings</h1> : <h3 id="settings-title">Settings</h3>}
+        <IconButton
+          label="Close settings"
+          onClick={(event) => requestClose(event.currentTarget)}
+          disabled={state.saving}
+        >
+          <IconClose />
+        </IconButton>
+      </div>
+
+      <div className="settings-body" inert={state.saving} aria-busy={state.saving}>
+        <nav className="settings-nav" aria-label="Settings sections">
+          {SECTIONS.map((s) => (
+            <button
+              key={s.id}
+              className={`settings-nav-item ${s.id === state.active ? "on" : ""}`}
+              onClick={() => state.setActive(s.id)}
+            >
+              {s.label}
+            </button>
+          ))}
+        </nav>
+        <div className="settings-content">
+          {section.render({
+            settings: state.draftSettings,
+            onChange: state.saving ? () => {} : state.setDraftSettings,
+            columnOrder: state.draftColumnOrder,
+            onColumnOrderChange: state.setDraftColumnOrder,
+            shortcuts: state.draftShortcuts,
+            onShortcutsChange: state.setDraftShortcuts,
+            autoLayout: state.draftAutoLayout,
+            onAutoLayoutChange: state.setDraftAutoLayout,
+            running,
+            portError,
+            onCaChanged,
+            onExportCa,
+            onRegenerateCa,
+            onPreviewAppearance: state.saving ? () => {} : onPreviewAppearance,
+            onNumericDraftChange: state.onNumericDraftChange,
+          })}
+        </div>
+      </div>
+
+      <div className="settings-foot">
+        <div className="settings-foot-left">
+          <Button
+            onClick={state.transfer.startImport}
+            disabled={state.saving}
+            title="Import settings from a JSON file (you'll review what it changes first)"
+          >
+            Import…
+          </Button>
+          <Button
+            onClick={state.transfer.startExport}
+            disabled={state.saving}
+            title="Export selected settings to a JSON file"
+          >
+            Export…
+          </Button>
+        </div>
+        {state.saveError && (
+          <p className="settings-err" role="alert">
+            {state.saveError}
+          </p>
+        )}
+        <Button onClick={close} disabled={state.saving}>
+          Cancel
+        </Button>
+        <Button variant="primary" onClick={state.save} disabled={state.saving}>
+          {state.saving ? "Saving…" : "Save"}
+        </Button>
+      </div>
+
+      {state.transfer.exportSections && (
+        <SettingsSectionsDialog
+          title="Export settings"
+          message="Only saved values are exported. Pick what goes into the file — e.g. only host exclusions to share them with colleagues."
+          sections={state.transfer.exportSections}
+          confirmLabel="Export…"
+          onConfirm={state.transfer.exportSettings}
+          onCancel={state.transfer.cancelExport}
+        />
+      )}
+      {state.transfer.importPreview && (
+        <SettingsSectionsDialog
+          title="Import settings"
+          message="Import applies the checked settings immediately and discards other unsaved edits in this Settings window. Everything else stays as currently saved."
+          sections={state.transfer.importPreview}
+          confirmLabel="Import"
+          onConfirm={state.transfer.importSettings}
+          onCancel={state.transfer.cancelImport}
+        />
+      )}
+      {confirmDiscard && (
+        <ConfirmDialog
+          title="Discard unsaved changes?"
+          message="Closing Settings will discard every change you haven't saved."
+          confirmLabel="Discard changes"
+          cancelLabel="Keep editing"
+          danger
+          onConfirm={state.discard}
+          onCancel={keepEditing}
+        />
+      )}
+    </>
+  );
+
+  if (standalone) {
+    return <main className="settings-window">{content(state.discard)}</main>;
+  }
 
   return (
     <Modal
@@ -917,114 +1192,7 @@ export function SettingsDialog({ running, portError, onCaChanged, ...props }: Se
         return false;
       }}
     >
-      {(close) => (
-        <>
-          <div className="settings-head">
-            <h3 id="settings-title">Settings</h3>
-            <IconButton
-              label="Close settings"
-              onClick={(event) => {
-                if (state.dirty) requestDiscardConfirmation(event.currentTarget);
-                else close();
-              }}
-              disabled={state.saving}
-            >
-              <IconClose />
-            </IconButton>
-          </div>
-
-          <div className="settings-body">
-            <nav className="settings-nav" aria-label="Settings sections">
-              {SECTIONS.map((s) => (
-                <button
-                  key={s.id}
-                  className={`settings-nav-item ${s.id === state.active ? "on" : ""}`}
-                  onClick={() => state.setActive(s.id)}
-                >
-                  {s.label}
-                </button>
-              ))}
-            </nav>
-            <div className="settings-content">
-              {section.render({
-                settings: state.draftSettings,
-                onChange: state.setDraftSettings,
-                columnOrder: state.draftColumnOrder,
-                onColumnOrderChange: state.setDraftColumnOrder,
-                shortcuts: state.draftShortcuts,
-                onShortcutsChange: state.setDraftShortcuts,
-                autoLayout: state.draftAutoLayout,
-                onAutoLayoutChange: state.setDraftAutoLayout,
-                running,
-                portError,
-                onCaChanged,
-              })}
-            </div>
-          </div>
-
-          <div className="settings-foot">
-            <div className="settings-foot-left">
-              <Button
-                onClick={state.transfer.startImport}
-                disabled={state.saving}
-                title="Import settings from a JSON file (you'll review what it changes first)"
-              >
-                Import…
-              </Button>
-              <Button
-                onClick={state.transfer.startExport}
-                disabled={state.saving}
-                title="Export selected settings to a JSON file"
-              >
-                Export…
-              </Button>
-            </div>
-            {state.saveError && (
-              <p className="settings-err" role="alert">
-                {state.saveError}
-              </p>
-            )}
-            <Button onClick={close} disabled={state.saving}>
-              Cancel
-            </Button>
-            <Button variant="primary" onClick={state.save} disabled={state.saving}>
-              {state.saving ? "Saving…" : "Save"}
-            </Button>
-          </div>
-
-          {state.transfer.exportSections && (
-            <SettingsSectionsDialog
-              title="Export settings"
-              message="Only saved values are exported. Pick what goes into the file — e.g. only host exclusions to share them with colleagues."
-              sections={state.transfer.exportSections}
-              confirmLabel="Export…"
-              onConfirm={state.transfer.exportSettings}
-              onCancel={state.transfer.cancelExport}
-            />
-          )}
-          {state.transfer.importPreview && (
-            <SettingsSectionsDialog
-              title="Import settings"
-              message="Import applies the checked settings immediately and discards other unsaved edits in this Settings window. Everything else stays as currently saved."
-              sections={state.transfer.importPreview}
-              confirmLabel="Import"
-              onConfirm={state.transfer.importSettings}
-              onCancel={state.transfer.cancelImport}
-            />
-          )}
-          {confirmDiscard && (
-            <ConfirmDialog
-              title="Discard unsaved changes?"
-              message="Closing Settings will discard every change you haven't saved."
-              confirmLabel="Discard changes"
-              cancelLabel="Keep editing"
-              danger
-              onConfirm={state.discard}
-              onCancel={keepEditing}
-            />
-          )}
-        </>
-      )}
+      {content}
     </Modal>
   );
 }

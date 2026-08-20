@@ -18,6 +18,10 @@ use tauri_plugin_dialog::DialogExt;
 
 use state::AppState;
 
+fn is_settings_window(label: &str) -> bool {
+    label == "settings"
+}
+
 /// Build the shared [`AppState`] (CA, rule store, persisted settings) and stash
 /// it on the app. Split out of the builder chain in `run` so the latter stays a
 /// readable wiring list.
@@ -156,6 +160,19 @@ fn handle_run_event(app_handle: &tauri::AppHandle, event: tauri::RunEvent) {
             label,
             event: tauri::WindowEvent::Destroyed,
             ..
+        } if is_settings_window(&label) => {
+            // The main webview owns the Settings transaction and any ephemeral
+            // appearance preview. Report actual destruction (including a crash)
+            // so it can invalidate the session and restore durable colors.
+            let _ = app_handle.emit(
+                "germi://settings-window-closed",
+                serde_json::json!({ "sessionId": null }),
+            );
+        }
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::Destroyed,
+            ..
         } if label.starts_with("rule-") => {
             // As with the scripts editor, the shell is the only reliable
             // owner of the closed notification: a webview cannot emit after
@@ -272,4 +289,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Germi")
         .run(handle_run_event);
+}
+
+#[cfg(test)]
+mod window_event_tests {
+    use super::is_settings_window;
+
+    #[test]
+    fn settings_destroyed_notification_matches_only_the_singleton_label() {
+        assert!(is_settings_window("settings"));
+        assert!(!is_settings_window("main"));
+        assert!(!is_settings_window("rule-settings"));
+    }
 }
