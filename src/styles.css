@@ -2738,6 +2738,17 @@ textarea {
 }
 
 /* ---- settings panel ---- */
+.settings-window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-1);
+}
+.settings-window-loading {
+  padding: var(--space-8);
+}
 .settings-modal {
   width: min(900px, 90vw);
   height: min(680px, 88vh);
@@ -2754,8 +2765,10 @@ textarea {
   padding: var(--space-7) var(--space-8);
   border-bottom: 1px solid var(--line);
 }
+.settings-head h1,
 .settings-head h3 {
   margin: 0;
+  font-size: var(--fs-lg);
 }
 .settings-body {
   flex: 1;

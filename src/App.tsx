@@ -33,7 +33,7 @@ import { ScriptsContainer } from "./components/ScriptsContainer";
 import { flushDetachedScriptsWindow, openOrFocusScriptsWindow } from "./scriptWindows";
 import { useSafeWindowClose } from "./useSafeWindowClose";
 import { CaDialog } from "./components/CaDialog";
-import { SettingsDialog, type SettingsDialogProps } from "./components/SettingsDialog";
+import { useSettingsWindowController } from "./useSettingsWindowController";
 import { StatusBar } from "./components/StatusBar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { GeneralRulesImportDialog } from "./components/GeneralRulesImportDialog";
@@ -50,7 +50,7 @@ import { CaptureImportProgress } from "./captureImport";
 
 type AppStateValue = ReturnType<typeof useAppState>;
 
-function buildActions(s: AppStateValue): PaletteAction[] {
+function buildActions(s: AppStateValue, openSettings: () => void): PaletteAction[] {
   const ar = s.ar.autoresponder;
   // The proxy is disabled in viewer mode, so its commands don't apply there.
   const proxyActions: PaletteAction[] = s.viewer
@@ -181,7 +181,7 @@ function buildActions(s: AppStateValue): PaletteAction[] {
       group: "App",
       label: "Open Settings…",
       disabled: !s.settingsReady,
-      run: () => s.settings.setSettingsOpen(true),
+      run: openSettings,
     },
     { id: "ca", group: "App", label: "CA certificate…", run: () => s.setCaOpen(true) },
     { id: "new-viewer", group: "App", label: "New viewer window", run: s.launchViewer },
@@ -608,23 +608,12 @@ function AppDialogs({
   caOpen,
   caInfo,
   onCaClose,
-  settingsOpen,
-  settingsReady,
-  settingsProps,
 }: {
   caOpen: boolean;
   caInfo: CaInfo | null;
   onCaClose: () => void;
-  settingsOpen: boolean;
-  settingsReady: boolean;
-  settingsProps: SettingsDialogProps;
 }) {
-  return (
-    <>
-      {caOpen && caInfo && <CaDialog info={caInfo} onClose={onCaClose} />}
-      {settingsOpen && settingsReady && <SettingsDialog {...settingsProps} />}
-    </>
-  );
+  return caOpen && caInfo ? <CaDialog info={caInfo} onClose={onCaClose} /> : null;
 }
 
 /** The session confirm/option dialogs: replace-current-capture confirmation,
@@ -684,6 +673,7 @@ function useSafeAppClose(
   s: AppStateValue,
   ruleFlushRef: RefObject<() => Promise<void>>,
   scriptsFlushRef: RefObject<() => Promise<void>>,
+  closeSettings: () => Promise<void>,
 ) {
   const flushSettings = s.flushSettings;
   const flushRuleMutations = s.ar.flushMutations;
@@ -692,6 +682,7 @@ function useSafeAppClose(
   const { closing, closingRef } = useSafeWindowClose({
     closeOnEscape: false,
     operation: async () => {
+      await closeSettings();
       await flushDetachedScriptsWindow(5_000, true);
       await flushDetachedRuleWindows(5_000, true);
       await ruleFlushRef.current();
@@ -706,6 +697,27 @@ function useSafeAppClose(
       notify("error", `Could not install the safe-close handler: ${String(error)}`),
   });
   return { closing, closingRef };
+}
+
+function useAppSettingsWindow(s: AppStateValue) {
+  const settingsWindow = useSettingsWindowController({
+    ready: s.settingsReady,
+    settings: s.settings.settings,
+    getDurableSettings: s.getDurableSettings,
+    columnOrder: s.columns.columnOrder,
+    shortcuts: s.shortcuts,
+    autoLayout: s.autoLayout,
+    running: s.proxy.running,
+    portError: s.proxy.listenerError,
+    save: s.saveSettingsDialog,
+    flush: s.flushSettings,
+    applyImported: s.applyImportedSettings,
+    refreshCa: s.refreshCa,
+    clearListenerError: s.proxy.clearListenerError,
+    notify: s.notify,
+  });
+  const actions = useMemo(() => buildActions(s, settingsWindow.open), [s, settingsWindow.open]);
+  return { settingsWindow, actions };
 }
 
 function useAppKeyboardShortcuts(
@@ -745,9 +757,14 @@ export function App() {
   const s = useAppState(() => ruleFlushRef.current());
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [cheatOpen, setCheatOpen] = useState(false);
-  const { closing, closingRef } = useSafeAppClose(s, ruleFlushRef, scriptsFlushRef);
+  const { settingsWindow, actions } = useAppSettingsWindow(s);
+  const { closing, closingRef } = useSafeAppClose(
+    s,
+    ruleFlushRef,
+    scriptsFlushRef,
+    settingsWindow.closeForShutdown,
+  );
 
-  const actions = useMemo(() => buildActions(s), [s]);
   const reverse = useMemo(() => reverseLookup(s.shortcuts), [s.shortcuts]);
   const cmdActions = commandActions(s, setPaletteOpen);
 
@@ -773,7 +790,7 @@ export function App() {
           decode={s.decode}
           onToggleDecode={() => s.setDecode((d) => !d)}
           settingsReady={s.settingsReady}
-          onOpenSettings={() => s.settings.setSettingsOpen(true)}
+          onOpenSettings={settingsWindow.open}
           onOpen={s.requestOpenCapture}
           onSaveSession={s.requestSaveSession}
           onClear={s.clearTraffic}
@@ -965,29 +982,7 @@ export function App() {
           }}
         />
 
-        <AppDialogs
-          caOpen={s.caOpen}
-          caInfo={s.caInfo}
-          onCaClose={() => s.setCaOpen(false)}
-          settingsOpen={s.settings.settingsOpen}
-          settingsReady={s.settingsReady}
-          settingsProps={{
-            settings: s.settings.settings,
-            onImportApplied: s.applyImportedSettings,
-            columnOrder: s.columns.columnOrder,
-            shortcuts: s.shortcuts,
-            autoLayout: s.autoLayout,
-            running: s.proxy.running,
-            portError: s.proxy.listenerError,
-            onCaChanged: s.refreshCa,
-            onFlushSettings: s.flushSettings,
-            onSave: s.saveSettingsDialog,
-            onClose: () => {
-              s.settings.setSettingsOpen(false);
-              s.proxy.clearListenerError();
-            },
-          }}
-        />
+        <AppDialogs caOpen={s.caOpen} caInfo={s.caInfo} onCaClose={() => s.setCaOpen(false)} />
 
         <SessionDialogs s={s} />
 

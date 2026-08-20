@@ -15,6 +15,8 @@ const apiMocks = vi.hoisted(() => ({
   exportSettings: vi.fn(),
   peekSettingsImport: vi.fn(),
   applySettingsImport: vi.fn(),
+  exportCa: vi.fn(),
+  regenerateCa: vi.fn(),
 }));
 
 vi.mock("../ipc", () => ({ api: apiMocks }));
@@ -80,6 +82,12 @@ function props(overrides: Partial<Parameters<typeof SettingsDialog>[0]> = {}) {
     onFlushSettings: vi.fn(() => Promise.resolve()),
     onSave: vi.fn(() => Promise.resolve()),
     onClose: vi.fn(),
+    onGetSettingsSections: apiMocks.getSettingsSections,
+    onExportSettings: apiMocks.exportSettings,
+    onPeekSettingsImport: apiMocks.peekSettingsImport,
+    onApplySettingsImport: apiMocks.applySettingsImport,
+    onExportCa: apiMocks.exportCa,
+    onRegenerateCa: apiMocks.regenerateCa,
     ...overrides,
   };
 }
@@ -121,6 +129,31 @@ function Harness({
           })}
         />
       )}
+    </>
+  );
+}
+
+function WindowHarness({
+  persist = vi.fn(),
+}: {
+  persist?: (draft: SettingsDialogDraft) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(true);
+  const [closeRequest, setCloseRequest] = useState(0);
+  return (
+    <>
+      <button onClick={() => setCloseRequest((value) => value + 1)}>Native close request</button>
+      {open && (
+        <SettingsDialog
+          {...props({
+            standalone: true,
+            closeRequest,
+            onSave: persist,
+            onClose: () => setOpen(false),
+          })}
+        />
+      )}
+      {!open && <span>Settings window closed</span>}
     </>
   );
 }
@@ -228,6 +261,8 @@ beforeEach(() => {
   apiMocks.exportSettings.mockReset();
   apiMocks.peekSettingsImport.mockReset();
   apiMocks.applySettingsImport.mockReset();
+  apiMocks.exportCa.mockReset();
+  apiMocks.regenerateCa.mockReset();
   localStorage.clear();
   localStorage.setItem("germi.autoLayout", "side");
   localStorage.setItem("germi.settingsSection", "connections");
@@ -286,6 +321,68 @@ describe("SettingsDialog", () => {
     } finally {
       scheme.restore();
     }
+  });
+
+  it("renders standalone without an outer dialog while keeping ColorPicker as the only modal", async () => {
+    localStorage.setItem("germi.settingsSection", "appearance");
+    const screen = await render(<WindowHarness />);
+
+    expect(document.querySelector("dialog.settings-modal")).toBeNull();
+    await expect.element(screen.getByRole("heading", { name: "Settings" })).toBeVisible();
+    await screen.getByRole("button", { name: "Selected row color" }).click();
+    expect(document.querySelectorAll("dialog[open]")).toHaveLength(1);
+    await expect.element(screen.getByRole("dialog", { name: "Selected row color" })).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+    await expect
+      .element(screen.getByRole("dialog", { name: "Selected row color" }))
+      .not.toBeInTheDocument();
+    await expect.element(screen.getByRole("heading", { name: "Settings" })).toBeVisible();
+  });
+
+  it("preserves a dirty standalone draft across a native close request and Keep editing", async () => {
+    const screen = await render(<WindowHarness />);
+    await screen.getByRole("spinbutton").fill("9090");
+    await userEvent.tab();
+    await screen.getByRole("button", { name: "Native close request" }).click();
+
+    await expect
+      .element(screen.getByRole("dialog", { name: "Discard unsaved changes?" }))
+      .toBeVisible();
+    await screen.getByRole("button", { name: "Keep editing" }).click();
+    await expect.element(screen.getByRole("spinbutton")).toHaveValue(9090);
+    await expect.element(screen.getByRole("heading", { name: "Settings" })).toBeVisible();
+
+    await screen.getByRole("button", { name: "Cancel" }).click();
+    await expect.element(screen.getByText("Settings window closed")).toBeVisible();
+    await expect
+      .element(screen.getByRole("dialog", { name: "Discard unsaved changes?" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("treats an uncommitted focused numeric edit as dirty for Escape and native X", async () => {
+    const modal = await render(<Harness />);
+    const modalPort = modal.getByRole("spinbutton");
+    await modalPort.fill("9090");
+    await expect.element(modalPort).toHaveFocus();
+    await userEvent.keyboard("{Escape}");
+    await expect
+      .element(modal.getByRole("dialog", { name: "Discard unsaved changes?" }))
+      .toBeVisible();
+    await modal.getByRole("button", { name: "Keep editing" }).click();
+    await expect.element(modalPort).toHaveValue(9090);
+
+    await modal.unmount();
+    const standalone = await render(<WindowHarness />);
+    const standalonePort = standalone.getByRole("spinbutton");
+    await standalonePort.fill("9090");
+    await expect.element(standalonePort).toHaveFocus();
+    (
+      standalone.getByRole("button", { name: "Native close request" }).element() as HTMLElement
+    ).click();
+    await expect
+      .element(standalone.getByRole("dialog", { name: "Discard unsaved changes?" }))
+      .toBeVisible();
+    await expect.element(standalonePort).toHaveValue(9090);
   });
 
   it("flushes pending settings before previewing and writing selected export sections", async () => {
@@ -532,6 +629,35 @@ describe("SettingsDialog", () => {
     await expectSelectedRowColor(screen, "#ff000080");
     await screen.getByRole("button", { name: "Connections" }).click();
     await expect.element(screen.getByRole("spinbutton")).toHaveValue(9090);
+  });
+
+  it("makes appearance controls inert while an asynchronous Save is pending", async () => {
+    localStorage.setItem("germi.settingsSection", "appearance");
+    let finishSave!: () => void;
+    const onSave = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishSave = resolve;
+        }),
+    );
+    const onPreviewAppearance = vi.fn();
+    const onClose = vi.fn();
+    const screen = await render(
+      <SettingsDialog {...props({ onSave, onClose, onPreviewAppearance })} />,
+    );
+    await screen.getByRole("button", { name: "Light" }).click();
+    expect(onPreviewAppearance).toHaveBeenCalledOnce();
+    await screen.getByRole("button", { name: "Save" }).click();
+    await vi.waitFor(() => expect(onSave).toHaveBeenCalledOnce());
+
+    const body = document.querySelector(".settings-body") as HTMLElement;
+    expect(body.inert).toBe(true);
+    const previewsBeforeLateClick = onPreviewAppearance.mock.calls.length;
+    (screen.getByRole("button", { name: "Dark" }).element() as HTMLButtonElement).click();
+    expect(onPreviewAppearance).toHaveBeenCalledTimes(previewsBeforeLateClick);
+
+    finishSave();
+    await vi.waitFor(() => expect(onClose).toHaveBeenCalledOnce());
   });
 
   it("persists a dragged column order only when Settings is saved", async () => {

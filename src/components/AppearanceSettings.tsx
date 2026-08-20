@@ -33,21 +33,23 @@ const GROUPS: { id: HighlightColorSpec["group"]; label: string }[] = [
 export function AppearanceSettings({
   settings,
   onChange,
+  onPreviewAppearance = ({ theme, highlightColors }) => applyAppearance(theme, highlightColors),
 }: {
   settings: ProxySettings;
   onChange: (s: ProxySettings) => void;
+  onPreviewAppearance?: (appearance: Pick<ProxySettings, "theme" | "highlightColors">) => void;
 }) {
   const colors = settings.highlightColors;
   const resolvedTheme = useTheme();
 
   function commit(spec: HighlightColorSpec, value: string | null) {
     const next = withOverride(colors, spec, value, resolvedTheme);
-    applyAppearance(settings.theme, next);
+    onPreviewAppearance({ theme: settings.theme, highlightColors: next });
     if (!isEqual(next, colors)) onChange({ ...settings, highlightColors: next });
   }
 
   function resetAll() {
-    applyAppearance(settings.theme, {});
+    onPreviewAppearance({ theme: settings.theme, highlightColors: {} });
     onChange({ ...settings, highlightColors: {} });
   }
 
@@ -91,7 +93,7 @@ export function AppearanceSettings({
             },
           ]}
           onChange={(theme) => {
-            applyAppearance(theme, colors);
+            onPreviewAppearance({ theme, highlightColors: colors });
             onChange({ ...settings, theme });
           }}
         />
@@ -111,8 +113,15 @@ export function AppearanceSettings({
                 spec={spec}
                 effective={effectiveColor(colors, spec, resolvedTheme)}
                 overridden={colors[spec.key] !== undefined}
-                onPreview={(v) => applyAppearance(settings.theme, { ...colors, [spec.key]: v })}
-                onCancel={() => applyAppearance(settings.theme, colors)}
+                onPreview={(value) =>
+                  onPreviewAppearance({
+                    theme: settings.theme,
+                    highlightColors: { ...colors, [spec.key]: value },
+                  })
+                }
+                onCancel={() =>
+                  onPreviewAppearance({ theme: settings.theme, highlightColors: colors })
+                }
                 onCommit={(v) => commit(spec, v)}
               />
             ))}

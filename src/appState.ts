@@ -57,6 +57,13 @@ import { emitSettingsChanged } from "./themeSync";
 import { applyAppearance } from "./theme";
 import { loadDurableSettings } from "./settingsHydration";
 import { OrderedTaskQueue } from "./orderedTaskQueue";
+import {
+  bindSettingsPort,
+  excludeSettingsHost,
+  queueSettingsMutation,
+  serializeSettingsDialogSave,
+  type SettingsMutation,
+} from "./settingsSaveSerialization";
 import { readCaptureForImport, useCaptureImport } from "./captureImport";
 import type { CaptureExt } from "./dnd";
 import {
@@ -1175,8 +1182,7 @@ function useSettings() {
     theme: "system",
     highlightColors: {},
   });
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  return { settings, setSettings, settingsOpen, setSettingsOpen };
+  return { settings, setSettings };
 }
 
 function useRuleHits(activeScenarioId: string | null, active: boolean, setError: SetError) {
@@ -2571,7 +2577,7 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
   const proxy = useProxyControl(
     settings.settings,
     setError,
-    (port) => saveSettings({ ...latestSettingsRef.current, port }),
+    (port) => saveSettingsMutation(bindSettingsPort(port)),
     notify,
     proxyStartupReady && settingsReady,
   );
@@ -2647,7 +2653,7 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
         flushSettingsSaves: () => settingsSaveQueue.flush(),
         reconcileListenerSettings: (previous) =>
           proxy.applyListenChange(previous, latestSettingsRef.current),
-        onPortBound: (port) => saveSettings({ ...latestSettingsRef.current, port }),
+        onPortBound: (port) => saveSettingsMutation(bindSettingsPort(port)),
         setCaInfo,
         loadInitialFlows: flowStore.loadInitial,
         setError,
@@ -2664,78 +2670,43 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function saveSettings(next: ProxySettings) {
-    settingsMutationGenerationRef.current += 1;
+  function publishSettings(next: ProxySettings) {
+    const appearanceChanged =
+      next.theme !== latestSettingsRef.current.theme ||
+      !isEqual(next.highlightColors, latestSettingsRef.current.highlightColors);
     latestSettingsRef.current = next;
-    applyAppearance(next.theme, next.highlightColors);
+    // A queue-time no-op should not erase an active detached-window preview.
+    // A real authoritative appearance transition still applies immediately.
+    if (appearanceChanged) applyAppearance(next.theme, next.highlightColors);
     settings.setSettings(next);
-    void settingsSaveQueue
-      .run(async () => {
-        const durableBefore = durableSettingsRef.current;
-        try {
-          await persistSettings(next, durableBefore.headerColumns, flowStore.refresh, setError);
-          durableSettingsRef.current = next;
-          settingsSaveErrorRef.current = null;
-        } catch (writeError) {
-          let durable = durableBefore;
-          let readError: unknown;
-          try {
-            // A command can report failure after the durable side effect, and a
-            // settings import can also have written while this save was queued.
-            // Re-read before rolling the optimistic UI back.
-            durable = await api.getSettings();
-            durableSettingsRef.current = durable;
-          } catch (error) {
-            readError = error;
-          }
-          // Keep later optimistic edits intact; only roll back when this failed
-          // snapshot is still the one shown by the UI. The fallback is the last
-          // known durable value, never another optimistic snapshot.
-          if (isEqual(latestSettingsRef.current, next)) {
-            latestSettingsRef.current = durable;
-            applyAppearance(durable.theme, durable.highlightColors);
-            settings.setSettings(durable);
-          }
-          const message =
-            readError === undefined
-              ? String(writeError)
-              : `${writeError}; the durable settings could not be reloaded (${readError})`;
-          // A command can reject after its durable side effect. The re-read is
-          // authoritative: only retain a shutdown-blocking error when the
-          // requested snapshot really is absent.
-          const reachedRequestedState = readError === undefined && isEqual(durable, next);
-          settingsSaveErrorRef.current = reachedRequestedState ? null : new Error(message);
-          setError(message);
-          // A rejected IPC command can still have committed the settings. In
-          // that case the listener must follow the authoritative snapshot just
-          // as it does after an ordinary successful write; returning here would
-          // leave disk/UI on the new address while the proxy stayed on the old
-          // one. Only stop when the re-read proves the requested state is absent
-          // (or the re-read itself failed).
-          if (!reachedRequestedState) return;
-        }
-        await proxy.applyListenChange(durableBefore, next);
-      })
-      .catch((error) => {
-        settingsSaveErrorRef.current = error;
-        setError(String(error));
-      });
   }
 
-  async function saveSettingsDialog(draft: SettingsDialogDraft): Promise<void> {
-    await persistSettingsDialogDraft(localStorage, draft, async (next) => {
-      await settingsSaveQueue.run(async () => {
-        const durableBefore = durableSettingsRef.current;
+  function saveSettingsMutation(mutation: SettingsMutation) {
+    const scheduled = queueSettingsMutation({
+      queue: settingsSaveQueue,
+      nextGeneration: () => ++settingsMutationGenerationRef.current,
+      currentGeneration: () => settingsMutationGenerationRef.current,
+      getCurrent: () => latestSettingsRef.current,
+      // These intents only own their named field. Avoid re-applying the stale
+      // snapshot's appearance here: a detached Settings save may still be
+      // showing its newer preview while this operation waits behind it.
+      publishOptimistic: (optimistic) => {
+        latestSettingsRef.current = optimistic;
+        settings.setSettings(optimistic);
+      },
+      getDurable: () => durableSettingsRef.current,
+      mutation,
+      commit: async (durableBefore, attempted) => {
         const result = await settleSettingsWrite(
-          next,
-          () => persistSettings(next, durableBefore.headerColumns, flowStore.refresh, setError),
+          attempted,
+          () =>
+            persistSettings(attempted, durableBefore.headerColumns, flowStore.refresh, setError),
           () => api.getSettings(),
         );
-        const persisted = result.settings;
 
         if (result.readBack) {
           emitSettingsChanged();
-          if (!isEqual(persisted.headerColumns, durableBefore.headerColumns)) {
+          if (!isEqual(result.settings.headerColumns, durableBefore.headerColumns)) {
             try {
               await flowStore.refresh();
             } catch (error) {
@@ -2743,23 +2714,72 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
             }
           }
         }
+        return result;
+      },
+      acceptDurable: (result) => {
+        durableSettingsRef.current = result.settings;
+        settingsSaveErrorRef.current =
+          result.rejection === null ? null : new Error(String(result.rejection));
+      },
+      publishCurrent: publishSettings,
+      reconcile: proxy.applyListenChange,
+    });
+    void scheduled.result.catch((error) => {
+      settingsSaveErrorRef.current = error;
+      if (settingsMutationGenerationRef.current === scheduled.generation) {
+        publishSettings(durableSettingsRef.current);
+      }
+      setError(String(error));
+    });
+  }
 
-        settingsMutationGenerationRef.current += 1;
-        durableSettingsRef.current = persisted;
-        latestSettingsRef.current = persisted;
-        settings.setSettings(persisted);
-        settingsSaveErrorRef.current = null;
-        await proxy.applyListenChange(durableBefore, persisted);
-        if (result.rejection !== null) throw result.rejection;
+  async function saveSettingsDialog(draft: SettingsDialogDraft): Promise<SettingsDialogDraft> {
+    const generation = ++settingsMutationGenerationRef.current;
+    await persistSettingsDialogDraft(localStorage, draft, async (next) => {
+      await serializeSettingsDialogSave({
+        queue: settingsSaveQueue,
+        generation,
+        currentGeneration: () => settingsMutationGenerationRef.current,
+        commit: async () => {
+          const durableBefore = durableSettingsRef.current;
+          const result = await settleSettingsWrite(
+            next,
+            () => persistSettings(next, durableBefore.headerColumns, flowStore.refresh, setError),
+            () => api.getSettings(),
+          );
+          const persisted = result.settings;
+
+          if (result.readBack) {
+            emitSettingsChanged();
+            if (!isEqual(persisted.headerColumns, durableBefore.headerColumns)) {
+              try {
+                await flowStore.refresh();
+              } catch (error) {
+                setError(String(error));
+              }
+            }
+          }
+
+          durableSettingsRef.current = persisted;
+          settingsSaveErrorRef.current =
+            result.rejection === null ? null : new Error(String(result.rejection));
+          await proxy.applyListenChange(durableBefore, persisted);
+          return { current: persisted, rejection: result.rejection };
+        },
+        publishCurrent: (persisted) => {
+          latestSettingsRef.current = persisted;
+          settings.setSettings(persisted);
+        },
       });
     });
 
     columns.setColumnOrder(draft.columnOrder);
     shortcuts.setShortcuts(draft.shortcuts);
     setAutoLayout(draft.autoLayout);
+    return { ...draft, settings: latestSettingsRef.current };
   }
 
-  function applyImportedSettings(next: ProxySettings) {
+  function applyImportedSettings(next: ProxySettings): Promise<ProxySettings> {
     settingsMutationGenerationRef.current += 1;
     latestSettingsRef.current = next;
     applyAppearance(next.theme, next.highlightColors);
@@ -2767,7 +2787,7 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
     // The import command already persisted once. Queue the imported snapshot
     // behind any ordinary save that was waiting in this webview, so an older
     // full-settings write cannot land afterward and silently undo the import.
-    void settingsSaveQueue
+    return settingsSaveQueue
       .run(async () => {
         const durableBefore = durableSettingsRef.current;
         let persisted = next;
@@ -2825,10 +2845,12 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
         // save can temporarily move the listener back after the import UI has
         // already shown the new address.
         await proxy.applyListenChange(durableBefore, persisted);
+        return persisted;
       })
       .catch((error) => {
         settingsSaveErrorRef.current = error;
         setError(String(error));
+        throw error;
       });
   }
 
@@ -2875,12 +2897,7 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
   }
 
   function excludeHost(host: string) {
-    const cur = settings.settings.excludedHosts;
-    if (cur.includes(host)) {
-      notify("info", `${host} is already excluded`);
-      return;
-    }
-    saveSettings({ ...settings.settings, excludedHosts: [...cur, host] });
+    saveSettingsMutation(excludeSettingsHost(host));
     notify("success", `Excluded ${host} from interception`);
   }
 
@@ -3079,8 +3096,9 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
     setShortcuts: shortcuts.setShortcuts,
     session,
     trafficSplit,
-    saveSettings,
+    saveSettings: saveSettingsMutation,
     saveSettingsDialog,
+    getDurableSettings: () => durableSettingsRef.current,
     flushSettings,
     applyImportedSettings,
     handleRowClick,

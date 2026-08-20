@@ -2,6 +2,9 @@ import { emit, listen } from "@tauri-apps/api/event";
 
 import { api } from "./ipc";
 import { applyAppearance } from "./theme";
+import { announceThemeSyncReady, PREVIEW_ACCEPTED, PREVIEW_CLEARED } from "./settingsWindowEvents";
+import type { AcceptedSettingsPreview, ClearedSettingsPreview } from "./settingsWindowProtocol";
+import { ThemeLayers } from "./themeLayers";
 
 /**
  * Keeps every window's theme and highlight colors in step with the saved
@@ -11,6 +14,7 @@ import { applyAppearance } from "./theme";
  */
 const SETTINGS_CHANGED = "germi://settings-changed";
 let refreshGeneration = 0;
+const layers = new ThemeLayers();
 
 export function emitSettingsChanged(): void {
   void emit(SETTINGS_CHANGED, null);
@@ -19,7 +23,12 @@ export function emitSettingsChanged(): void {
 async function refreshAppearance(): Promise<void> {
   const generation = ++refreshGeneration;
   const settings = await api.getSettings();
-  if (generation === refreshGeneration) applyAppearance(settings.theme, settings.highlightColors);
+  if (generation !== refreshGeneration) return;
+  const appearance = layers.setDurable({
+    theme: settings.theme,
+    highlightColors: settings.highlightColors,
+  });
+  if (appearance) applyAppearance(appearance.theme, appearance.highlightColors);
 }
 
 /** Apply this window's durable appearance before React renders and follow later
@@ -29,7 +38,16 @@ export async function initThemeSync(): Promise<void> {
     await listen(SETTINGS_CHANGED, () => {
       void refreshAppearance().catch(() => undefined);
     });
+    await listen<AcceptedSettingsPreview>(PREVIEW_ACCEPTED, ({ payload }) => {
+      const appearance = layers.acceptPreview(payload);
+      if (appearance) applyAppearance(appearance.theme, appearance.highlightColors);
+    });
+    await listen<ClearedSettingsPreview>(PREVIEW_CLEARED, ({ payload }) => {
+      const appearance = layers.clearPreview(payload);
+      if (appearance) applyAppearance(appearance.theme, appearance.highlightColors);
+    });
     await refreshAppearance();
+    await announceThemeSyncReady();
   } catch {
     /* not running under Tauri, or settings unavailable — keep cached/default appearance */
   }
