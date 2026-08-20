@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
 import type { SavedFilter } from "../savedFilters";
+import { DEFAULT_FILTER_COLOR_PRESETS } from "../filterColorPresets";
 import { FiltersPanel } from "./FiltersPanel";
 
 type Props = ComponentProps<typeof FiltersPanel>;
@@ -24,6 +25,7 @@ function saved(overrides: Partial<SavedFilter> = {}): SavedFilter {
 function makeProps(overrides: Partial<Props> = {}): Props {
   return {
     filters: [],
+    colorPresets: DEFAULT_FILTER_COLOR_PRESETS,
     soloId: null,
     counts: new Map(),
     canSaveCurrent: false,
@@ -160,6 +162,35 @@ describe("FiltersPanel", () => {
       opacity: 42,
     });
     expect(onColorPreviewCancel).not.toHaveBeenCalled();
+  });
+
+  it("previews a configured preset and commits its exact hue and opacity once", async () => {
+    const onColorPreview = vi.fn();
+    const onUpdate = vi.fn();
+    const presets = ["#11223347", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)];
+    const screen = await render(
+      <FiltersPanel
+        {...makeProps({
+          filters: [saved()],
+          colorPresets: presets,
+          onColorPreview,
+          onUpdate,
+        })}
+      />,
+    );
+    await screen.getByRole("button", { name: "Saved filter host:api color" }).click();
+    await screen.getByRole("radio", { name: /^Preset 1,/ }).click();
+
+    expect(onColorPreview).toHaveBeenLastCalledWith("f1", {
+      hex: "#112233",
+      alphaPct: 28,
+    });
+    expect(onUpdate).not.toHaveBeenCalled();
+    await screen.getByRole("button", { name: "Apply" }).click();
+    expect(onUpdate).toHaveBeenCalledExactlyOnceWith("f1", {
+      color: "#112233",
+      opacity: 28,
+    });
   });
 
   it("discards a saved-filter draft on Cancel", async () => {

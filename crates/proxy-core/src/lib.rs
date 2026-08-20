@@ -71,7 +71,7 @@ pub use rules_export::{
     preview_rules, preview_rules_file, GeneralRulesImportMode, RulesExport, ScenarioPreview,
 };
 pub use scripting::{Script, ScriptDiagnostic};
-pub use settings::ProxySettings;
+pub use settings::{FilterColorPresets, ProxySettings};
 pub use settings_io::{
     export_sections, import_preview, merge_import, section_summaries, SectionSummary,
 };

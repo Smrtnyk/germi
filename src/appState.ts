@@ -30,6 +30,7 @@ import { loadBool, loadJson, loadString, persist } from "./localStore";
 import { useTrafficFilter } from "./useTrafficFilter";
 import { useSavedFilters } from "./useSavedFilters";
 import { savedFilterLabel } from "./savedFilters";
+import { DEFAULT_FILTER_COLOR_PRESETS } from "./filterColorPresets";
 import { backfillSeqColumn, resolveColumns, DEFAULT_COLUMNS, type ColumnDef } from "./columns";
 import { nextSort, resolveSort, sortFlows, type SortState } from "./sort";
 import { useSplitRatio } from "./useResizable";
@@ -1181,6 +1182,7 @@ function useSettings() {
     systemProxyHotkey: "",
     theme: "system",
     highlightColors: {},
+    filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
   });
   return { settings, setSettings };
 }

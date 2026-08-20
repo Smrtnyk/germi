@@ -5,6 +5,7 @@ import { render } from "vitest-browser-react";
 
 import "../styles.css";
 import { applyAppearance } from "../theme";
+import { DEFAULT_FILTER_COLOR_PRESETS } from "../filterColorPresets";
 import { DEFAULT_SHORTCUTS } from "../shortcuts";
 import { persistSettingsDialogDraft, type SettingsDialogDraft } from "../settingsDraft";
 import type { ProxySettings, Theme } from "../types";
@@ -34,6 +35,7 @@ function settings(overrides: Partial<ProxySettings> = {}): ProxySettings {
     systemProxyHotkey: "",
     theme: "dark",
     highlightColors: {},
+    filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
     ...overrides,
   };
 }
@@ -220,6 +222,21 @@ async function expectSelectedRowColor(screen: BrowserScreen, value: string) {
   const picker = screen.getByRole("dialog", { name: "Selected row color" });
   await expect.element(screen.getByLabelText("Hex")).toHaveValue(value);
   await picker.getByRole("button", { name: "Cancel" }).click();
+}
+
+async function setFirstFilterPreset(screen: BrowserScreen, value: string) {
+  await screen.getByRole("button", { name: "Appearance" }).click();
+  await screen.getByRole("button", { name: "Filter preset 1 color" }).click();
+  await screen.getByLabelText("Hex").fill(value);
+  await screen.getByRole("button", { name: "Apply" }).click();
+}
+
+async function expectFirstFilterPreset(screen: BrowserScreen, value: string) {
+  await screen.getByRole("button", { name: "Appearance" }).click();
+  await screen.getByRole("button", { name: "Filter preset 1 color" }).click();
+  const dialog = screen.getByRole("dialog", { name: "Filter preset 1 color" });
+  await expect.element(screen.getByLabelText("Hex")).toHaveValue(value);
+  await dialog.getByRole("button", { name: "Cancel" }).click();
 }
 
 async function stagePortAppearanceAndLayout(screen: BrowserScreen) {
@@ -660,6 +677,49 @@ describe("SettingsDialog", () => {
     await vi.waitFor(() => expect(onClose).toHaveBeenCalledOnce());
   });
 
+  it("persists a filter preset only on Settings Save and reopens it", async () => {
+    const persist = vi.fn((_draft: SettingsDialogDraft) => Promise.resolve());
+    const screen = await render(<Harness persist={persist} />);
+
+    await setFirstFilterPreset(screen, "#11223380");
+    expect(persist).not.toHaveBeenCalled();
+    await screen.getByRole("button", { name: "Save" }).click();
+
+    expect(persist).toHaveBeenCalledOnce();
+    expect(persist.mock.calls[0][0].settings.filterColorPresets[0]).toBe("#11223380");
+    await screen.getByRole("button", { name: "Open settings" }).click();
+    await expectFirstFilterPreset(screen, "#11223380");
+  });
+
+  it("discards a filter preset draft on Settings Cancel", async () => {
+    const persist = vi.fn(() => Promise.resolve());
+    const screen = await render(<Harness persist={persist} />);
+
+    await setFirstFilterPreset(screen, "#11223380");
+    await screen.getByRole("button", { name: "Cancel" }).click();
+
+    expect(persist).not.toHaveBeenCalled();
+    await screen.getByRole("button", { name: "Open settings" }).click();
+    await expectFirstFilterPreset(screen, DEFAULT_FILTER_COLOR_PRESETS[0]);
+  });
+
+  it("persists reset filter presets only when Settings is saved", async () => {
+    const persist = vi.fn((_draft: SettingsDialogDraft) => Promise.resolve());
+    const custom = ["#11223380", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)];
+    const screen = await render(
+      <Harness persist={persist} initialSettings={settings({ filterColorPresets: custom })} />,
+    );
+
+    await screen.getByRole("button", { name: "Appearance" }).click();
+    await screen.getByRole("button", { name: "Reset filter presets" }).click();
+    expect(persist).not.toHaveBeenCalled();
+    await screen.getByRole("button", { name: "Save" }).click();
+
+    expect(persist.mock.calls[0][0].settings.filterColorPresets).toEqual(
+      DEFAULT_FILTER_COLOR_PRESETS,
+    );
+  });
+
   it("persists a dragged column order only when Settings is saved", async () => {
     const persist = vi.fn((_draft: SettingsDialogDraft) => Promise.resolve());
     const initial = ["seq", "method", "url"];
@@ -711,7 +771,11 @@ describe("SettingsDialog", () => {
   });
 
   it("applies imports immediately without saving unrelated local drafts", async () => {
-    const imported = settings({ excludedHosts: ["example.com"], theme: "light" });
+    const imported = settings({
+      excludedHosts: ["example.com"],
+      theme: "light",
+      filterColorPresets: ["#11223380", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)],
+    });
     const onImportApplied = vi.fn();
     const onSave = vi.fn(() => Promise.resolve());
     apiMocks.peekSettingsImport.mockResolvedValue([
@@ -739,5 +803,6 @@ describe("SettingsDialog", () => {
     await expect
       .element(screen.getByRole("button", { name: "Side by side" }))
       .toHaveClass("active");
+    await expectFirstFilterPreset(screen, "#11223380");
   });
 });

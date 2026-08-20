@@ -3,6 +3,7 @@ import { useState } from "react";
 import { xor } from "es-toolkit";
 
 import { KIND_CHIPS, STATUS_CHIPS } from "../filter";
+import { filterColorPresetParts } from "../filterColorPresets";
 import { hasContentTerms, savedFilterLabel, type SavedFilter } from "../savedFilters";
 import type { ColorParts } from "../theme";
 import { ColorPicker } from "./ColorPicker";
@@ -12,6 +13,8 @@ import { FilterChip } from "./ui/FilterChip";
 
 export interface FiltersPanelProps {
   filters: SavedFilter[];
+  /** Authoritative complete tints from Settings. */
+  colorPresets: readonly string[];
   soloId: string | null;
   /** Live matching-row count per filter id; null = not countable (content terms). */
   counts: Map<string, number | null>;
@@ -127,6 +130,7 @@ function SavedFilterRow({
   onUpdate,
   onRemove,
   onSolo,
+  colorPresets,
 }: {
   f: SavedFilter;
   solo: boolean;
@@ -138,6 +142,7 @@ function SavedFilterRow({
   onUpdate: FiltersPanelProps["onUpdate"];
   onRemove: FiltersPanelProps["onRemove"];
   onSolo: FiltersPanelProps["onSolo"];
+  colorPresets: FiltersPanelProps["colorPresets"];
 }) {
   const label = savedFilterLabel(f);
   return (
@@ -147,6 +152,7 @@ function SavedFilterRow({
           label={`Saved filter ${label}`}
           value={{ hex: f.color, alphaPct: f.opacity }}
           swatchBackground={`color-mix(in srgb, ${f.color} ${f.opacity}%, transparent)`}
+          presets={filterColorPresetParts(colorPresets)}
           onPreview={(value) => onColorPreview(f.id, value)}
           onCancel={() => onColorPreviewCancel(f.id)}
           onCommit={({ hex, alphaPct }) => onUpdate(f.id, { color: hex, opacity: alphaPct })}
@@ -184,6 +190,7 @@ function SavedFilterRow({
 
 export function FiltersPanel({
   filters,
+  colorPresets,
   soloId,
   counts,
   canSaveCurrent,
@@ -240,6 +247,7 @@ export function FiltersPanel({
               onUpdate={onUpdate}
               onRemove={onRemove}
               onSolo={onSolo}
+              colorPresets={colorPresets}
             />
           ))}
         </div>

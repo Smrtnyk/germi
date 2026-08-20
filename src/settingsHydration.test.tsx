@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import "./styles.css";
 import { loadDurableSettings } from "./settingsHydration";
+import { DEFAULT_FILTER_COLOR_PRESETS } from "./filterColorPresets";
 import { applyAppearance } from "./theme";
 import type { ProxySettings } from "./types";
 
@@ -22,6 +23,7 @@ function settings(theme: ProxySettings["theme"]): ProxySettings {
     systemProxyHotkey: "",
     theme,
     highlightColors: { selected: "#777777ff" },
+    filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
   };
 }
 

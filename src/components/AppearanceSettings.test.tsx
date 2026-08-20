@@ -16,6 +16,7 @@ import {
 } from "../theme";
 import type { ThemeContrastPair } from "../theme";
 import type { ProxySettings, Theme, ThemePreference } from "../types";
+import { DEFAULT_FILTER_COLOR_PRESETS } from "../filterColorPresets";
 import { AppearanceSettings } from "./AppearanceSettings";
 
 function settings(
@@ -34,6 +35,7 @@ function settings(
     systemProxyHotkey: "",
     theme,
     highlightColors: colors,
+    filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
   };
 }
 
@@ -390,6 +392,64 @@ describe("AppearanceSettings", () => {
       .element(screen.getByRole("slider", { name: "Multi-selected rows opacity" }))
       .toBeVisible();
     await expect.element(screen.getByText("13%")).toBeVisible();
+  });
+
+  it("edits one complete filter preset without offering the filter preset chooser recursively", async () => {
+    const onChange = vi.fn();
+    const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
+    expect(screen.getByRole("button", { name: /Filter preset \d+ color/ }).all()).toHaveLength(10);
+    await screen.getByRole("button", { name: "Filter preset 1 color" }).click();
+
+    await expect.element(screen.getByRole("radio")).not.toBeInTheDocument();
+    await screen.getByLabelText("Hex").fill("#11223380");
+    expect(onChange).not.toHaveBeenCalled();
+    await screen.getByRole("button", { name: "Apply" }).click();
+
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onChange.mock.calls[0][0].filterColorPresets).toEqual([
+      "#11223380",
+      ...DEFAULT_FILTER_COLOR_PRESETS.slice(1),
+    ]);
+  });
+
+  it("resets all filter presets as one Settings draft change", async () => {
+    const onChange = vi.fn();
+    const custom = ["#11223380", ...DEFAULT_FILTER_COLOR_PRESETS.slice(1)];
+    const screen = await render(
+      <AppearanceSettings
+        settings={{ ...settings(), filterColorPresets: custom }}
+        onChange={onChange}
+      />,
+    );
+    await screen.getByRole("button", { name: "Reset filter presets" }).click();
+
+    expect(onChange).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS] }),
+    );
+  });
+
+  it("keeps all ten preset editors owned and clickable in the narrow one-column layout", async () => {
+    const screen = await render(
+      <div data-testid="narrow-settings" style={{ width: 300 }}>
+        <AppearanceSettings settings={settings()} onChange={vi.fn()} />
+      </div>,
+    );
+    const grid = document.querySelector<HTMLElement>(".filter-preset-settings-grid")!;
+    expect(getComputedStyle(grid).gridTemplateColumns.split(" ")).toHaveLength(1);
+    expect(grid.scrollWidth).toBeLessThanOrEqual(grid.clientWidth);
+
+    for (let index = 1; index <= 10; index += 1) {
+      const trigger = screen.getByRole("button", { name: `Filter preset ${index} color` });
+      const card = trigger.element().closest<HTMLElement>(".filter-preset-setting")!;
+      const triggerRect = trigger.element().getBoundingClientRect();
+      const cardRect = card.getBoundingClientRect();
+      expect(triggerRect.left).toBeGreaterThanOrEqual(cardRect.left);
+      expect(triggerRect.right).toBeLessThanOrEqual(cardRect.right);
+      await trigger.click();
+      const dialog = screen.getByRole("dialog", { name: `Filter preset ${index} color` });
+      await expect.element(dialog).toBeVisible();
+      await dialog.getByRole("button", { name: "Cancel" }).click();
+    }
   });
 
   it("previews each applied output over the same traffic backdrop", async () => {

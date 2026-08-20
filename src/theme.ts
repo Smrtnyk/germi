@@ -420,15 +420,26 @@ export interface ColorParts {
   alphaPct: number;
 }
 
+/** Round an 8-bit alpha into the picker's whole-percent domain.
+ *  Keep this contract in sync with `proxy-core` settings normalization. */
+export function alphaByteToPercent(alphaByte: number): number {
+  return Math.round((clamp(alphaByte, 0, 255) * 100) / 255);
+}
+
+/** Round a picker percentage back to the one byte persisted in `#rrggbbaa`. */
+export function alphaPercentToByte(alphaPct: number): number {
+  return Math.round((clamp(alphaPct, 0, 100) * 255) / 100);
+}
+
 export function splitHex8(value: string): ColorParts {
   return {
     hex: value.slice(0, 7),
-    alphaPct: Math.round((parseInt(value.slice(7, 9), 16) * 100) / 255),
+    alphaPct: alphaByteToPercent(parseInt(value.slice(7, 9), 16)),
   };
 }
 
 export function joinHex8({ hex, alphaPct }: ColorParts): string {
-  const byte = Math.round((clamp(alphaPct, 0, 100) * 255) / 100);
+  const byte = alphaPercentToByte(alphaPct);
   return `${hex.toLowerCase()}${byte.toString(16).padStart(2, "0")}`;
 }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_FILTER_COLOR_PRESETS } from "./filterColorPresets";
 import { DEFAULT_SHORTCUTS } from "./shortcuts";
 import {
   hasUnsavedSettingsChanges,
@@ -22,6 +23,7 @@ function draft(): SettingsDialogDraft {
       systemProxyHotkey: "",
       theme: "system",
       highlightColors: {},
+      filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
     },
     columnOrder: ["method", "url"],
     shortcuts: DEFAULT_SHORTCUTS,

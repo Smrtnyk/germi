@@ -4,6 +4,7 @@ import { render } from "vitest-browser-react";
 
 import "../styles.css";
 import type { ProxySettings } from "../types";
+import { DEFAULT_FILTER_COLOR_PRESETS } from "../filterColorPresets";
 import { ColumnsSettings } from "./ColumnsSettings";
 
 function settings(): ProxySettings {
@@ -19,6 +20,7 @@ function settings(): ProxySettings {
     systemProxyHotkey: "",
     theme: "dark",
     highlightColors: {},
+    filterColorPresets: [...DEFAULT_FILTER_COLOR_PRESETS],
   };
 }
 
