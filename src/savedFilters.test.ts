@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { summary } from "./flowFixtures";
 import {
@@ -6,12 +6,16 @@ import {
   combineMatches,
   compileFilters,
   computeFilterMatches,
+  DEFAULT_FILTER_OPACITY,
   FILTER_COLORS,
   hasContentTerms,
   nextFilterColor,
+  normalizeFilterOpacity,
+  resolvePresentedTint,
   sanitizeSavedFilters,
   savedFilterLabel,
   type FilterMatches,
+  type RowTint,
   type SavedFilter,
 } from "./savedFilters";
 import type { FlowSummary } from "./types";
@@ -23,6 +27,7 @@ function saved(overrides: Partial<SavedFilter> = {}): SavedFilter {
     kinds: [],
     statuses: [],
     color: "#e879f9",
+    opacity: DEFAULT_FILTER_OPACITY,
     highlight: true,
     ...overrides,
   };
@@ -54,6 +59,7 @@ describe("sanitizeSavedFilters", () => {
       kinds: ["xhr"],
       statuses: ["4xx"],
       color: "#abc123",
+      opacity: DEFAULT_FILTER_OPACITY,
       highlight: true,
     });
   });
@@ -66,6 +72,7 @@ describe("sanitizeSavedFilters", () => {
         color: "red",
         kinds: [7, "doc", "fetch"],
         statuses: ["4xx", "teapot"],
+        opacity: 130,
         highlight: false,
       },
       { id: "a", query: "dupe" },
@@ -74,7 +81,22 @@ describe("sanitizeSavedFilters", () => {
     expect(out[0].color).toBe(FILTER_COLORS[0]);
     expect(out[0].kinds).toEqual(["doc"]);
     expect(out[0].statuses).toEqual(["4xx"]);
+    expect(out[0].opacity).toBe(100);
     expect(out[0].highlight).toBe(false);
+  });
+});
+
+describe("normalizeFilterOpacity", () => {
+  it("migrates missing or malformed values to the former fixed opacity", () => {
+    for (const value of [undefined, null, "16", Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(normalizeFilterOpacity(value)).toBe(DEFAULT_FILTER_OPACITY);
+    }
+  });
+
+  it("rounds and clamps persisted percentages", () => {
+    expect(normalizeFilterOpacity(47.6)).toBe(48);
+    expect(normalizeFilterOpacity(-1)).toBe(0);
+    expect(normalizeFilterOpacity(101)).toBe(100);
   });
 });
 
@@ -123,7 +145,10 @@ describe("computeFilterMatches", () => {
     ];
     const { tints, counts } = matches(flows, filters);
     expect(tints.get("3")?.color).toBe("#ff0000");
+    expect(tints.get("3")?.filterId).toBe("a");
+    expect(tints.get("3")?.opacity).toBe(DEFAULT_FILTER_OPACITY);
     expect(tints.get("1")?.color).toBe("#00ff00");
+    expect(tints.get("1")?.filterId).toBe("b");
     expect(tints.has("2")).toBe(false);
     expect(counts.get("a")).toBe(1);
     expect(counts.get("b")).toBe(2);
@@ -149,6 +174,45 @@ describe("computeFilterMatches", () => {
     expect(compileFilters(filters)).toEqual([]);
     expect(tints.size).toBe(0);
     expect(counts.get("a")).toBeNull();
+  });
+});
+
+describe("resolvePresentedTint", () => {
+  it("resolves one previewed row without iterating or copying the tint map", () => {
+    const tints = new Map<string, RowTint>(
+      Array.from({ length: 1_000 }, (_, index) => [
+        `flow-${index}`,
+        {
+          filterId: "f1",
+          color: "#e879f9",
+          opacity: 16,
+          label: "host:api",
+        },
+      ]),
+    );
+    const get = vi.spyOn(tints, "get");
+    const iterate = vi.spyOn(tints, Symbol.iterator);
+    const entries = vi.spyOn(tints, "entries");
+    const keys = vi.spyOn(tints, "keys");
+    const values = vi.spyOn(tints, "values");
+    const forEach = vi.spyOn(tints, "forEach");
+
+    expect(
+      resolvePresentedTint(
+        "flow-999",
+        tints,
+        new Map([["f1", { color: "#112233", opacity: 40, label: "host:api" }]]),
+      ),
+    ).toEqual({
+      filterId: "f1",
+      color: "#112233",
+      opacity: 40,
+      label: "host:api",
+    });
+    expect(get).toHaveBeenCalledExactlyOnceWith("flow-999");
+    for (const traversal of [iterate, entries, keys, values, forEach]) {
+      expect(traversal).not.toHaveBeenCalled();
+    }
   });
 });
 

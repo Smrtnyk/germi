@@ -259,7 +259,8 @@ the engine (`compare_bodies` / `compare_flow_bodies`) so payloads never cross
 IPC; hunks render only on an explicit toggle and use the display-capped body.
 
 **Configurable highlight colors** (issue #93): every row/diff highlight is a
-`:root` token; Settings → Appearance edits them as color+opacity pairs. The
+`:root` token; Settings → Appearance edits them as color+opacity pairs through
+the same `ColorPicker` dialog used by saved-filter row tints. The
 sparse override map lives in `ProxySettings.highlight_colors` (rides
 persistence + import/export), the registry/parse/apply logic in `src/theme.ts`
 (specs carry `defaultValue` mirroring `:root` — guarded by a browser test —
@@ -267,9 +268,16 @@ and the diff specs derive their `-hl` intra-line mark at 3× alpha).
 `main.tsx` applies overrides in every window via `initHighlightColorSync`
 (`themeSync.ts`), re-applying on the frontend-emitted
 `germi://settings-changed` event; the Appearance section previews by writing
-the custom properties live and commits once per interaction (native `change`).
-Rows also take direct hex entry (6-digit keeps the row's opacity, 8-digit
-sets it — `parseHexEntry`) and drag-a-swatch-onto-another-row hue copy
+the custom properties live, commits to the Settings draft only on Apply, and
+persists with the outer Settings Save. The shared dialog takes direct hex entry
+(6-digit keeps the row's opacity, 8-digit sets it — `parseHexEntry`). Saved-filter
+drafts live in one ephemeral `useSavedFilters` overlay so the panel swatch,
+solo chip, and matching traffic rows preview together without touching the
+persisted filter list; Cancel/Escape clears it and Apply commits one combined
+color+opacity update. `RowTint.filterId` keeps first-match precedence stable
+while virtualized rows lazily resolve that small filter-ID presentation overlay
+against the unchanged match map;
+Appearance also supports drag-a-swatch-onto-another-row hue copy
 (`COLOR_DRAG_MIME` in `dnd.ts`; drops copy the hue, never the opacity).
 
 **User scripts** (Rhai): `proxy-core/src/scripting.rs` runs optional

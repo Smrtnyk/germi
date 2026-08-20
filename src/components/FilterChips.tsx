@@ -1,3 +1,5 @@
+import type { CSSProperties } from "react";
+
 import type { AvailabilityProgress, ResourceKind } from "../types";
 import { KIND_CHIPS, rawSegments, STATUS_CHIPS } from "../filter";
 import type { FilterViewMode } from "../savedFilters";
@@ -18,7 +20,7 @@ export interface FilterViewControls {
   barActive: boolean;
   onSave: () => void;
   /** The solo'd saved filter narrowing the list, or null. */
-  solo: { label: string; color: string } | null;
+  solo: { label: string; color: string; opacity: number } | null;
   onClearSolo: () => void;
 }
 
@@ -118,9 +120,13 @@ function SoloChip({
   solo,
   onClear,
 }: {
-  solo: { label: string; color: string };
+  solo: { label: string; color: string; opacity: number };
   onClear: () => void;
 }) {
+  const tintStyle = {
+    "--row-tint": solo.color,
+    "--row-tint-opacity": `${solo.opacity}%`,
+  } as CSSProperties;
   return (
     <FilterChip
       className="solo-chip"
@@ -128,7 +134,9 @@ function SoloChip({
       onClick={onClear}
       title={`Showing only requests matching "${solo.label}" — click to show everything`}
     >
-      <span className="solo-dot" style={{ background: solo.color }} />
+      <span className="saved-filter-preview solo-dot" style={tintStyle}>
+        <span className="saved-filter-preview-tint" aria-hidden="true" />
+      </span>
       only: <span className="solo-label">{solo.label}</span>
       <IconClose />
     </FilterChip>

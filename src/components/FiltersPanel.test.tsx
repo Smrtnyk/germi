@@ -1,4 +1,5 @@
 import type { ComponentProps } from "react";
+import { userEvent } from "vitest/browser";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
@@ -14,14 +15,10 @@ function saved(overrides: Partial<SavedFilter> = {}): SavedFilter {
     kinds: [],
     statuses: [],
     color: "#e879f9",
+    opacity: 16,
     highlight: true,
     ...overrides,
   };
-}
-
-function setValueBypassingReactTracker(input: HTMLInputElement, value: string) {
-  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
-  input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function makeProps(overrides: Partial<Props> = {}): Props {
@@ -31,6 +28,8 @@ function makeProps(overrides: Partial<Props> = {}): Props {
     counts: new Map(),
     canSaveCurrent: false,
     onSaveCurrent: vi.fn(),
+    onColorPreview: vi.fn(),
+    onColorPreviewCancel: vi.fn(),
     onUpdate: vi.fn(),
     onRemove: vi.fn(),
     onSolo: vi.fn(),
@@ -135,12 +134,65 @@ describe("FiltersPanel", () => {
     await expect.element(screen.getByText(/row highlights/)).toBeVisible();
   });
 
-  it("changes the color through the picker", async () => {
+  it("commits color and opacity together only after Apply", async () => {
+    const onColorPreview = vi.fn();
+    const onColorPreviewCancel = vi.fn();
     const onUpdate = vi.fn();
-    const screen = await render(<FiltersPanel {...makeProps({ filters: [saved()], onUpdate })} />);
-    const picker = screen.getByLabelText("Highlight color").element() as HTMLInputElement;
-    setValueBypassingReactTracker(picker, "#123456");
-    expect(onUpdate).toHaveBeenCalledWith("f1", { color: "#123456" });
+    const screen = await render(
+      <FiltersPanel
+        {...makeProps({
+          filters: [saved()],
+          onColorPreview,
+          onColorPreviewCancel,
+          onUpdate,
+        })}
+      />,
+    );
+    await screen.getByRole("button", { name: "Saved filter host:api color" }).click();
+    await screen.getByLabelText("Hex").fill("#123456");
+    await screen.getByRole("slider", { name: "Saved filter host:api opacity" }).fill("42");
+
+    expect(onColorPreview).toHaveBeenLastCalledWith("f1", { hex: "#123456", alphaPct: 42 });
+    expect(onUpdate).not.toHaveBeenCalled();
+    await screen.getByRole("button", { name: "Apply" }).click();
+    expect(onUpdate).toHaveBeenCalledExactlyOnceWith("f1", {
+      color: "#123456",
+      opacity: 42,
+    });
+    expect(onColorPreviewCancel).not.toHaveBeenCalled();
+  });
+
+  it("discards a saved-filter draft on Cancel", async () => {
+    const onColorPreviewCancel = vi.fn();
+    const onUpdate = vi.fn();
+    const screen = await render(
+      <FiltersPanel {...makeProps({ filters: [saved()], onColorPreviewCancel, onUpdate })} />,
+    );
+    await screen.getByRole("button", { name: "Saved filter host:api color" }).click();
+    await screen.getByLabelText("Hex").fill("#12345680");
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    await screen.getByRole("button", { name: "Cancel" }).click();
+    expect(onColorPreviewCancel).toHaveBeenCalledExactlyOnceWith("f1");
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+
+  it("discards a saved-filter draft on Escape and returns focus", async () => {
+    const onColorPreviewCancel = vi.fn();
+    const onUpdate = vi.fn();
+    const screen = await render(
+      <FiltersPanel {...makeProps({ filters: [saved()], onColorPreviewCancel, onUpdate })} />,
+    );
+    const trigger = screen.getByRole("button", { name: "Saved filter host:api color" });
+    await trigger.click();
+    await screen.getByLabelText("Hex").fill("#12345680");
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    await userEvent.keyboard("{Escape}");
+    expect(onColorPreviewCancel).toHaveBeenCalledExactlyOnceWith("f1");
+    expect(onUpdate).not.toHaveBeenCalled();
+    await expect.element(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(document.activeElement).toBe(trigger.element());
   });
 
   it("disables the highlight toggle for body:/header: filters", async () => {

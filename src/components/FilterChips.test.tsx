@@ -163,7 +163,10 @@ describe("FilterChips", () => {
 
   it("names the solo'd filter in an only-chip and clears it on click", async () => {
     const onClearSolo = vi.fn();
-    const view = makeView({ solo: { label: "host:api 4xx", color: "#e879f9" }, onClearSolo });
+    const view = makeView({
+      solo: { label: "host:api 4xx", color: "#e879f9", opacity: 16 },
+      onClearSolo,
+    });
     const screen = await render(<FilterChips {...makeProps({ matchCount: 1, total: 9, view })} />);
     const chip = screen.getByRole("button", { name: /only: host:api 4xx/ });
     await expect.element(chip).toBeVisible();

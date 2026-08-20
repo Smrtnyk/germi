@@ -16,7 +16,7 @@ import type { Availability, FlowSummary } from "../types";
 import type { ColumnDef } from "../columns";
 import type { SortState } from "../sort";
 import { availabilityLabel } from "../availability";
-import type { RowTint } from "../savedFilters";
+import { resolvePresentedTint, type RowTint, type RowTintPresentation } from "../savedFilters";
 import { flowUrl } from "../flowUrl";
 import { dragFlowIds, encodeFlowIds, FLOW_DRAG_MIME } from "../dnd";
 import { useToast } from "../toast";
@@ -38,7 +38,9 @@ interface ListView {
   /** Ids to keep at full opacity (dim mode), or null when nothing dims. */
   matchedIds: Set<string> | null;
   /** flow id → saved-filter highlight; rows get tinted with it. */
-  savedTints: Map<string, RowTint>;
+  savedTints: ReadonlyMap<string, RowTint>;
+  /** filter id → current committed or ephemeral picker presentation. */
+  savedTintPresentations: ReadonlyMap<string, RowTintPresentation>;
   /** How many flows exist before filtering — drives the "all hidden" empty state. */
   totalCount: number;
 }
@@ -452,7 +454,12 @@ function rowStyle(item: { start: number; size: number }, tint: RowTint | undefin
   return {
     transform: `translateY(${item.start}px)`,
     height: item.size,
-    ...(tint ? ({ "--row-tint": tint.color } as CSSProperties) : null),
+    ...(tint
+      ? ({
+          "--row-tint": tint.color,
+          "--row-tint-opacity": `${tint.opacity}%`,
+        } as CSSProperties)
+      : null),
   };
 }
 
@@ -780,7 +787,7 @@ function FlowScroll({
                 inSet={selectedIds.has(f.id)}
                 matched={view.matchedIds !== null && view.matchedIds.has(f.id)}
                 dimmed={view.matchedIds !== null && !view.matchedIds.has(f.id)}
-                tint={view.savedTints.get(f.id)}
+                tint={resolvePresentedTint(f.id, view.savedTints, view.savedTintPresentations)}
                 comments={comments}
                 onRowClick={onRowClick}
                 onActivate={() => {

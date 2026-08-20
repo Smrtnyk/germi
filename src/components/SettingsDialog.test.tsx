@@ -140,13 +140,26 @@ function dragColumnBefore(sourceLabel: string, targetLabel: string) {
   );
 }
 
+async function setSelectedRowColor(screen: BrowserScreen, value: string) {
+  await screen.getByRole("button", { name: "Selected row color" }).click();
+  const picker = screen.getByRole("dialog", { name: "Selected row color" });
+  await screen.getByLabelText("Hex").fill(value);
+  await picker.getByRole("button", { name: "Apply" }).click();
+}
+
+async function expectSelectedRowColor(screen: BrowserScreen, value: string) {
+  await screen.getByRole("button", { name: "Selected row color" }).click();
+  const picker = screen.getByRole("dialog", { name: "Selected row color" });
+  await expect.element(screen.getByLabelText("Hex")).toHaveValue(value);
+  await picker.getByRole("button", { name: "Cancel" }).click();
+}
+
 async function stagePortAppearanceAndLayout(screen: BrowserScreen) {
   await screen.getByRole("button", { name: "Connections" }).click();
   await screen.getByRole("spinbutton").fill("9090");
   await userEvent.tab();
   await screen.getByRole("button", { name: "Appearance" }).click();
-  await screen.getByLabelText("Selected row hex").fill("#ff000080");
-  await userEvent.tab();
+  await setSelectedRowColor(screen, "#ff000080");
   await screen.getByRole("button", { name: "Autoresponder" }).click();
   await screen.getByRole("button", { name: "Stacked" }).click();
 }
@@ -155,7 +168,7 @@ async function expectStagedPortAppearanceAndLayout(screen: BrowserScreen) {
   await screen.getByRole("button", { name: "Connections" }).click();
   await expect.element(screen.getByRole("spinbutton")).toHaveValue(9090);
   await screen.getByRole("button", { name: "Appearance" }).click();
-  await expect.element(screen.getByLabelText("Selected row hex")).toHaveValue("#ff000080");
+  await expectSelectedRowColor(screen, "#ff000080");
   expect(document.documentElement.style.getPropertyValue("--sel-bg")).toBe("#ff000080");
   await screen.getByRole("button", { name: "Autoresponder" }).click();
   await expect.element(screen.getByRole("button", { name: "Stacked" })).toHaveClass("active");
@@ -165,7 +178,7 @@ async function expectSavedDefaults(screen: BrowserScreen) {
   await screen.getByRole("button", { name: "Connections" }).click();
   await expect.element(screen.getByRole("spinbutton")).toHaveValue(8080);
   await screen.getByRole("button", { name: "Appearance" }).click();
-  await expect.element(screen.getByLabelText("Selected row hex")).toHaveValue("#173a36ff");
+  await expectSelectedRowColor(screen, "#173a36ff");
   await screen.getByRole("button", { name: "Autoresponder" }).click();
   await expect.element(screen.getByRole("button", { name: "Side by side" })).toHaveClass("active");
 }
@@ -236,8 +249,8 @@ describe("SettingsDialog", () => {
 
     await stagePortAppearanceAndLayout(screen);
     await screen.getByRole("button", { name: "Appearance" }).click();
-    const returnFocus = screen.getByLabelText("Selected row hex");
-    await returnFocus.click();
+    const returnFocus = screen.getByRole("button", { name: "Selected row color" });
+    returnFocus.element().focus();
     await expect.element(returnFocus).toHaveFocus();
 
     await userEvent.keyboard("{Escape}");
@@ -420,7 +433,7 @@ describe("SettingsDialog", () => {
     await screen.getByRole("button", { name: "Open settings" }).click();
     await expect.element(screen.getByRole("button", { name: "Stacked" })).toHaveClass("active");
     await screen.getByRole("button", { name: "Appearance" }).click();
-    await expect.element(screen.getByLabelText("Selected row hex")).toHaveValue("#ff000080");
+    await expectSelectedRowColor(screen, "#ff000080");
     await screen.getByRole("button", { name: "Connections" }).click();
     await expect.element(screen.getByRole("spinbutton")).toHaveValue(9090);
   });
