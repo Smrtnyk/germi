@@ -13,6 +13,7 @@ import type {
   FlowSummary,
   GeneralRulesImportMode,
   HistoryTag,
+  LaunchCapture,
   MockResult,
   OpenedCapture,
   ProxySettings,
@@ -108,6 +109,7 @@ export const api = {
   fileExists: (path: string) => invoke<boolean>("file_exists", { path }),
   saveSession: (includeRules: boolean) => invoke<boolean>("save_session", { includeRules }),
   openCapture: () => invoke<OpenedCapture | null>("open_capture"),
+  consumeLaunchCapture: () => invoke<LaunchCapture | null>("consume_launch_capture"),
   appendCapture: () => invoke<FlowSummary[] | null>("append_capture"),
   openDroppedCapture: (dataB64: string, ext: string) =>
     invoke<OpenedCapture>("open_dropped_capture", { dataB64, ext }),

@@ -3,6 +3,7 @@
 mod commands;
 mod indicator;
 mod instance;
+mod launch;
 mod persist;
 mod portal_hotkey;
 mod rule_store;
@@ -17,18 +18,13 @@ use tauri_plugin_dialog::DialogExt;
 
 use state::AppState;
 
-/// Whether the process was started in viewer mode (`--viewer`) — a proxy-less
-/// inspector instance that can run alongside the capturing one. Kept as a free
-/// function over an iterator so the flag parsing is unit-testable without a
-/// running Tauri app.
-fn viewer_mode_from_args(args: impl IntoIterator<Item = String>) -> bool {
-    args.into_iter().any(|arg| arg == "--viewer")
-}
-
 /// Build the shared [`AppState`] (CA, rule store, persisted settings) and stash
 /// it on the app. Split out of the builder chain in `run` so the latter stays a
 /// readable wiring list.
-fn init_app_state(app: &mut tauri::App, viewer: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn init_app_state(
+    app: &mut tauri::App,
+    launch: launch::LaunchOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Global hotkeys are registered/handled from the webview (see
     // `useGlobalHotkey`); the shell only needs to initialize the plugin.
     // Desktop-only — the lib keeps a mobile entry point.
@@ -46,11 +42,22 @@ fn init_app_state(app: &mut tauri::App, viewer: bool) -> Result<(), Box<dyn std:
     // app-data stores (CA files, autoresponder.sqlite3, settings.json,
     // scripts.json) so a losing instance can never corrupt the primary's
     // state.
+    let mut viewer = launch.viewer;
     match instance::guard(viewer, &ca_dir) {
         // Deliberately leaked: the lock must live for the whole process
         // lifetime, and the OS releases it when the process exits or dies.
         instance::GuardOutcome::Held(lock) => std::mem::forget(lock),
         instance::GuardOutcome::Skipped => {}
+        instance::GuardOutcome::AlreadyRunning if launch.capture.is_some() => {
+            // A file association always starts a new process on Windows. When
+            // the writable instance is already alive, keep its lock inviolate
+            // and turn only this capture-launch process into the established
+            // read-only viewer mode. An ordinary second launch still errors.
+            tracing::info!(
+                "writable Germi is already running; opening launch capture in viewer mode"
+            );
+            viewer = true;
+        }
         instance::GuardOutcome::AlreadyRunning => {
             eprintln!("Germi is already running.");
             app.dialog()
@@ -112,6 +119,7 @@ fn init_app_state(app: &mut tauri::App, viewer: bool) -> Result<(), Box<dyn std:
         settings_ops: tokio::sync::Mutex::new(()),
         scripts_ops: tokio::sync::Mutex::new(()),
         pending_har_rules: std::sync::Mutex::new(None),
+        launch_capture: launch::PendingCapture::new(launch.capture),
         pending_rules_import: std::sync::Mutex::new(None),
         portal_hotkey: portal_hotkey::PortalHotkey::default(),
         viewer,
@@ -161,7 +169,7 @@ fn handle_run_event(app_handle: &tauri::AppHandle, event: tauri::RunEvent) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let viewer = viewer_mode_from_args(std::env::args());
+    let launch = launch::options_from_args(std::env::args_os());
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -172,7 +180,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .setup(move |app| init_app_state(app, viewer))
+        .setup(move |app| init_app_state(app, launch))
         // Closing the main window quits Germi; secondary windows (compare,
         // detached rule editors) must not keep the process alive (issue #89).
         .on_window_event(|window, event| {
@@ -235,6 +243,7 @@ pub fn run() {
             commands::search_rules,
             commands::save_session,
             commands::open_capture,
+            commands::consume_launch_capture,
             commands::append_capture,
             commands::open_dropped_capture,
             commands::append_dropped_capture,
@@ -254,25 +263,4 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Germi")
         .run(handle_run_event);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::viewer_mode_from_args;
-
-    fn args(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| (*s).to_string()).collect()
-    }
-
-    #[test]
-    fn viewer_flag_detected_anywhere_in_args() {
-        assert!(viewer_mode_from_args(args(&["germi", "--viewer"])));
-        assert!(viewer_mode_from_args(args(&["germi", "--viewer", "extra"])));
-    }
-
-    #[test]
-    fn absent_viewer_flag_is_normal_mode() {
-        assert!(!viewer_mode_from_args(args(&["germi"])));
-        assert!(!viewer_mode_from_args(args(&["germi", "--view", "viewer"])));
-    }
 }

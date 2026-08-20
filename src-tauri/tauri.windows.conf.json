@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "fileAssociations": [
+      {
+        "ext": ["har"],
+        "name": "HTTP Archive",
+        "description": "HTTP Archive",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["saz"],
+        "name": "Fiddler Session Archive",
+        "description": "Fiddler Session Archive",
+        "role": "Viewer"
+      }
+    ]
+  }
+}

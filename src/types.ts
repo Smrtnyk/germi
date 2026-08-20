@@ -228,6 +228,13 @@ export interface OpenedCapture {
   embeddedRules: ScenarioPreview[] | null;
 }
 
+/** One-shot capture delivered by an OS file-association launch. */
+export interface LaunchCapture {
+  opened: OpenedCapture;
+  /** True when an existing writable Germi forced this process into viewer mode. */
+  viewer: boolean;
+}
+
 /** A user script (Rhai) with optional `on_request`/`on_response` hooks. */
 export interface Script {
   id: string;

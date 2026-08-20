@@ -6,6 +6,7 @@
 //! one IPC message per request — the bridge, not the proxy, is the bottleneck.
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine;
@@ -1205,7 +1206,7 @@ pub struct OpenedCapture {
 /// `apply_har_rules`. A file without a usable bundle CLEARS the mailbox, so a
 /// stale offer can never apply rules from an earlier file.
 fn stash_embedded_rules(
-    state: &State<'_, AppState>,
+    state: &AppState,
     bytes: &[u8],
     ext: &str,
 ) -> Option<Vec<proxy_core::ScenarioPreview>> {
@@ -1221,9 +1222,9 @@ fn stash_embedded_rules(
     preview
 }
 
-/// Show the capture-file picker (.har / .saz) and read the chosen file.
-/// Returns the bytes + lowercased extension, or `None` if cancelled.
-fn pick_capture_file(app: &tauri::AppHandle) -> Result<Option<(Vec<u8>, String)>, String> {
+/// Show the capture-file picker (.har / .saz). Returns the chosen native path,
+/// or `None` if cancelled.
+fn pick_capture_file(app: &tauri::AppHandle) -> Result<Option<PathBuf>, String> {
     let Some(picked) = app
         .dialog()
         .file()
@@ -1232,14 +1233,38 @@ fn pick_capture_file(app: &tauri::AppHandle) -> Result<Option<(Vec<u8>, String)>
     else {
         return Ok(None);
     };
-    let path = picked.into_path().map_err(|e| e.to_string())?;
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    picked.into_path().map(Some).map_err(|e| e.to_string())
+}
+
+fn read_capture_file(path: &Path) -> Result<(Vec<u8>, String), String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    Ok(Some((bytes, ext)))
+    Ok((bytes, ext))
+}
+
+/// The one source of shell-level open semantics for picker, drag/drop, and OS
+/// launch paths. Parsing and flow replacement remain in `proxy-core`.
+fn open_capture_bytes(state: &AppState, bytes: &[u8], ext: &str) -> Result<OpenedCapture, String> {
+    let count = state
+        .controller
+        .open_capture(bytes, ext)
+        .map_err(|e| e.to_string())?;
+    Ok(OpenedCapture {
+        count,
+        embedded_rules: stash_embedded_rules(state, bytes, ext),
+    })
+}
+
+fn open_capture_path(state: &AppState, path: &Path) -> Result<OpenedCapture, String> {
+    let display = path.display();
+    let (bytes, ext) =
+        read_capture_file(path).map_err(|e| format!("Could not open capture '{display}': {e}"))?;
+    open_capture_bytes(state, &bytes, &ext)
+        .map_err(|e| format!("Could not open capture '{display}': {e}"))
 }
 
 /// Open a capture file — a HAR or a Fiddler SAZ archive —
@@ -1250,16 +1275,33 @@ pub async fn open_capture(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<OpenedCapture>, String> {
-    let Some((bytes, ext)) = pick_capture_file(&app)? else {
+    let Some(path) = pick_capture_file(&app)? else {
         return Ok(None);
     };
-    let count = state
-        .controller
-        .open_capture(&bytes, &ext)
-        .map_err(|e| e.to_string())?;
-    Ok(Some(OpenedCapture {
-        count,
-        embedded_rules: stash_embedded_rules(&state, &bytes, &ext),
+    open_capture_path(state.inner(), &path).map(Some)
+}
+
+/// A file supplied by the OS at process launch. The path is taken from the
+/// Rust mailbox before I/O so malformed/missing files report once through the
+/// same frontend error toast and cannot loop on a webview reload.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchCapture {
+    opened: OpenedCapture,
+    viewer: bool,
+}
+
+#[tauri::command]
+pub async fn consume_launch_capture(
+    state: State<'_, AppState>,
+) -> Result<Option<LaunchCapture>, String> {
+    let Some(path) = state.launch_capture.take()? else {
+        return Ok(None);
+    };
+    let opened = open_capture_path(state.inner(), &path)?;
+    Ok(Some(LaunchCapture {
+        opened,
+        viewer: state.viewer,
     }))
 }
 
@@ -1271,9 +1313,11 @@ pub async fn append_capture(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<Vec<FlowSummary>>, String> {
-    let Some((bytes, ext)) = pick_capture_file(&app)? else {
+    let Some(path) = pick_capture_file(&app)? else {
         return Ok(None);
     };
+    let (bytes, ext) = read_capture_file(&path)
+        .map_err(|e| format!("Could not open capture '{}': {e}", path.display()))?;
     state
         .controller
         .append_capture(&bytes, &ext)
@@ -1303,14 +1347,7 @@ pub async fn open_dropped_capture(
     ext: String,
 ) -> Result<OpenedCapture, String> {
     let (bytes, ext) = decode_dropped_capture(&data_b64, &ext)?;
-    let count = state
-        .controller
-        .open_capture(&bytes, &ext)
-        .map_err(|e| e.to_string())?;
-    Ok(OpenedCapture {
-        count,
-        embedded_rules: stash_embedded_rules(&state, &bytes, &ext),
-    })
+    open_capture_bytes(state.inner(), &bytes, &ext)
 }
 
 /// Append a capture file dropped onto the compare window WITHOUT replacing the
