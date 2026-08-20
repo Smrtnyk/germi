@@ -524,7 +524,7 @@ fn has_uri_scheme(target: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
 }
 
-fn parse_response(raw: &[u8]) -> Result<CapturedResponse> {
+pub(crate) fn parse_response(raw: &[u8]) -> Result<CapturedResponse> {
     let mut remaining = raw;
     loop {
         let (head, body) = split_head_body(remaining);

@@ -23,6 +23,7 @@
 
 mod body;
 mod ca;
+mod farx;
 mod flow;
 mod handler;
 mod har_export;
@@ -719,8 +720,9 @@ impl ProxyController {
         har_export::export_har(&[], Some(&selected))
     }
 
-    /// Import scenarios from a rules file — a HAR carrying `_germiRules` or a
-    /// legacy bare `.germi-rules` bundle. Imported scenarios are
+    /// Import scenarios from a rules file — a HAR carrying `_germiRules`, a
+    /// Fiddler Classic FARX export, or a legacy bare `.germi-rules` bundle.
+    /// Imported scenarios are
     /// always re-keyed (fresh scenario + rule ids) so they can never alias an
     /// existing rule's hit counter. `replace == false` appends them (active
     /// pointer preserved); `replace == true` clears existing scenarios and resets

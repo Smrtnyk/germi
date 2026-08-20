@@ -1558,70 +1558,17 @@ pub fn blank_rule(id: String) -> Rule {
 /// raw bytes with no encoding — the user gets *something* to look at rather than
 /// a destroyed gzip stream mislabeled as `application/json`.
 pub fn respond_rule_from_flow(flow: &Flow, id: String) -> Rule {
-    let (status, body, body_base64, content_type, headers, content_encoding) = match &flow.response
-    {
-        Some(r) => {
-            let ct = r
-                .headers
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-                .map(|(_, v)| v.clone());
-            // Preserve only one supported Content-Encoding token. A chain must
-            // be dropped because the rule editor/serving path has one toggle;
-            // keeping just its first token after decoding the full chain would
-            // serve different bytes under a misleading partial encoding.
-            let original_encodings = crate::body::content_encodings_of(&r.headers);
-            let original_encoding = match original_encodings.as_slice() {
-                [encoding] => normalize_encoding(Some(encoding)),
-                _ => None,
-            };
-            // Get the body into identity (decoded) form for the editor, and
-            // decide whether to keep the encoding toggle.
-            //
-            // Three cases:
-            // 1. decode_body succeeds → the body was raw compressed (a live
-            //    capture). Use the decoded text + keep the encoding toggle.
-            // 2. decode_body fails but the body is already textual → tolerate a
-            //    legacy import (older Germi builds retained Content-Encoding
-            //    beside decoded bytes) or a stale upstream header. Use the body
-            //    as-is + KEEP the encoding toggle so the engine re-compresses
-            //    on serve (the client still receives the same decoded payload).
-            // 3. decode_body fails and the body is NOT textual → genuinely
-            //    undecodable binary. Fall back to raw bytes with NO encoding
-            //    toggle — serving a truncated/undecodable body labeled gzip
-            //    would corrupt the response.
-            let (decoded, encoding) = match crate::body::decode_body(&r.headers, &r.body) {
-                Some((decoded, false)) => (decoded, original_encoding),
-                _ if crate::body::looks_textual(&r.body) => (r.body.to_vec(), original_encoding),
-                _ => (r.body.to_vec(), None),
-            };
-            // Seed only metadata that remains true for the configured mock.
-            // Body/framing fields are recomputed, while validators, digests,
-            // ranges, and message signatures describe the captured bytes and
-            // become false as soon as Germi decodes, recompresses, or edits them.
-            let headers: Vec<(String, String)> = r
-                .headers
-                .iter()
-                .filter(|(k, _)| !is_seed_excluded(k))
-                .cloned()
-                .collect();
-            let body_base64 = (std::str::from_utf8(&decoded).is_err()
-                || !crate::body::looks_textual(&decoded))
-            .then(|| {
-                use base64::Engine as _;
-                base64::engine::general_purpose::STANDARD.encode(&decoded)
-            });
-            (
-                r.status,
-                String::from_utf8_lossy(&decoded).into_owned(),
-                body_base64,
-                ct,
-                headers,
-                encoding,
-            )
-        }
-        None => (200, String::new(), None, None, Vec::new(), None),
-    };
+    let action = flow.response.as_ref().map_or_else(
+        || Action::Respond {
+            status: 200,
+            headers: Vec::new(),
+            body: String::new(),
+            body_base64: None,
+            content_type: None,
+            content_encoding: None,
+        },
+        respond_action_from_response,
+    );
 
     // One rule per request, host-specific: the matcher targets the flow's full
     // URL (scheme://host/path+query) so mocking github.com/feed does NOT also
@@ -1642,14 +1589,63 @@ pub fn respond_rule_from_flow(flow: &Flow, id: String) -> Rule {
             url: full_url,
             url_match: MatchKind::Exact,
         },
-        action: Action::Respond {
-            status,
-            headers,
-            body,
-            body_base64,
-            content_type,
-            content_encoding,
-        },
+        action,
+    }
+}
+
+/// Convert captured response bytes into an editable `Respond` action without
+/// retaining stale framing/integrity headers. Shared by flow-to-rule creation
+/// and FARX embedded-response conversion.
+pub(crate) fn respond_action_from_response(r: &CapturedResponse) -> Action {
+    let content_type = r
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.clone());
+    // Preserve only one supported Content-Encoding token. A chain must be
+    // dropped because the rule editor/serving path has one toggle; keeping just
+    // its first token after decoding the full chain would serve different bytes
+    // under a misleading partial encoding.
+    let original_encodings = crate::body::content_encodings_of(&r.headers);
+    let original_encoding = match original_encodings.as_slice() {
+        [encoding] => normalize_encoding(Some(encoding)),
+        _ => None,
+    };
+    // Get the body into identity (decoded) form for the editor, and decide
+    // whether to keep the encoding toggle.
+    //
+    // Three cases:
+    // 1. decode_body succeeds → the body was raw compressed (a live capture).
+    // 2. decode_body fails but the body is textual → tolerate a legacy import
+    //    or stale upstream header and keep the encoding toggle.
+    // 3. decode_body fails and the body is binary → retain exact bytes with no
+    //    encoding label rather than serve a corrupt, mislabeled payload.
+    let (decoded, content_encoding) = match crate::body::decode_body(&r.headers, &r.body) {
+        Some((decoded, false)) => (decoded, original_encoding),
+        _ if crate::body::looks_textual(&r.body) => (r.body.to_vec(), original_encoding),
+        _ => (r.body.to_vec(), None),
+    };
+    // Seed only metadata that remains true for the configured mock.
+    let headers: Vec<(String, String)> = r
+        .headers
+        .iter()
+        .filter(|(k, _)| !is_seed_excluded(k))
+        .cloned()
+        .collect();
+    let body_base64 = (std::str::from_utf8(&decoded).is_err()
+        || !crate::body::looks_textual(&decoded))
+    .then(|| {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(&decoded)
+    });
+
+    Action::Respond {
+        status: r.status,
+        headers,
+        body: String::from_utf8_lossy(&decoded).into_owned(),
+        body_base64,
+        content_type,
+        content_encoding,
     }
 }
 

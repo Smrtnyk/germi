@@ -1448,7 +1448,10 @@ pub async fn peek_rules_import(
     let Some(picked) = app
         .dialog()
         .file()
-        .add_filter("Mock rules (.har, .germi-rules)", &["har", "germi-rules"])
+        .add_filter(
+            "Mock rules (.har, .farx, .germi-rules)",
+            &["har", "farx", "germi-rules"],
+        )
         .blocking_pick_file()
     else {
         return Ok(None);

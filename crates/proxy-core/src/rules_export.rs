@@ -1,10 +1,10 @@
 //! Portable import/export of autoresponder scenarios. The on-disk carrier is a
 //! HAR (see `har_export`): a rules export is a HAR with zero entries whose
 //! `_germiRules` field holds the [`RulesExport`] bundle, so traffic and rules
-//! share one standard format. [`parse_rules`] also still accepts the legacy
-//! bare `.germi-rules` bundle, so files written before the unification keep
-//! importing. This is *config sharing* — distinct from the internal `SQLite`
-//! persistence.
+//! share one standard format. [`parse_rules`] also accepts Fiddler Classic FARX
+//! exports and the legacy bare `.germi-rules` bundle, so existing rule files
+//! keep importing. This is *config sharing* — distinct from the internal
+//! `SQLite` persistence.
 //!
 //! Imported scenarios are always re-keyed: every scenario and every rule gets a
 //! fresh id. Cursor accounting ([`crate::rules::RuleCursors`]) is rule-id keyed,
@@ -100,8 +100,9 @@ pub fn preview_rules(bytes: &[u8]) -> Option<Vec<ScenarioPreview>> {
 }
 
 /// Validate and summarize a user-picked rules file. Unlike [`preview_rules`],
-/// this accepts either the current HAR carrier or the legacy bare bundle and
-/// returns parsing errors so a bad standalone import is surfaced to the user.
+/// this accepts the current HAR carrier, Fiddler Classic FARX, or the legacy
+/// bare bundle and returns parsing errors so a bad standalone import is
+/// surfaced to the user.
 pub fn preview_rules_file(bytes: &[u8]) -> Result<Vec<ScenarioPreview>> {
     Ok(scenario_previews(&decode_rules_file(bytes)?))
 }
@@ -117,10 +118,10 @@ struct VersionPeek {
 
 /// Parse a rules file, returning its scenarios already re-keyed with fresh
 /// scenario + rule ids. Accepts a HAR carrying `_germiRules` (the current
-/// export shape) or a legacy bare `.germi-rules` bundle; a HAR *without* the
-/// field is rejected with a clear message rather than silently importing
-/// nothing. The HAR check must come first — fed to the bare parser, a HAR
-/// would "succeed" as an empty bundle (every field is defaulted).
+/// export shape), Fiddler Classic FARX, or a legacy bare `.germi-rules` bundle;
+/// a HAR *without* the field is rejected with a clear message rather than
+/// silently importing nothing. The HAR check must come first — fed to the bare
+/// parser, a HAR would "succeed" as an empty bundle (every field is defaulted).
 #[cfg(test)]
 pub fn parse_rules(bytes: &[u8]) -> Result<Vec<Scenario>> {
     Ok(parse_rules_with_origins(bytes)?
@@ -160,6 +161,9 @@ fn decode_rules_file(bytes: &[u8]) -> Result<RulesExport> {
     }
     if is_har(bytes) {
         anyhow::bail!("this HAR carries no embedded mock rules (embedding is opted into on save)");
+    }
+    if crate::farx::looks_like_xml(bytes) {
+        return crate::farx::parse_farx(bytes);
     }
     decode_bundle(bytes)
 }
@@ -724,6 +728,28 @@ mod tests {
         assert_eq!(back[0].name, "Shared");
         assert_eq!(back[0].rules.len(), 1);
         assert_ne!(back[0].id, "sc-1", "HAR-carried scenarios are re-keyed too");
+    }
+
+    #[test]
+    fn standalone_preview_and_parse_content_detect_farx() {
+        let farx = br#"<?xml version="1.0"?><AutoResponder><State>
+          <ResponseRule Match="METHOD:GET EXACT:https://api.test/users"
+            Action="https://mock.test/users" Enabled="true" />
+          </State></AutoResponder>"#;
+
+        let preview = preview_rules_file(farx).expect("FARX preview parses");
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].name, "Fiddler AutoResponder");
+        assert_eq!(preview[0].rule_count, 1);
+
+        let scenarios = parse_rules(farx).expect("FARX rules parse");
+        assert_eq!(scenarios.len(), 1);
+        assert!(scenarios[0].id.starts_with("imported-"));
+        assert!(scenarios[0].rules[0].id.starts_with("imported-"));
+        assert!(matches!(
+            &scenarios[0].rules[0].action,
+            Action::MapRemote { url } if url == "https://mock.test/users"
+        ));
     }
 
     #[test]
