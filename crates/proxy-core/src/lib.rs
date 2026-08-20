@@ -43,7 +43,7 @@ mod tester;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -61,6 +61,7 @@ pub use flow::{
 };
 pub use history::HistoryTag;
 pub use import::har_embedded_rules;
+pub use import::{CaptureImportProgress, CaptureImportStage, CAPTURE_IMPORT_CANCELLED};
 pub use rules::{
     Action, ActionSummary, AutoResponder, AutoResponderSummary, MatchKind, Matcher, Rule,
     RuleSearchScope, RuleSet, RuleSummary, Scenario, ScenarioSummary, GENERAL_SCENARIO_ID,
@@ -134,6 +135,34 @@ pub enum SearchSide {
 /// join handle (so `stop()` can wait for the listener socket to be released).
 type RunningProxy = (SocketAddr, oneshot::Sender<()>, JoinHandle<()>);
 
+#[derive(Clone)]
+pub struct CaptureImportHandle {
+    id: u64,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CaptureImportHandle {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+pub struct CaptureImportResult {
+    pub summaries: Vec<FlowSummary>,
+    pub embedded_rules: Option<Vec<u8>>,
+}
+
+#[derive(Default)]
+struct CaptureImportOperations {
+    last_id: u64,
+    pending: Option<CaptureImportHandle>,
+    active: Option<CaptureImportHandle>,
+}
+
 /// A serving task can exit independently after a successful bind (for example,
 /// a fatal accept-loop error). Do not leave that finished task masquerading as
 /// a live listener forever or blocking a later Start/CA regeneration.
@@ -169,6 +198,10 @@ pub struct ProxyController {
     /// `Some(..)` while the proxy is running; the bound address lets the UI
     /// re-read the live listen port/scope after a webview reload.
     running: Mutex<Option<RunningProxy>>,
+    /// At most one capture import may remain eligible to commit. Claiming a
+    /// newer intent marks the older parser cancelled; the full parse happens
+    /// outside this lock and the final atomic commit re-validates the handle.
+    capture_imports: std::sync::Mutex<CaptureImportOperations>,
 }
 
 impl ProxyController {
@@ -182,6 +215,7 @@ impl ProxyController {
             ),
             ca: RwLock::new(ca),
             running: Mutex::new(None),
+            capture_imports: std::sync::Mutex::new(CaptureImportOperations::default()),
         }
     }
 
@@ -631,30 +665,225 @@ impl ProxyController {
 
     // ---- capture files: open (.har / .saz) + HAR export ----
 
+    fn next_capture_import_locked(imports: &mut CaptureImportOperations) -> CaptureImportHandle {
+        imports.last_id = imports
+            .last_id
+            .checked_add(1)
+            .expect("capture import operation id exhausted");
+        CaptureImportHandle {
+            id: imports.last_id,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Reserve global ownership before any picker, frontend file read, or
+    /// other operation-specific work. A later reservation supersedes this one
+    /// even if the earlier import command has not reached Rust yet. Reserving
+    /// alone does not disturb an already-running import; only a successful
+    /// claim does, so an empty mailbox or cancelled picker is a no-op.
+    pub fn reserve_capture_import(&self) -> u64 {
+        let mut imports = self
+            .capture_imports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let handle = Self::next_capture_import_locked(&mut imports);
+        if let Some(previous) = imports.pending.replace(handle.clone()) {
+            previous.cancelled.store(true, Ordering::Release);
+        }
+        handle.id
+    }
+
+    /// Attach exactly one import command to a prior reservation. A stale token
+    /// cannot become newest merely because its picker or IPC call arrived late.
+    pub fn claim_capture_import(&self, id: u64) -> Result<CaptureImportHandle> {
+        let mut imports = self
+            .capture_imports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(pending) = imports
+            .pending
+            .take_if(|pending| pending.id == id && !pending.is_cancelled())
+        else {
+            bail!(CAPTURE_IMPORT_CANCELLED);
+        };
+        if let Some(previous) = imports.active.replace(pending.clone()) {
+            previous.cancelled.store(true, Ordering::Release);
+        }
+        Ok(pending)
+    }
+
+    /// Start a capture import directly. Core callers that do not have a
+    /// frontend preflight receive an already-claimed handle; a newer start
+    /// still supersedes any parser that has not committed yet.
+    pub fn start_capture_import(&self) -> CaptureImportHandle {
+        let mut imports = self
+            .capture_imports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let handle = Self::next_capture_import_locked(&mut imports);
+        if let Some(pending) = imports.pending.take() {
+            pending.cancelled.store(true, Ordering::Release);
+        }
+        if let Some(previous) = imports.active.replace(handle.clone()) {
+            previous.cancelled.store(true, Ordering::Release);
+        }
+        handle
+    }
+
+    /// Request cancellation for exactly one pending or active import id. Stale
+    /// UI from an older operation cannot accidentally cancel its replacement.
+    pub fn cancel_capture_import(&self, id: u64) -> bool {
+        let mut imports = self
+            .capture_imports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(pending) = imports.pending.take_if(|pending| pending.id == id) {
+            pending.cancelled.store(true, Ordering::Release);
+            return true;
+        }
+        if let Some(active) = imports.active.as_ref().filter(|active| active.id == id) {
+            active.cancelled.store(true, Ordering::Release);
+            return true;
+        }
+        false
+    }
+
+    /// Clear a started handle that failed before parser entry (for example a
+    /// file read error). This is id-scoped, so late cleanup cannot clear a newer
+    /// active operation.
+    pub fn finish_capture_import(&self, handle: &CaptureImportHandle) {
+        let mut imports = self
+            .capture_imports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if imports
+            .active
+            .as_ref()
+            .is_some_and(|active| active.id == handle.id)
+        {
+            imports.active = None;
+        }
+    }
+
+    fn capture_import_is_current(&self, handle: &CaptureImportHandle) -> bool {
+        !handle.is_cancelled()
+            && self
+                .capture_imports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .active
+                .as_ref()
+                .is_some_and(|active| active.id == handle.id)
+    }
+
     /// Parse a capture file — a HAR or a Fiddler SAZ archive — into flows,
     /// dispatched on the lowercased `ext`.
-    fn parse_capture(bytes: &[u8], ext: &str) -> Result<Vec<crate::flow::Flow>> {
+    fn parse_capture(
+        bytes: &[u8],
+        ext: &str,
+        progress: &mut dyn FnMut(CaptureImportProgress) -> bool,
+    ) -> Result<import::ParsedCapture> {
         match ext {
-            "har" => import::parse_har(bytes),
-            "saz" => import::parse_saz(bytes),
+            "har" => import::parse_har_with_progress(bytes, progress),
+            "saz" => import::parse_saz_with_progress(bytes, progress),
             other => bail!("Unsupported file type: .{other}"),
         }
+    }
+
+    /// Parse and atomically commit a capture started by
+    /// [`Self::start_capture_import`]. Parsing and body work remain outside all
+    /// store locks. The still-current handle is checked again under the
+    /// operation lock immediately before mutation, closing the overlap race.
+    pub fn run_capture_import(
+        &self,
+        handle: &CaptureImportHandle,
+        bytes: &[u8],
+        ext: &str,
+        replace: bool,
+        mut on_progress: impl FnMut(CaptureImportProgress) -> bool,
+    ) -> Result<CaptureImportResult> {
+        let result = (|| {
+            if !self.capture_import_is_current(handle) {
+                bail!(CAPTURE_IMPORT_CANCELLED);
+            }
+            let mut parser_progress =
+                |progress| self.capture_import_is_current(handle) && on_progress(progress);
+            let parsed = Self::parse_capture(bytes, ext, &mut parser_progress)?;
+            if !self.capture_import_is_current(handle) {
+                bail!(CAPTURE_IMPORT_CANCELLED);
+            }
+
+            let total = parsed.flows.len();
+            if !on_progress(CaptureImportProgress {
+                stage: CaptureImportStage::Finalizing,
+                completed: 0,
+                total: Some(total as u64),
+                cancelable: false,
+            }) {
+                bail!(CAPTURE_IMPORT_CANCELLED);
+            }
+
+            let mut imports = self
+                .capture_imports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if handle.is_cancelled()
+                || imports
+                    .active
+                    .as_ref()
+                    .is_none_or(|active| active.id != handle.id)
+            {
+                bail!(CAPTURE_IMPORT_CANCELLED);
+            }
+
+            let summaries = if replace {
+                let _history_op = self
+                    .shared
+                    .history_ops
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Ok(mut history) = self.shared.history.lock() {
+                    history.discard_flow_entries();
+                }
+                self.shared
+                    .import_flows_with_progress(parsed.flows, true, |completed, total| {
+                        let _ = on_progress(CaptureImportProgress {
+                            stage: CaptureImportStage::Finalizing,
+                            completed: completed as u64,
+                            total: Some(total as u64),
+                            cancelable: false,
+                        });
+                    })
+            } else {
+                self.shared
+                    .import_flows_with_progress(parsed.flows, false, |completed, total| {
+                        let _ = on_progress(CaptureImportProgress {
+                            stage: CaptureImportStage::Finalizing,
+                            completed: completed as u64,
+                            total: Some(total as u64),
+                            cancelable: false,
+                        });
+                    })
+            };
+            imports.active = None;
+            Ok(CaptureImportResult {
+                summaries,
+                embedded_rules: parsed.embedded_rules,
+            })
+        })();
+        self.finish_capture_import(handle);
+        result
     }
 
     /// Open a capture file, REPLACING the current traffic. Returns the number
     /// of flows loaded. The file is fully parsed before anything is cleared,
     /// so a malformed file leaves traffic intact.
     pub fn open_capture(&self, bytes: &[u8], ext: &str) -> Result<usize> {
-        let flows = Self::parse_capture(bytes, ext)?;
-        let _history_op = self
-            .shared
-            .history_ops
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Ok(mut history) = self.shared.history.lock() {
-            history.discard_flow_entries();
-        }
-        Ok(self.shared.import_flows(flows, true).len())
+        let handle = self.start_capture_import();
+        Ok(self
+            .run_capture_import(&handle, bytes, ext, true, |_| true)?
+            .summaries
+            .len())
     }
 
     /// Append a capture file to the current traffic WITHOUT clearing it — for
@@ -663,9 +892,10 @@ impl ProxyController {
     /// continues (only a replacing open renumbers from 1). Returns the new
     /// flows' summaries in file order, so the caller can address exactly them.
     pub fn append_capture(&self, bytes: &[u8], ext: &str) -> Result<Vec<FlowSummary>> {
+        let handle = self.start_capture_import();
         Ok(self
-            .shared
-            .import_flows(Self::parse_capture(bytes, ext)?, false))
+            .run_capture_import(&handle, bytes, ext, false, |_| true)?
+            .summaries)
     }
 
     /// Serialize the current traffic to a HAR 1.2 archive (JSON bytes). With
@@ -2734,6 +2964,209 @@ mod tests {
             1,
             "a rejected open must leave existing traffic untouched"
         );
+    }
+
+    #[test]
+    fn cancelled_capture_import_leaves_store_and_history_untouched() {
+        let c = controller();
+        c.shared.record_new(flow("keep"));
+        c.clear_flows_tracked();
+        c.undo().expect("restore the tracked flow");
+        let history_before = c.shared.history.lock().expect("history").can_undo();
+        let bytes = crate::har_export::export_har(&[flow("new-a"), flow("new-b")], None);
+        let handle = c.start_capture_import();
+        let operation_id = handle.id();
+
+        let error = c
+            .run_capture_import(&handle, &bytes, "har", true, |progress| {
+                if progress.stage == CaptureImportStage::Processing && progress.completed == 0 {
+                    assert!(c.cancel_capture_import(operation_id));
+                }
+                true
+            })
+            .err()
+            .expect("cancelled import fails");
+
+        assert!(error.to_string().contains(CAPTURE_IMPORT_CANCELLED));
+        assert_eq!(
+            c.list_flows()
+                .iter()
+                .map(|flow| flow.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["keep"]
+        );
+        assert_eq!(
+            c.shared.history.lock().expect("history").can_undo(),
+            history_before,
+            "a cancelled replacement must not discard the existing undo timeline"
+        );
+        assert!(
+            !c.cancel_capture_import(operation_id),
+            "error cleanup removes the completed operation handle"
+        );
+    }
+
+    #[test]
+    fn newer_capture_import_supersedes_older_parse_before_atomic_commit() {
+        let c = controller();
+        c.shared.record_new(flow("keep"));
+        let old_bytes = crate::har_export::export_har(&[completed_flow("old")], None);
+        let new_bytes = crate::har_export::export_har(&[completed_flow("new")], None);
+        let old = c.start_capture_import();
+        let newest = c.start_capture_import();
+
+        let old_error = c
+            .run_capture_import(&old, &old_bytes, "har", true, |_| true)
+            .err()
+            .expect("superseded import cannot commit");
+        assert!(old_error.to_string().contains(CAPTURE_IMPORT_CANCELLED));
+        assert_eq!(c.list_flows()[0].id, "keep");
+
+        let result = c
+            .run_capture_import(&newest, &new_bytes, "har", true, |_| true)
+            .expect("newest import commits");
+        assert_eq!(result.summaries.len(), 1);
+        assert_eq!(c.list_flows()[0].path, "/new");
+    }
+
+    #[test]
+    fn stale_reserved_import_cannot_start_after_newer_import_commits() {
+        let c = controller();
+        c.shared.record_new(flow("keep"));
+        let stale_id = c.reserve_capture_import();
+        let newest_id = c.reserve_capture_import();
+
+        let stale_error = c
+            .claim_capture_import(stale_id)
+            .err()
+            .expect("a late command cannot reclaim superseded ownership");
+        assert!(stale_error.to_string().contains(CAPTURE_IMPORT_CANCELLED));
+
+        let newest = c
+            .claim_capture_import(newest_id)
+            .expect("newest reservation remains claimable");
+        let bytes = crate::har_export::export_har(&[completed_flow("newest")], None);
+        c.run_capture_import(&newest, &bytes, "har", true, |_| true)
+            .expect("newest reservation commits");
+        assert_eq!(c.list_flows()[0].path, "/newest");
+    }
+
+    #[test]
+    fn running_parser_is_cancelled_when_a_newer_reservation_is_claimed() {
+        let c = Arc::new(controller());
+        c.shared.record_new(flow("keep"));
+        let old = c.start_capture_import();
+        let body = "x".repeat(2 * 1024 * 1024);
+        let old_bytes = format!(
+            r#"{{"log":{{"entries":[{{"request":{{"url":"https://old/"}},"response":{{"content":{{"text":"{body}"}}}}}}]}}}}"#
+        )
+        .into_bytes();
+        let (parsing_tx, parsing_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+        let worker_controller = c.clone();
+        let worker = std::thread::spawn(move || {
+            let mut paused = false;
+            worker_controller.run_capture_import(&old, &old_bytes, "har", true, |progress| {
+                if !paused
+                    && progress.stage == CaptureImportStage::Parsing
+                    && progress.completed > 0
+                {
+                    paused = true;
+                    parsing_tx.send(()).expect("signal active parser");
+                    resume_rx.recv().expect("resume active parser");
+                }
+                true
+            })
+        });
+
+        parsing_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("old parser reached its decode loop");
+        let newest_id = c.reserve_capture_import();
+        let newest = c
+            .claim_capture_import(newest_id)
+            .expect("newer UI reservation claims global ownership");
+        resume_tx.send(()).expect("release old parser");
+        let old_error = worker
+            .join()
+            .expect("old parser thread")
+            .err()
+            .expect("superseded running parser fails");
+        assert!(old_error.to_string().contains(CAPTURE_IMPORT_CANCELLED));
+        assert_eq!(c.list_flows()[0].id, "keep");
+
+        let bytes = crate::har_export::export_har(&[completed_flow("newest")], None);
+        c.run_capture_import(&newest, &bytes, "har", true, |_| true)
+            .expect("newest import commits after cancelling active parse");
+        assert_eq!(c.list_flows()[0].path, "/newest");
+    }
+
+    #[test]
+    fn concurrent_reservations_cannot_install_a_lower_token_last() {
+        let c = Arc::new(controller());
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let reserve = |controller: Arc<ProxyController>, barrier: Arc<std::sync::Barrier>| {
+            std::thread::spawn(move || {
+                barrier.wait();
+                controller.reserve_capture_import()
+            })
+        };
+        let first = reserve(c.clone(), barrier.clone());
+        let second = reserve(c.clone(), barrier.clone());
+        barrier.wait();
+        let mut ids = [
+            first.join().expect("main-window reservation"),
+            second.join().expect("compare-window reservation"),
+        ];
+        ids.sort_unstable();
+
+        let imports = c.capture_imports.lock().expect("capture operations");
+        assert_eq!(imports.last_id, ids[1]);
+        assert_eq!(
+            imports.pending.as_ref().map(CaptureImportHandle::id),
+            Some(ids[1])
+        );
+        drop(imports);
+        assert!(c.claim_capture_import(ids[0]).is_err());
+        assert!(c.claim_capture_import(ids[1]).is_ok());
+    }
+
+    #[test]
+    fn cancelling_a_pending_picker_does_not_cancel_an_active_import() {
+        let c = controller();
+        let active = c.start_capture_import();
+        let picker = c.reserve_capture_import();
+        assert!(c.cancel_capture_import(picker));
+
+        let bytes = crate::har_export::export_har(&[completed_flow("active")], None);
+        c.run_capture_import(&active, &bytes, "har", true, |_| true)
+            .expect("picker cancellation leaves the active parser eligible");
+        assert_eq!(c.list_flows()[0].path, "/active");
+    }
+
+    #[test]
+    fn failed_import_cleans_up_before_a_sequential_success() {
+        let c = controller();
+        c.shared.record_new(flow("keep"));
+        let failed = c.start_capture_import();
+        assert!(c
+            .run_capture_import(&failed, b"not json", "har", true, |_| true)
+            .is_err());
+        assert!(!c.cancel_capture_import(failed.id()));
+        assert_eq!(c.list_flows()[0].id, "keep");
+
+        let next = c.start_capture_import();
+        let bytes = crate::har_export::export_har(&[completed_flow("after-error")], None);
+        let mut saw_non_cancelable_commit = false;
+        c.run_capture_import(&next, &bytes, "har", true, |progress| {
+            if progress.stage == CaptureImportStage::Finalizing {
+                saw_non_cancelable_commit |= !progress.cancelable;
+            }
+            true
+        })
+        .expect("a later import is not blocked by failure cleanup");
+        assert!(saw_non_cancelable_commit);
+        assert_eq!(c.list_flows()[0].path, "/after-error");
     }
 
     #[test]

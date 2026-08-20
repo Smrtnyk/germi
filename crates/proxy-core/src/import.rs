@@ -5,14 +5,88 @@
 //! through the list / inspector / mock paths unchanged.
 
 use std::collections::BTreeMap;
-use std::io::{Cursor, Read};
+use std::io::{BufReader, Cursor, Read};
 
 use anyhow::Result;
 use regex::Regex;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::flow::{now_ms, CapturedRequest, CapturedResponse, Flow};
 use crate::tester::parse_url;
+
+/// A truthful phase of capture import work. A phase only carries a `total`
+/// when the parser actually knows one; callers must render `None` as
+/// indeterminate rather than inventing a percentage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CaptureImportStage {
+    Reading,
+    Decoding,
+    Parsing,
+    Extracting,
+    Processing,
+    Finalizing,
+}
+
+/// Progress reported by the GUI-free import engine. `cancelable` becomes false
+/// only for the short atomic store commit, where stopping halfway would expose
+/// a partial replacement/append.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureImportProgress {
+    pub stage: CaptureImportStage,
+    pub completed: u64,
+    pub total: Option<u64>,
+    pub cancelable: bool,
+}
+
+pub const CAPTURE_IMPORT_CANCELLED: &str = "Capture import cancelled";
+
+fn report(
+    progress: &mut dyn FnMut(CaptureImportProgress) -> bool,
+    stage: CaptureImportStage,
+    completed: u64,
+    total: Option<u64>,
+) -> Result<()> {
+    if progress(CaptureImportProgress {
+        stage,
+        completed,
+        total,
+        cancelable: true,
+    }) {
+        Ok(())
+    } else {
+        anyhow::bail!(CAPTURE_IMPORT_CANCELLED)
+    }
+}
+
+/// Buffered JSON input that reports real source bytes consumed and turns a
+/// cancellation request into a read error. `serde_json::from_reader`
+/// can therefore stop during a large HAR decode instead of waiting for the
+/// entire document to materialize first.
+struct ProgressReader<'a> {
+    inner: Cursor<&'a [u8]>,
+    total: u64,
+    progress: &'a mut dyn FnMut(CaptureImportProgress) -> bool,
+}
+
+impl Read for ProgressReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        let completed = self.inner.position();
+        if !(self.progress)(CaptureImportProgress {
+            stage: CaptureImportStage::Parsing,
+            completed,
+            total: Some(self.total),
+            cancelable: true,
+        }) {
+            // `Interrupted` is reserved for transient I/O and readers may retry
+            // it forever. Cancellation is terminal for this in-memory source.
+            return Err(std::io::Error::other(CAPTURE_IMPORT_CANCELLED));
+        }
+        Ok(read)
+    }
+}
 
 // =============================== HAR 1.2 ===============================
 //
@@ -31,6 +105,13 @@ struct Har {
 struct HarLog {
     #[serde(default)]
     entries: Option<Vec<HarEntry>>,
+    #[serde(default, rename = "_germiRules")]
+    germi_rules: Option<serde_json::Value>,
+}
+
+pub(crate) struct ParsedCapture {
+    pub flows: Vec<Flow>,
+    pub embedded_rules: Option<Vec<u8>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -227,115 +308,169 @@ pub fn har_embedded_rules(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Parse a HAR 1.2 file into flows. Flow ids are left empty (assigned on insert).
+#[cfg(test)]
 pub fn parse_har(bytes: &[u8]) -> Result<Vec<Flow>> {
-    let har: Har = serde_json::from_slice(bytes)?;
+    Ok(parse_har_with_progress(bytes, &mut |_| true)?.flows)
+}
+
+pub(crate) fn parse_har_with_progress(
+    bytes: &[u8],
+    progress: &mut dyn FnMut(CaptureImportProgress) -> bool,
+) -> Result<ParsedCapture> {
+    report(
+        progress,
+        CaptureImportStage::Parsing,
+        0,
+        Some(bytes.len() as u64),
+    )?;
+    let har: Har = {
+        let reader = ProgressReader {
+            inner: Cursor::new(bytes),
+            total: bytes.len() as u64,
+            progress,
+        };
+        match serde_json::from_reader(BufReader::with_capacity(64 * 1024, reader)) {
+            Ok(har) => har,
+            Err(error) if error.to_string().contains(CAPTURE_IMPORT_CANCELLED) => {
+                anyhow::bail!(CAPTURE_IMPORT_CANCELLED)
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
     let log = har
         .log
         .ok_or_else(|| anyhow::anyhow!("not a HAR archive: missing log object"))?;
+    let embedded_rules = log
+        .germi_rules
+        .and_then(|bundle| serde_json::to_vec(&bundle).ok());
     let entries = log
         .entries
         .ok_or_else(|| anyhow::anyhow!("not a HAR archive: missing log.entries array"))?;
     let entry_count = entries.len();
     let mut flows = Vec::with_capacity(entry_count);
 
-    for entry in entries {
-        if entry.request.url.trim().is_empty() {
-            tracing::warn!("skipping HAR entry without a request URL");
-            continue;
+    report(
+        progress,
+        CaptureImportStage::Processing,
+        0,
+        Some(entry_count as u64),
+    )?;
+
+    for (index, entry) in entries.into_iter().enumerate() {
+        report(
+            progress,
+            CaptureImportStage::Processing,
+            index as u64,
+            Some(entry_count as u64),
+        )?;
+        if let Some(flow) = har_entry_to_flow(entry) {
+            flows.push(flow);
         }
-        let (scheme, host, path) = parse_url(&entry.request.url);
-        let (req_body, req_body_encoded) = entry.request.post_data.map_or_else(
-            || (Vec::new(), false),
-            |p| {
-                let encoded = p.germi_body_encoded;
-                if p.encoding
-                    .as_deref()
-                    .is_some_and(|encoding| encoding.eq_ignore_ascii_case("base64"))
-                {
-                    (
-                        crate::body::base64_lenient(&p.text)
-                            .unwrap_or_else(|| p.text.as_bytes().to_vec()),
-                        encoded,
-                    )
-                } else {
-                    (p.text.into_bytes(), encoded)
-                }
-            },
-        );
-
-        let duration_ms = if entry.time.is_finite() && entry.time >= 0.0 {
-            Some(entry.time as u64)
-        } else {
-            None
-        };
-        let ts = crate::flow::rfc3339_to_epoch_ms(&entry.started_date_time).unwrap_or_else(now_ms);
-
-        let mut request_headers = pairs(entry.request.headers);
-        normalize_har_body_headers(&mut request_headers, req_body_encoded);
-        let request = CapturedRequest {
-            method: if entry.request.method.is_empty() {
-                "GET".to_string()
-            } else {
-                entry.request.method
-            },
-            uri: entry.request.url,
-            scheme,
-            host,
-            path,
-            version: entry.request.http_version,
-            headers: request_headers,
-            body: req_body.into(),
-            timestamp_ms: ts,
-        };
-
-        // Germi's unanswered-request HAR stub has status 0, no headers/version,
-        // and an empty body. Do not classify every status-less response as that
-        // stub: off-spec exporters sometimes omit status and headers while still
-        // carrying the only copy of the response body.
-        let response_body = decode_har_body(&entry.response.content);
-        let response = if entry.response.status == 0
-            && entry.response.headers.is_empty()
-            && entry.response.http_version.is_empty()
-            && response_body.is_empty()
-        {
-            None
-        } else {
-            let mut headers = pairs(entry.response.headers);
-            normalize_har_body_headers(&mut headers, entry.response.content.germi_body_encoded);
-            Some(CapturedResponse {
-                status: entry.response.status,
-                version: entry.response.http_version,
-                headers,
-                body: response_body.into(),
-                // HAR has no response timestamp of its own; the entry's start
-                // plus its total time is the closest reconstruction.
-                timestamp_ms: ts.saturating_add(duration_ms.unwrap_or(0)),
-            })
-        };
-
-        flows.push(Flow {
-            id: String::new(),
-            seq: 0,
-            request,
-            response,
-            matched_rule: entry.matched_rule,
-            duration_ms,
-            ttfb_ms: if entry.timings.wait.is_finite() && entry.timings.wait >= 0.0 {
-                Some(entry.timings.wait as u64)
-            } else {
-                None
-            },
-            comment: entry.comment.filter(|c| !c.is_empty()),
-            availability: None,
-            imported: true,
-        });
     }
+
+    report(
+        progress,
+        CaptureImportStage::Processing,
+        entry_count as u64,
+        Some(entry_count as u64),
+    )?;
 
     if entry_count > 0 && flows.is_empty() {
         anyhow::bail!("HAR archive contains no usable request entries");
     }
 
-    Ok(flows)
+    Ok(ParsedCapture {
+        flows,
+        embedded_rules,
+    })
+}
+
+fn har_entry_to_flow(entry: HarEntry) -> Option<Flow> {
+    if entry.request.url.trim().is_empty() {
+        tracing::warn!("skipping HAR entry without a request URL");
+        return None;
+    }
+    let (scheme, host, path) = parse_url(&entry.request.url);
+    let (req_body, req_body_encoded) = entry.request.post_data.map_or_else(
+        || (Vec::new(), false),
+        |post| {
+            let encoded = post.germi_body_encoded;
+            if post
+                .encoding
+                .as_deref()
+                .is_some_and(|encoding| encoding.eq_ignore_ascii_case("base64"))
+            {
+                (
+                    crate::body::base64_lenient(&post.text)
+                        .unwrap_or_else(|| post.text.as_bytes().to_vec()),
+                    encoded,
+                )
+            } else {
+                (post.text.into_bytes(), encoded)
+            }
+        },
+    );
+    let duration_ms = if entry.time.is_finite() && entry.time >= 0.0 {
+        Some(entry.time as u64)
+    } else {
+        None
+    };
+    let ts = crate::flow::rfc3339_to_epoch_ms(&entry.started_date_time).unwrap_or_else(now_ms);
+    let mut request_headers = pairs(entry.request.headers);
+    normalize_har_body_headers(&mut request_headers, req_body_encoded);
+    let request = CapturedRequest {
+        method: if entry.request.method.is_empty() {
+            "GET".to_string()
+        } else {
+            entry.request.method
+        },
+        uri: entry.request.url,
+        scheme,
+        host,
+        path,
+        version: entry.request.http_version,
+        headers: request_headers,
+        body: req_body.into(),
+        timestamp_ms: ts,
+    };
+
+    // Germi's unanswered-request HAR stub has status 0, no headers/version,
+    // and an empty body. Off-spec exporters may omit metadata but retain a body.
+    let response_body = decode_har_body(&entry.response.content);
+    let response = if entry.response.status == 0
+        && entry.response.headers.is_empty()
+        && entry.response.http_version.is_empty()
+        && response_body.is_empty()
+    {
+        None
+    } else {
+        let mut headers = pairs(entry.response.headers);
+        normalize_har_body_headers(&mut headers, entry.response.content.germi_body_encoded);
+        Some(CapturedResponse {
+            status: entry.response.status,
+            version: entry.response.http_version,
+            headers,
+            body: response_body.into(),
+            timestamp_ms: ts.saturating_add(duration_ms.unwrap_or(0)),
+        })
+    };
+
+    Some(Flow {
+        id: String::new(),
+        seq: 0,
+        request,
+        response,
+        matched_rule: entry.matched_rule,
+        duration_ms,
+        ttfb_ms: if entry.timings.wait.is_finite() && entry.timings.wait >= 0.0 {
+            Some(entry.timings.wait as u64)
+        } else {
+            None
+        },
+        comment: entry.comment.filter(|comment| !comment.is_empty()),
+        availability: None,
+        imported: true,
+    })
 }
 
 // =============================== Fiddler SAZ ===============================
@@ -356,74 +491,70 @@ struct SessionRaw {
 const SAZ_TOTAL_BUDGET: u64 = 512 * 1024 * 1024;
 
 /// Parse a Fiddler SAZ (Session Archive Zip) into flows.
+#[cfg(test)]
 pub fn parse_saz(bytes: &[u8]) -> Result<Vec<Flow>> {
-    parse_saz_budgeted(bytes, SAZ_TOTAL_BUDGET)
+    Ok(parse_saz_with_progress(bytes, &mut |_| true)?.flows)
 }
 
+pub(crate) fn parse_saz_with_progress(
+    bytes: &[u8],
+    progress: &mut dyn FnMut(CaptureImportProgress) -> bool,
+) -> Result<ParsedCapture> {
+    let flows = parse_saz_limited_with_progress(
+        bytes,
+        SAZ_TOTAL_BUDGET,
+        crate::body::MAX_DECOMPRESSED_BYTES as u64,
+        progress,
+    )?;
+    Ok(ParsedCapture {
+        flows,
+        embedded_rules: None,
+    })
+}
+
+#[cfg(test)]
 fn parse_saz_budgeted(bytes: &[u8], budget: u64) -> Result<Vec<Flow>> {
     parse_saz_limited(bytes, budget, crate::body::MAX_DECOMPRESSED_BYTES as u64)
 }
 
+#[cfg(test)]
 fn parse_saz_limited(bytes: &[u8], budget: u64, member_budget: u64) -> Result<Vec<Flow>> {
+    parse_saz_limited_with_progress(bytes, budget, member_budget, &mut |_| true)
+}
+
+fn parse_saz_limited_with_progress(
+    bytes: &[u8],
+    budget: u64,
+    member_budget: u64,
+    progress: &mut dyn FnMut(CaptureImportProgress) -> bool,
+) -> Result<Vec<Flow>> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| anyhow::anyhow!("not a valid SAZ archive: {e}"))?;
 
     let re = Regex::new(r"(?i)^raw/(\d+)_([cs])\.txt$").unwrap();
-    let names: Vec<String> = zip.file_names().map(|s| s.to_string()).collect();
-
-    // Group by integer session number (never lexical — widths vary).
-    let mut sessions: BTreeMap<u64, SessionRaw> = BTreeMap::new();
-    // Bound total memory across ALL members (each is already per-member capped),
-    // so an archive with a huge *number* of members can't exhaust memory.
-    let mut total_bytes: u64 = 0;
-    for name in names {
-        let Some(caps) = re.captures(&name) else {
-            continue;
-        };
-        // Skip entries whose session number doesn't parse (e.g. a crafted name
-        // with 20+ digits that overflows u64) rather than folding them all into
-        // session 0, which would clobber unrelated sessions.
-        let Ok(n) = caps[1].parse::<u64>() else {
-            continue;
-        };
-        let is_client = caps[2].eq_ignore_ascii_case("c");
-        let entry = zip.by_name(&name).map_err(|_| {
-            anyhow::anyhow!("could not read '{name}' (encrypted SAZ is not supported)")
-        })?;
-        let mut buf = Vec::new();
-        // Cap how much we inflate from a single zip member so a small crafted
-        // archive can't expand to gigabytes (zip-bomb) and exhaust memory. Read
-        // one byte beyond the remaining aggregate budget so an overrun is
-        // detected without retaining an entire extra capped member.
-        let remaining = budget.saturating_sub(total_bytes);
-        let read_cap = member_budget
-            .saturating_add(1)
-            .min(remaining.saturating_add(1));
-        if entry.take(read_cap).read_to_end(&mut buf).is_err() {
-            sessions.remove(&n);
-            tracing::warn!("could not inflate SAZ member '{name}'; session skipped");
-            continue;
-        }
-        if (buf.len() as u64) > member_budget {
-            sessions.remove(&n);
-            tracing::warn!("SAZ member '{name}' exceeded {member_budget} bytes; session skipped");
-            continue;
-        }
-        if (buf.len() as u64) > remaining {
-            // If this was the second half of a session, do not turn its
-            // already-buffered request into a misleading request-only flow.
-            sessions.remove(&n);
-            tracing::warn!("SAZ import exceeded {budget} bytes; remaining sessions skipped");
-            break;
-        }
-        total_bytes = total_bytes.saturating_add(buf.len() as u64);
-        let slot = sessions.entry(n).or_default();
-        if is_client {
-            slot.client = Some(buf);
-        } else {
-            slot.server = Some(buf);
-        }
-    }
+    let members: Vec<(String, u64, bool)> = zip
+        .file_names()
+        .filter_map(|name| {
+            let caps = re.captures(name)?;
+            let session = caps[1].parse::<u64>().ok()?;
+            Some((name.to_string(), session, caps[2].eq_ignore_ascii_case("c")))
+        })
+        .collect();
+    let member_count = members.len();
+    report(
+        progress,
+        CaptureImportStage::Extracting,
+        0,
+        Some(member_count as u64),
+    )?;
+    let sessions = extract_saz_sessions(
+        &mut zip,
+        members,
+        budget,
+        member_budget,
+        member_count,
+        progress,
+    )?;
 
     let mut flows = Vec::new();
     // The zip-layer total above only bounds what the archive itself inflates to;
@@ -431,7 +562,20 @@ fn parse_saz_limited(bytes: &[u8], budget: u64, member_budget: u64) -> Result<Ve
     // `decode_body`), so budget that decoded output too or a small archive of
     // many gzip-bomb bodies would expand to members x the per-body cap.
     let mut decoded_bytes: u64 = 0;
-    for (_n, raw) in sessions {
+    let session_count = sessions.len();
+    report(
+        progress,
+        CaptureImportStage::Processing,
+        0,
+        Some(session_count as u64),
+    )?;
+    for (index, (_n, raw)) in sessions.into_iter().enumerate() {
+        report(
+            progress,
+            CaptureImportStage::Processing,
+            index as u64,
+            Some(session_count as u64),
+        )?;
         let Some(client) = raw.client else {
             continue;
         };
@@ -464,7 +608,94 @@ fn parse_saz_limited(bytes: &[u8], budget: u64, member_budget: u64) -> Result<Ve
             imported: true,
         });
     }
+    report(
+        progress,
+        CaptureImportStage::Processing,
+        session_count as u64,
+        Some(session_count as u64),
+    )?;
     Ok(flows)
+}
+
+fn extract_saz_sessions(
+    zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    members: Vec<(String, u64, bool)>,
+    budget: u64,
+    member_budget: u64,
+    member_count: usize,
+    progress: &mut dyn FnMut(CaptureImportProgress) -> bool,
+) -> Result<BTreeMap<u64, SessionRaw>> {
+    // Group by integer session number (never lexical — widths vary). Bound total
+    // inflated memory across all members, not just each individual member.
+    let mut sessions: BTreeMap<u64, SessionRaw> = BTreeMap::new();
+    let mut total_bytes: u64 = 0;
+    let mut chunk = vec![0_u8; 64 * 1024];
+    for (index, (name, session_number, is_client)) in members.into_iter().enumerate() {
+        report(
+            progress,
+            CaptureImportStage::Extracting,
+            index as u64,
+            Some(member_count as u64),
+        )?;
+        let mut entry = zip.by_name(&name).map_err(|_| {
+            anyhow::anyhow!("could not read '{name}' (encrypted SAZ is not supported)")
+        })?;
+        let mut buf = Vec::new();
+        // Read one byte beyond the smaller remaining limit so an overrun is
+        // detected without retaining an entire extra capped member.
+        let remaining = budget.saturating_sub(total_bytes);
+        let read_cap = member_budget
+            .saturating_add(1)
+            .min(remaining.saturating_add(1));
+        let mut read_error = false;
+        while (buf.len() as u64) < read_cap {
+            report(
+                progress,
+                CaptureImportStage::Extracting,
+                index as u64,
+                Some(member_count as u64),
+            )?;
+            let remaining_cap = read_cap.saturating_sub(buf.len() as u64) as usize;
+            let chunk_len = remaining_cap.min(chunk.len());
+            match entry.read(&mut chunk[..chunk_len]) {
+                Ok(0) => break,
+                Ok(read) => buf.extend_from_slice(&chunk[..read]),
+                Err(_) => {
+                    read_error = true;
+                    break;
+                }
+            }
+        }
+        if read_error {
+            sessions.remove(&session_number);
+            tracing::warn!("could not inflate SAZ member '{name}'; session skipped");
+            continue;
+        }
+        if (buf.len() as u64) > member_budget {
+            sessions.remove(&session_number);
+            tracing::warn!("SAZ member '{name}' exceeded {member_budget} bytes; session skipped");
+            continue;
+        }
+        if (buf.len() as u64) > remaining {
+            sessions.remove(&session_number);
+            tracing::warn!("SAZ import exceeded {budget} bytes; remaining sessions skipped");
+            break;
+        }
+        total_bytes = total_bytes.saturating_add(buf.len() as u64);
+        let slot = sessions.entry(session_number).or_default();
+        if is_client {
+            slot.client = Some(buf);
+        } else {
+            slot.server = Some(buf);
+        }
+        report(
+            progress,
+            CaptureImportStage::Extracting,
+            (index + 1) as u64,
+            Some(member_count as u64),
+        )?;
+    }
+    Ok(sessions)
 }
 
 fn parse_request(raw: &[u8]) -> Result<CapturedRequest> {
@@ -761,6 +992,58 @@ mod tests {
         live_request.uri = "https://some.domain.com/Home.aspx".into();
         live_request.host = "some.domain.com".into();
         assert!(rule.matcher.matches(&live_request));
+    }
+
+    #[test]
+    fn har_progress_uses_real_bytes_then_a_determinate_entry_count() {
+        let har = br#"{"log":{"entries":[
+          {"request":{"url":"https://a/1"},"response":{}},
+          {"request":{"url":"https://a/2"},"response":{}}
+        ]}}"#;
+        let mut updates = Vec::new();
+        let parsed = parse_har_with_progress(har, &mut |progress| {
+            updates.push(progress);
+            true
+        })
+        .expect("HAR parses");
+
+        assert_eq!(parsed.flows.len(), 2);
+        assert!(updates.iter().any(|progress| {
+            progress.stage == CaptureImportStage::Parsing
+                && progress.completed == har.len() as u64
+                && progress.total == Some(har.len() as u64)
+        }));
+        assert!(updates.iter().any(|progress| {
+            progress.stage == CaptureImportStage::Processing
+                && progress.completed == 2
+                && progress.total == Some(2)
+        }));
+        for pair in updates
+            .windows(2)
+            .filter(|pair| pair[0].stage == pair[1].stage)
+        {
+            assert!(pair[0].completed <= pair[1].completed);
+        }
+    }
+
+    #[test]
+    fn har_decode_can_be_cancelled_while_source_bytes_are_consumed() {
+        let body = "x".repeat(256 * 1024);
+        let har = format!(
+            r#"{{"log":{{"entries":[{{"request":{{"url":"https://a/"}},"response":{{"content":{{"text":"{body}"}}}}}}]}}}}"#
+        );
+        let mut saw_bytes = false;
+        let error = parse_har_with_progress(har.as_bytes(), &mut |progress| {
+            if progress.stage == CaptureImportStage::Parsing && progress.completed >= 64 * 1024 {
+                saw_bytes = true;
+                return false;
+            }
+            true
+        })
+        .err()
+        .expect("cancelled parse fails");
+        assert!(saw_bytes);
+        assert!(error.to_string().contains(CAPTURE_IMPORT_CANCELLED));
     }
 
     #[test]
@@ -1089,6 +1372,40 @@ mod tests {
         for f in &flows {
             assert_eq!(f.response.as_ref().unwrap().body, vec![b'a'; 100 * 1024]);
         }
+    }
+
+    #[test]
+    fn saz_progress_reports_real_member_and_session_totals() {
+        let saz = saz_with_raw_members(&[
+            (
+                "raw/1_c.txt",
+                b"GET /one HTTP/1.1\r\nHost: api.test\r\n\r\n",
+            ),
+            ("raw/1_s.txt", b"HTTP/1.1 200 OK\r\n\r\none"),
+            (
+                "raw/2_c.txt",
+                b"GET /two HTTP/1.1\r\nHost: api.test\r\n\r\n",
+            ),
+            ("raw/2_s.txt", b"HTTP/1.1 200 OK\r\n\r\ntwo"),
+        ]);
+        let mut updates = Vec::new();
+        let parsed = parse_saz_with_progress(&saz, &mut |progress| {
+            updates.push(progress);
+            true
+        })
+        .expect("SAZ parses");
+
+        assert_eq!(parsed.flows.len(), 2);
+        assert!(updates.iter().any(|progress| {
+            progress.stage == CaptureImportStage::Extracting
+                && progress.completed == 4
+                && progress.total == Some(4)
+        }));
+        assert!(updates.iter().any(|progress| {
+            progress.stage == CaptureImportStage::Processing
+                && progress.completed == 2
+                && progress.total == Some(2)
+        }));
     }
 
     #[test]

@@ -6,11 +6,36 @@ import { captureExtFromName, hasFileDrag, type CaptureExt } from "./dnd";
  *  handed to the backend over IPC — HTML5 file drops expose the File's bytes,
  *  not a filesystem path like the native picker. `readAsDataURL` handles large
  *  files without the call-stack blow-up of `btoa(String.fromCharCode(...))`. */
-export function readFileAsBase64(file: File): Promise<string> {
+export function readFileAsBase64(
+  file: File,
+  options: {
+    signal?: AbortSignal;
+    onProgress?: (completed: number, total: number) => void;
+  } = {},
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => reject(reader.error ?? new Error("could not read the file"));
+    const cleanup = () => options.signal?.removeEventListener("abort", abort);
+    const abort = () => reader.abort();
+    if (options.signal?.aborted) {
+      reject(new DOMException("Capture import cancelled", "AbortError"));
+      return;
+    }
+    options.onProgress?.(0, file.size);
+    options.signal?.addEventListener("abort", abort, { once: true });
+    reader.onerror = () => {
+      cleanup();
+      reject(reader.error ?? new Error("could not read the file"));
+    };
+    reader.onabort = () => {
+      cleanup();
+      reject(new DOMException("Capture import cancelled", "AbortError"));
+    };
+    reader.onprogress = (event) =>
+      options.onProgress?.(event.loaded, event.lengthComputable ? event.total : file.size);
     reader.onload = () => {
+      cleanup();
+      options.onProgress?.(file.size, file.size);
       const result = typeof reader.result === "string" ? reader.result : "";
       const comma = result.indexOf(",");
       resolve(comma >= 0 ? result.slice(comma + 1) : result);

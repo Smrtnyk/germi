@@ -46,6 +46,7 @@ import { Button } from "./components/ui/Button";
 import { ToastHost, ToastProvider } from "./toast";
 import { handleClearTrafficShortcut } from "./trafficShortcuts";
 import { selectAllContext } from "./selectAllContext";
+import { CaptureImportProgress } from "./captureImport";
 
 type AppStateValue = ReturnType<typeof useAppState>;
 
@@ -941,6 +942,8 @@ export function App() {
             />
           </div>
         </main>
+
+        <CaptureImportProgress status={s.session.importStatus} onCancel={s.session.cancelImport} />
 
         <StatusBar
           running={s.proxy.running}

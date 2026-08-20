@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -18,6 +19,39 @@ pub struct SystemProxyOwnership {
     /// the last confirmed and pending endpoints makes either side of a process
     /// crash recognizable and safely restorable on the next launch.
     pub(crate) pending_port: Option<u16>,
+}
+
+/// Embedded-rule mailbox versioned by the monotonically increasing capture
+/// import id. If overlapping commands finish their shell-level work out of
+/// order, an older completion can never overwrite the newest offer.
+#[derive(Default)]
+pub struct PendingHarRules {
+    pub import_id: u64,
+    pub bundle: Option<Vec<u8>>,
+}
+
+#[derive(Default)]
+pub struct CaptureImportBatchExpectation {
+    pub batch_index: u64,
+    pub acknowledged: bool,
+}
+
+pub struct CaptureImportBatchAck {
+    pub expected: Arc<Mutex<CaptureImportBatchExpectation>>,
+    pub sender: tokio::sync::mpsc::UnboundedSender<u64>,
+}
+
+pub enum CaptureImportBatchDelivery {
+    Reserved,
+    Waiting(CaptureImportBatchAck),
+    Cancelled,
+}
+
+pub type CaptureImportBatchAcks = Arc<Mutex<HashMap<u64, CaptureImportBatchDelivery>>>;
+
+pub struct PreparedLaunchCapture {
+    pub operation_id: u64,
+    pub path: PathBuf,
 }
 
 /// Tauri-managed application state. The proxy engine lives entirely in
@@ -51,10 +85,19 @@ pub struct AppState {
     /// Mock-rules bundle found inside the last opened HAR (its `_germiRules`
     /// field), held until the user confirms the offer and `apply_har_rules`
     /// imports it (issue #113).
-    pub pending_har_rules: Mutex<Option<Vec<u8>>>,
+    pub pending_har_rules: Arc<Mutex<PendingHarRules>>,
+    /// Compare imports acknowledge each bounded summary batch before their
+    /// authoritative invoke settles, keeping Finalizing visible until the
+    /// frontend has consumed every post-commit payload.
+    pub capture_import_batch_acks: CaptureImportBatchAcks,
     /// Capture path supplied by the OS file association at process launch.
     /// The frontend consumes it once after its flow subscription is ready.
     pub launch_capture: crate::launch::PendingCapture,
+    /// Launch-path preflight takes the one-shot mailbox before reserving global
+    /// import ownership. Keeping the path behind its operation id lets the
+    /// ordinary progress hook claim it without empty reloads disturbing a real
+    /// import in another window.
+    pub prepared_launch_capture: Arc<Mutex<Option<PreparedLaunchCapture>>>,
     /// Standalone rules file picked by `peek_rules_import`, held until the UI
     /// either applies it directly or asks how an included General layer should
     /// be routed (issue #122).
