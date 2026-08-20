@@ -5,6 +5,7 @@ import { App } from "./App";
 import { CompareWindow } from "./components/CompareWindow";
 import { RuleDetailWindow } from "./components/RuleDetailWindow";
 import { ScriptsWindow } from "./components/ScriptsWindow";
+import { installContextualSelectAll } from "./selectAllContext";
 import { initHighlightColorSync } from "./themeSync";
 import "./styles.css";
 
@@ -27,6 +28,13 @@ function root(): React.ReactElement {
   return <App />;
 }
 
+function Root(): React.ReactElement {
+  React.useEffect(() => installContextualSelectAll(), []);
+  return root();
+}
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>{root()}</React.StrictMode>,
+  <React.StrictMode>
+    <Root />
+  </React.StrictMode>,
 );

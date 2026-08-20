@@ -1,28 +1,60 @@
-import { useEffect } from "react";
+import { createRef, useEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
 
-import { selectAllContext } from "./selectAllContext";
-import { VirtualText } from "./components/FlowInspector";
+import { installContextualSelectAll, selectAllContext } from "./selectAllContext";
+import { FlowInspector, VirtualText } from "./components/FlowInspector";
+import { detail, message, summary } from "./flowFixtures";
+import type { InspectorFindHandle } from "./inspectorFind";
 import "./styles.css";
 
 const LONG_BODY = Array.from({ length: 500 }, (_, index) => `body line ${index}`).join("\n");
+const FLOW_SUMMARY = summary();
+const FLOW_DETAIL = detail({
+  request: message({
+    headers: [
+      ["x-request-token", "request-secret"],
+      ["x-request-trace", "request-trace-value"],
+    ],
+  }),
+  response: message({
+    headers: [
+      ["x-response-token", "response-secret"],
+      ["x-response-trace", "response-trace-value"],
+    ],
+  }),
+});
+const INSPECTOR_FIND_REF = createRef<InspectorFindHandle>();
 
-function Harness({ onSelectAll }: { onSelectAll: () => void }) {
+function useTestSelectionPolicy(onSelectAll: () => void): void {
   useEffect(() => {
+    const uninstall = installContextualSelectAll();
     const onKeyDown = (event: KeyboardEvent) => {
       if (selectAllContext(event, ".owned-list") !== "list") return;
       event.preventDefault();
       onSelectAll();
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => {
+      uninstall();
+      window.removeEventListener("keydown", onKeyDown);
+    };
   }, [onSelectAll]);
+}
+
+function Harness({ onSelectAll }: { onSelectAll: () => void }) {
+  useTestSelectionPolicy(onSelectAll);
 
   return (
-    <div>
-      <div className="owned-list" role="listbox" tabIndex={0} aria-label="Requests">
+    <div data-testid="app-chrome">
+      <div
+        className="owned-list"
+        data-select-all="list"
+        role="listbox"
+        tabIndex={0}
+        aria-label="Requests"
+      >
         <div role="option" aria-selected="false">
           GET /api/items
         </div>
@@ -46,15 +78,53 @@ function Harness({ onSelectAll }: { onSelectAll: () => void }) {
       <div style={{ width: "400px", height: "120px", display: "flex" }}>
         <VirtualText text={LONG_BODY} />
       </div>
-      <div data-select-all="native" data-testid="request-url">
+      <div data-select-all="region" data-testid="request-url">
         https://example.com/api/items
       </div>
-      <div data-select-all="native" data-testid="response-headers">
+      <div data-select-all="region" data-testid="response-headers">
         content-type: application/json
       </div>
       <button type="button">Unrelated action</button>
     </div>
   );
+}
+
+function InspectorHarness({ onSelectAll }: { onSelectAll: () => void }) {
+  useTestSelectionPolicy(onSelectAll);
+  return (
+    <div className="right-content" style={{ width: "720px", height: "520px" }}>
+      <div className="owned-list" data-select-all="list" tabIndex={0}>
+        traffic
+      </div>
+      <FlowInspector
+        active
+        detail={FLOW_DETAIL}
+        summary={FLOW_SUMMARY}
+        loading={false}
+        decode
+        onMock={() => {}}
+        onCopyCurl={() => {}}
+        onLoadFull={() => {}}
+        selectedSummaries={[FLOW_SUMMARY]}
+        onSelectOne={() => {}}
+        onMockMany={() => {}}
+        onCompare={() => {}}
+        onClearSelection={() => {}}
+        inspectorFindRef={INSPECTOR_FIND_REF}
+        viewer={false}
+      />
+    </div>
+  );
+}
+
+function expectSelectionInside(region: Element, included: string[], excluded: string[]): void {
+  const selection = window.getSelection();
+  expect(selection?.rangeCount).toBe(1);
+  const range = selection!.getRangeAt(0);
+  expect(region.contains(range.startContainer)).toBe(true);
+  expect(region.contains(range.endContainer)).toBe(true);
+  for (const text of included) expect(selection!.toString()).toContain(text);
+  for (const text of excluded) expect(selection!.toString()).not.toContain(text);
 }
 
 afterEach(() => window.getSelection()?.removeAllRanges());
@@ -85,7 +155,7 @@ describe("context-sensitive select-all", () => {
     host.remove();
   });
 
-  it("does not let an owning list claim shortcuts from a dialog", () => {
+  it("consumes select-all from non-editable dialog chrome", () => {
     const dialog = document.createElement("dialog");
     dialog.className = "owned-list";
     const button = document.createElement("button");
@@ -100,7 +170,7 @@ describe("context-sensitive select-all", () => {
       new KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true, composed: true }),
     );
 
-    expect(context).toBe("native");
+    expect(context).toBe("consume");
     dialog.remove();
   });
 
@@ -165,22 +235,43 @@ describe("context-sensitive select-all", () => {
     expect(copied).toBe(LONG_BODY);
   });
 
-  it("keeps URL and header text selection out of traffic select-all", async () => {
+  it("bounds URL selection to the marked URL text", async () => {
     const onSelectAll = vi.fn();
     const screen = await render(<Harness onSelectAll={onSelectAll} />);
-    const list = screen.getByRole("listbox");
-    (list.element() as HTMLElement).focus();
+    const content = screen.getByTestId("request-url");
+    await content.click();
+    await userEvent.keyboard("{Control>}a{/Control}");
 
-    for (const testId of ["request-url", "response-headers"]) {
-      const content = screen.getByTestId(testId).element();
-      const range = document.createRange();
-      range.selectNodeContents(content);
-      const selection = window.getSelection();
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-      await userEvent.keyboard("{Control>}a{/Control}");
-    }
+    expect(onSelectAll).not.toHaveBeenCalled();
+    expectSelectionInside(content.element(), ["https://example.com/api/items"], ["GET", "Filter"]);
+  });
 
+  it("selects only the clicked request or response header block", async () => {
+    const onSelectAll = vi.fn();
+    const screen = await render(<InspectorHarness onSelectAll={onSelectAll} />);
+
+    const responseValue = screen.getByText("response-secret");
+    await responseValue.click();
+    await userEvent.keyboard("{Control>}a{/Control}");
+    const responseRegion = responseValue.element().closest('[data-select-all="region"]');
+    expect(responseRegion).not.toBeNull();
+    expectSelectionInside(
+      responseRegion!,
+      ["x-response-token", "response-secret", "x-response-trace", "response-trace-value"],
+      ["https://example.com/", "x-request-token", "Response", "Copy"],
+    );
+
+    await screen.getByRole("button", { name: "Request" }).click();
+    const requestValue = screen.getByText("request-secret");
+    await requestValue.click();
+    await userEvent.keyboard("{Control>}a{/Control}");
+    const requestRegion = requestValue.element().closest('[data-select-all="region"]');
+    expect(requestRegion).not.toBeNull();
+    expectSelectionInside(
+      requestRegion!,
+      ["x-request-token", "request-secret", "x-request-trace", "request-trace-value"],
+      ["https://example.com/", "x-response-token", "Request", "Copy"],
+    );
     expect(onSelectAll).not.toHaveBeenCalled();
   });
 
@@ -193,12 +284,27 @@ describe("context-sensitive select-all", () => {
     expect(onSelectAll).toHaveBeenCalledOnce();
   });
 
-  it("does not route select-all from an unrelated control to the list", async () => {
+  it("consumes select-all from app chrome without selecting the page", async () => {
     const onSelectAll = vi.fn();
     const screen = await render(<Harness onSelectAll={onSelectAll} />);
     await screen.getByRole("button", { name: "Unrelated action" }).click();
+    window.getSelection()?.removeAllRanges();
+    let defaultPrevented = false;
+    const observe = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.key.toLowerCase() === "a") {
+        defaultPrevented = event.defaultPrevented;
+      }
+    };
+    window.addEventListener("keydown", observe);
 
-    await userEvent.keyboard("{Control>}a{/Control}");
+    try {
+      await userEvent.keyboard("{Control>}a{/Control}");
+    } finally {
+      window.removeEventListener("keydown", observe);
+    }
+    expect(defaultPrevented).toBe(true);
+    expect(window.getSelection()?.rangeCount).toBe(0);
+    expect(window.getSelection()?.toString()).toBe("");
     expect(onSelectAll).not.toHaveBeenCalled();
   });
 });

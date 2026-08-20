@@ -208,6 +208,7 @@ export function ComparePane(props: ComparePaneProps) {
         <div
           ref={parentRef}
           className="compare-list"
+          data-select-all="list"
           tabIndex={0}
           role="listbox"
           aria-label={title}

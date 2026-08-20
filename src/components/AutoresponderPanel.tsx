@@ -1095,6 +1095,7 @@ export function VirtualRuleList({
     <div
       ref={scrollRef}
       className="rule-list-viewport"
+      data-select-all="list"
       tabIndex={0}
       role="listbox"
       aria-multiselectable

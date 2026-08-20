@@ -625,7 +625,7 @@ function KvTable({ label, rows }: { label: string; rows: KV[] }) {
       <div className="kv-label">
         {label} <span className="muted">· {rows.length}</span>
       </div>
-      <div className="headers">
+      <div className="headers" data-select-all="region">
         {rows.map((r, i) => (
           <div className="hrow" key={`${r.key}-${i}`}>
             <span className="hkey">{r.key}</span>
@@ -646,7 +646,7 @@ function MessageHeaders({ headers, find }: { headers: [string, string][]; find: 
   }, [find.open, headerActiveRow, query]);
 
   return (
-    <div className="headers">
+    <div className="headers" data-select-all="region">
       {headers.map(([k, v], i) => {
         const active = i === headerActiveRow;
         const kOcc = active && headerActiveField === 0 ? headerActiveOcc : -1;
@@ -733,7 +733,7 @@ function MessageBody({
 }) {
   if (msg.size === 0) {
     return (
-      <pre className="body" data-select-all="native">
+      <pre className="body" data-select-all="region">
         <span className="muted">(empty)</span>
       </pre>
     );
@@ -770,7 +770,7 @@ function MetaPanel({
   style?: CSSProperties;
 }) {
   return (
-    <div className="meta-scroll" style={style} data-select-all="native">
+    <div className="meta-scroll" style={style}>
       <KvTable label="Query string" rows={query} />
       <KvTable label={side === "request" ? "Cookies" : "Set-Cookie"} rows={cookies} />
       <div className="kv-block">
@@ -1211,8 +1211,8 @@ function RequestHead({
           </Button>
         )}
       </div>
-      <div className="req-url" data-select-all="native">
-        <span className="url-text">
+      <div className="req-url">
+        <span className="url-text" data-select-all="region">
           {urlQuery ? highlight(url, urlQuery, find.urlActive, caseSensitive) : url}
         </span>
         <div className="url-actions">

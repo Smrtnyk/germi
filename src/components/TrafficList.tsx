@@ -761,6 +761,7 @@ function FlowScroll({
     <div className="flow-scroll-area">
       <div
         className="flow-scroll"
+        data-select-all="list"
         ref={parentRef}
         tabIndex={0}
         onKeyDown={moveSelection}
