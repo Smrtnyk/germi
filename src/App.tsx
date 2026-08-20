@@ -45,6 +45,7 @@ import { Shortcuts } from "./components/Shortcuts";
 import { Button } from "./components/ui/Button";
 import { ToastHost, ToastProvider } from "./toast";
 import { handleClearTrafficShortcut } from "./trafficShortcuts";
+import { selectAllContext } from "./selectAllContext";
 
 type AppStateValue = ReturnType<typeof useAppState>;
 
@@ -284,9 +285,11 @@ function handleModShortcut(
     )
   )
     return;
-  if (k === "a" && !isTyping(e.target)) {
-    e.preventDefault();
-    s.selectAllVisible();
+  if (k === "a") {
+    if (selectAllContext(e, ".flow-scroll") === "list") {
+      e.preventDefault();
+      s.selectAllVisible();
+    }
     return;
   }
   // Undo/redo — pass through to CodeMirror / inputs when one is focused so they

@@ -1,4 +1,5 @@
 import { isTypingTarget } from "./hotkey";
+import { selectAllContext } from "./selectAllContext";
 
 // Window-level keyboard model for the compare window (issue #86 / #104), kept
 // pure and IPC-free so it node-tests like `shortcuts.ts`. `useCompareKeys` in
@@ -29,7 +30,7 @@ export function handleCompareKeys(e: KeyboardEvent, ctx: CompareKeyActions): voi
     return;
   }
   if (ctx.diffOpen) return;
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+  if (selectAllContext(e, ".compare-list") === "list") {
     e.preventDefault();
     ctx.selectAllActive();
     return;
