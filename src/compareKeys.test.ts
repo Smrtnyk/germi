@@ -29,10 +29,16 @@ function keyEvent(init: Partial<KeyboardEvent> & { key: string }): KeyboardEvent
   } as unknown as KeyboardEvent;
 }
 
+function compareListTarget(): HTMLElement {
+  return {
+    closest: (selector: string) => (selector === ".compare-list" ? ({} as Element) : null),
+  } as unknown as HTMLElement;
+}
+
 describe("select-all (issue #104)", () => {
   it("marks every visible row of the active pane on Ctrl+A and blocks text selection", () => {
     const ctx = actions();
-    const e = keyEvent({ key: "a", ctrlKey: true });
+    const e = keyEvent({ key: "a", ctrlKey: true, target: compareListTarget() });
     handleCompareKeys(e, ctx);
     expect(ctx.selectAllActive).toHaveBeenCalledOnce();
     expect(e.preventDefault).toHaveBeenCalledOnce();
@@ -40,13 +46,16 @@ describe("select-all (issue #104)", () => {
 
   it("also fires on ⌘+A for macOS", () => {
     const ctx = actions();
-    handleCompareKeys(keyEvent({ key: "a", metaKey: true }), ctx);
+    handleCompareKeys(keyEvent({ key: "a", metaKey: true, target: compareListTarget() }), ctx);
     expect(ctx.selectAllActive).toHaveBeenCalledOnce();
   });
 
   it("is case-insensitive so a shifted 'A' still selects all", () => {
     const ctx = actions();
-    handleCompareKeys(keyEvent({ key: "A", ctrlKey: true, shiftKey: true }), ctx);
+    handleCompareKeys(
+      keyEvent({ key: "A", ctrlKey: true, shiftKey: true, target: compareListTarget() }),
+      ctx,
+    );
     expect(ctx.selectAllActive).toHaveBeenCalledOnce();
   });
 
@@ -61,6 +70,18 @@ describe("select-all (issue #104)", () => {
   it("leaves Ctrl+A to the browser while the diff is open so the diff text is selectable", () => {
     const ctx = actions({ diffOpen: true });
     const e = keyEvent({ key: "a", ctrlKey: true });
+    handleCompareKeys(e, ctx);
+    expect(ctx.selectAllActive).not.toHaveBeenCalled();
+    expect(e.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("does not select requests from an unrelated non-editable pane", () => {
+    const ctx = actions();
+    const e = keyEvent({
+      key: "a",
+      ctrlKey: true,
+      target: { closest: () => null } as unknown as HTMLElement,
+    });
     handleCompareKeys(e, ctx);
     expect(ctx.selectAllActive).not.toHaveBeenCalled();
     expect(e.preventDefault).not.toHaveBeenCalled();

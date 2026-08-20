@@ -32,7 +32,10 @@ function buildGroups(b: Bindings): { title: string; rows: { keys: string; desc: 
         { keys: "F3   ·   Shift + F3", desc: "Next / previous find match" },
         { keys: "↑ ↓   ·   j k", desc: "Move selection" },
         { keys: "Shift + ↑ / ↓", desc: "Extend selection" },
-        { keys: "Ctrl / ⌘ A", desc: "Select all (filtered) flows" },
+        {
+          keys: "Ctrl / ⌘ A",
+          desc: "Select all (filtered) flows when the traffic list is focused",
+        },
         { keys: "Ctrl / ⌘ + click", desc: "Add / remove a row from selection" },
         { keys: "Home / End", desc: "Jump to first / last flow" },
         { keys: "Esc", desc: "Clear selection" },

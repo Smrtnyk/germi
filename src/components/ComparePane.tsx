@@ -130,6 +130,8 @@ function PaneRow({
   return (
     <div
       className={rowClass(f, selection, hit, tint)}
+      role="option"
+      aria-selected={selection.selectedIds.has(f.id)}
       style={style}
       onMouseDown={(e) => {
         if (e.shiftKey) e.preventDefault();
@@ -203,7 +205,15 @@ export function ComparePane(props: ComparePaneProps) {
           {total > 0 ? "Nothing matches the filter" : emptyHint}
         </div>
       ) : (
-        <div ref={parentRef} className="compare-list">
+        <div
+          ref={parentRef}
+          className="compare-list"
+          data-select-all="list"
+          tabIndex={0}
+          role="listbox"
+          aria-label={title}
+          aria-multiselectable
+        >
           <div className="compare-canvas" style={{ height: virtualizer.getTotalSize() }}>
             {virtualizer.getVirtualItems().map((item) => {
               const f = rows[item.index];
@@ -214,7 +224,10 @@ export function ComparePane(props: ComparePaneProps) {
                   selection={props.selection}
                   match={props.matches?.get(f.id)}
                   tint={props.tint}
-                  onRowClick={props.onRowClick}
+                  onRowClick={(id, event) => {
+                    props.onRowClick(id, event);
+                    parentRef.current?.focus({ preventScroll: true });
+                  }}
                   onRowMove={props.onRowMove}
                   moveHint={props.moveHint}
                   style={{ transform: `translateY(${item.start}px)`, height: item.size }}

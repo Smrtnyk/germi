@@ -47,6 +47,7 @@ import { mapRemoteWarnings } from "../mapRemote";
 import { ruleRowParts, type RuleRowParts } from "../ruleRow";
 import type { AutoLayout } from "../appState";
 import { useResizable } from "../useResizable";
+import { selectAllContext } from "../selectAllContext";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { GeneralRulesImportDialog } from "./GeneralRulesImportDialog";
@@ -1014,7 +1015,7 @@ function RuleList({
 
 /** Ctrl/⌘+A, Delete and Escape act on the focused rule list (issue #106).
  *  stopPropagation shields them from the window-level shortcut handler, which
- *  would otherwise route Ctrl+A to the traffic list's select-all. */
+ *  would otherwise also inspect the event. */
 function handleRuleListKeys(
   e: ReactKeyboardEvent,
   b: Pick<
@@ -1022,7 +1023,7 @@ function handleRuleListKeys(
     "selectedIds" | "onSelectAll" | "onDeleteSelected" | "onClearSelection"
   >,
 ): void {
-  if ((e.ctrlKey || e.metaKey) && (e.key === "a" || e.key === "A")) {
+  if (selectAllContext(e.nativeEvent, e.currentTarget) === "list") {
     e.preventDefault();
     e.stopPropagation();
     b.onSelectAll();
@@ -1094,6 +1095,7 @@ export function VirtualRuleList({
     <div
       ref={scrollRef}
       className="rule-list-viewport"
+      data-select-all="list"
       tabIndex={0}
       role="listbox"
       aria-multiselectable

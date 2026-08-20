@@ -23,6 +23,7 @@ import { useResizable } from "../useResizable";
 import { headersToText, parseCookies, parseQuery, type KV } from "../curl";
 import { rawMessage, requestLine, statusLine } from "../rawHttp";
 import { flowDetailUrl } from "../flowUrl";
+import { selectAllContext } from "../selectAllContext";
 import { MaximizedOverlay } from "./MaximizedOverlay";
 import {
   IconArrowDown,
@@ -342,6 +343,102 @@ function VLine({
 
 const NO_COUNT = () => {};
 
+function useFullTextSelection(text: string) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const fullSelection = useRef(false);
+  const clear = useCallback(() => {
+    fullSelection.current = false;
+  }, []);
+
+  useEffect(clear, [clear, text]);
+
+  const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (selectAllContext(event.nativeEvent, event.currentTarget) !== "native") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const root = rootRef.current;
+    const selection = window.getSelection();
+    if (!root || !selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(root);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    fullSelection.current = true;
+  }, []);
+
+  const onCopy = useCallback(
+    (event: React.ClipboardEvent<HTMLDivElement>) => {
+      if (!fullSelection.current) return;
+      event.preventDefault();
+      event.clipboardData.setData("text/plain", text);
+    },
+    [text],
+  );
+
+  return { rootRef, clear, onKeyDown, onCopy };
+}
+
+interface VirtualTextViewportProps {
+  rows: string[];
+  hex?: boolean;
+  wrap?: boolean;
+  query: string;
+  caseSensitive: boolean;
+  activeLine: number;
+  activeOcc: number;
+  parentRef: React.RefObject<HTMLDivElement | null>;
+  virtualizer: Virtualizer;
+  selection: ReturnType<typeof useFullTextSelection>;
+}
+
+function VirtualTextViewport({
+  rows,
+  hex,
+  wrap,
+  query,
+  caseSensitive,
+  activeLine,
+  activeOcc,
+  parentRef,
+  virtualizer,
+  selection,
+}: VirtualTextViewportProps) {
+  return (
+    <div
+      ref={selection.rootRef}
+      className={`vtext ${hex ? "hex" : ""} ${wrap ? "wrap" : ""}`}
+      data-select-all="native"
+      tabIndex={0}
+      role="region"
+      aria-label="Body content"
+      onPointerDown={selection.clear}
+      onBlur={selection.clear}
+      onKeyDown={selection.onKeyDown}
+      onCopy={selection.onCopy}
+    >
+      <div ref={parentRef} className="vtext-scroll">
+        <div className="vtext-canvas" style={{ height: virtualizer.getTotalSize() }}>
+          {virtualizer.getVirtualItems().map((item) => (
+            <VLine
+              key={item.index}
+              line={rows[item.index]}
+              index={item.index}
+              start={item.start}
+              size={item.size}
+              query={query}
+              caseSensitive={caseSensitive}
+              wrap={wrap}
+              activeLine={activeLine}
+              activeOcc={activeOcc}
+              measureElement={virtualizer.measureElement}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Virtualized text viewer driven by the lifted inspector find (when present). */
 export function VirtualText({
   text,
@@ -356,6 +453,7 @@ export function VirtualText({
 }) {
   const rows = useMemo(() => toRows(text), [text]);
   const parentRef = useRef<HTMLDivElement>(null);
+  const fullTextSelection = useFullTextSelection(text);
   const query = find && (find.scope === "all" || find.scope === "body") ? find.query : "";
   const caseSensitive = !!find && find.caseSensitive;
   const bodyActive = !!find && find.bodyActive >= 0;
@@ -381,27 +479,18 @@ export function VirtualText({
   );
 
   return (
-    <div className={`vtext ${hex ? "hex" : ""} ${wrap ? "wrap" : ""}`}>
-      <div ref={parentRef} className="vtext-scroll">
-        <div className="vtext-canvas" style={{ height: virtualizer.getTotalSize() }}>
-          {virtualizer.getVirtualItems().map((item) => (
-            <VLine
-              key={item.index}
-              line={rows[item.index]}
-              index={item.index}
-              start={item.start}
-              size={item.size}
-              query={query}
-              caseSensitive={caseSensitive}
-              wrap={wrap}
-              activeLine={activeLine}
-              activeOcc={activeOcc}
-              measureElement={virtualizer.measureElement}
-            />
-          ))}
-        </div>
-      </div>
-    </div>
+    <VirtualTextViewport
+      rows={rows}
+      hex={hex}
+      wrap={wrap}
+      query={query}
+      caseSensitive={caseSensitive}
+      activeLine={activeLine}
+      activeOcc={activeOcc}
+      parentRef={parentRef}
+      virtualizer={virtualizer}
+      selection={fullTextSelection}
+    />
   );
 }
 
@@ -536,7 +625,7 @@ function KvTable({ label, rows }: { label: string; rows: KV[] }) {
       <div className="kv-label">
         {label} <span className="muted">· {rows.length}</span>
       </div>
-      <div className="headers">
+      <div className="headers" data-select-all="region">
         {rows.map((r, i) => (
           <div className="hrow" key={`${r.key}-${i}`}>
             <span className="hkey">{r.key}</span>
@@ -557,7 +646,7 @@ function MessageHeaders({ headers, find }: { headers: [string, string][]; find: 
   }, [find.open, headerActiveRow, query]);
 
   return (
-    <div className="headers">
+    <div className="headers" data-select-all="region">
       {headers.map(([k, v], i) => {
         const active = i === headerActiveRow;
         const kOcc = active && headerActiveField === 0 ? headerActiveOcc : -1;
@@ -644,7 +733,7 @@ function MessageBody({
 }) {
   if (msg.size === 0) {
     return (
-      <pre className="body">
+      <pre className="body" data-select-all="region">
         <span className="muted">(empty)</span>
       </pre>
     );
@@ -1123,7 +1212,7 @@ function RequestHead({
         )}
       </div>
       <div className="req-url">
-        <span className="url-text">
+        <span className="url-text" data-select-all="region">
           {urlQuery ? highlight(url, urlQuery, find.urlActive, caseSensitive) : url}
         </span>
         <div className="url-actions">
