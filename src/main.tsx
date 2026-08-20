@@ -5,6 +5,7 @@ import { App } from "./App";
 import { CompareWindow } from "./components/CompareWindow";
 import { RuleDetailWindow } from "./components/RuleDetailWindow";
 import { ScriptsWindow } from "./components/ScriptsWindow";
+import { installDefaultContextMenuBlocker } from "./contextMenuPolicy";
 import { installContextualSelectAll } from "./selectAllContext";
 import { initHighlightColorSync } from "./themeSync";
 import "./styles.css";
@@ -29,6 +30,7 @@ function root(): React.ReactElement {
 }
 
 function Root(): React.ReactElement {
+  React.useEffect(() => installDefaultContextMenuBlocker(), []);
   React.useEffect(() => installContextualSelectAll(), []);
   return root();
 }
