@@ -1,6 +1,7 @@
 export const FLOW_DRAG_MIME = "application/x-germi-flows";
 export const RULE_DRAG_MIME = "application/x-germi-rule";
 export const COLOR_DRAG_MIME = "application/x-germi-color";
+export const COLUMN_DRAG_MIME = "application/x-germi-column";
 
 /** Capture formats we accept as a drag-dropped file (issue #100), matching the
  *  native picker's filter — HAR and Fiddler SAZ. */
@@ -60,4 +61,8 @@ export function hasFlowDrag(types: readonly string[]): boolean {
  *  (e.g. dropped from an external color tool) — parsing decides on drop. */
 export function hasColorDrag(types: readonly string[]): boolean {
   return types.includes(COLOR_DRAG_MIME) || types.includes("text/plain");
+}
+
+export function hasColumnDrag(types: readonly string[]): boolean {
+  return types.includes(COLUMN_DRAG_MIME);
 }

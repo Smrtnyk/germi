@@ -3,10 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   captureExtFromName,
   COLOR_DRAG_MIME,
+  COLUMN_DRAG_MIME,
   decodeFlowIds,
   dragFlowIds,
   encodeFlowIds,
   FLOW_DRAG_MIME,
+  hasColumnDrag,
   hasFileDrag,
   hasFlowDrag,
   RULE_DRAG_MIME,
@@ -71,17 +73,28 @@ describe("hasFlowDrag", () => {
   });
 });
 
+describe("hasColumnDrag", () => {
+  it("accepts only the Columns Settings reorder MIME type", () => {
+    expect(hasColumnDrag([COLUMN_DRAG_MIME])).toBe(true);
+    expect(hasColumnDrag(["text/plain", COLUMN_DRAG_MIME])).toBe(true);
+    expect(hasColumnDrag([])).toBe(false);
+    expect(hasColumnDrag([FLOW_DRAG_MIME])).toBe(false);
+    expect(hasColumnDrag([RULE_DRAG_MIME])).toBe(false);
+  });
+});
+
 describe("hasFileDrag", () => {
   it("detects an OS file drag by the browser's synthetic 'Files' type", () => {
     expect(hasFileDrag(["Files"])).toBe(true);
     expect(hasFileDrag(["Files", "text/plain"])).toBe(true);
   });
 
-  it("ignores the in-app flow / rule / colour drags (no 'Files' type)", () => {
+  it("ignores the in-app flow / rule / colour / column drags (no 'Files' type)", () => {
     expect(hasFileDrag([])).toBe(false);
     expect(hasFileDrag([FLOW_DRAG_MIME])).toBe(false);
     expect(hasFileDrag([RULE_DRAG_MIME])).toBe(false);
     expect(hasFileDrag([COLOR_DRAG_MIME, "text/plain"])).toBe(false);
+    expect(hasFileDrag([COLUMN_DRAG_MIME])).toBe(false);
   });
 });
 
