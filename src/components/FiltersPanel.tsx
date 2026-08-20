@@ -31,7 +31,7 @@ function CountBadge({ count }: { count: number | null }) {
       className="sf-count"
       title={
         count === null
-          ? "No live count — body:/header: terms need a backend scan"
+          ? "No live count — body:/header:/cookie: terms need a backend scan"
           : `${count} matching request(s)`
       }
     >
@@ -52,7 +52,7 @@ function SavedFilterEditor({
       <input
         className="sf-query"
         value={f.query}
-        placeholder="host: path: status:4xx body:… — empty matches everything"
+        placeholder="host: path: status:4xx body:… cookie:… — empty matches everything"
         aria-label="Filter query"
         onChange={(e) => onUpdate(f.id, { query: e.target.value })}
       />
@@ -81,8 +81,8 @@ function SavedFilterEditor({
       </div>
       {hasContentTerms(f.query) && (
         <p className="sf-note">
-          body:/header: terms are honored by <strong>only</strong> (full scan) — row highlights skip
-          them.
+          body:/header:/cookie: terms are honored by <strong>only</strong> (full scan) — row
+          highlights skip them.
         </p>
       )}
     </div>
@@ -90,7 +90,7 @@ function SavedFilterEditor({
 }
 
 /** The highlight toggle, disabled for filters the frontend can't evaluate live
- *  (body:/header: terms need a backend scan) so a lit-but-inert toggle never
+ *  (body:/header:/cookie: terms need a backend scan) so a lit-but-inert toggle never
  *  suggests tinting that will not happen. */
 function HighlightToggle({
   f,
@@ -108,7 +108,7 @@ function HighlightToggle({
       title={
         highlightable
           ? "Tint matching rows with this filter's color"
-          : "Highlights skip body:/header: filters — use only to apply them via a full scan"
+          : "Highlights skip body:/header:/cookie: filters — use only to apply them via a full scan"
       }
     >
       highlight

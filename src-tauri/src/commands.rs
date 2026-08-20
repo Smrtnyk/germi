@@ -1156,6 +1156,23 @@ pub async fn search_headers(
     .map_err(|e| format!("header search task failed: {e}"))
 }
 
+/// Cookie search: match parsed request Cookie or response Set-Cookie pairs.
+#[tauri::command]
+pub async fn search_cookies(
+    state: State<'_, AppState>,
+    pattern: String,
+    side: SearchSide,
+    regex: bool,
+    candidates: Option<Vec<String>>,
+) -> Result<Vec<String>, String> {
+    let controller = state.controller.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        controller.search_cookies(&pattern, side, regex, candidates.as_deref())
+    })
+    .await
+    .map_err(|e| format!("cookie search task failed: {e}"))
+}
+
 /// Deep rule search within one scenario: ids of rules whose `scope` fields match.
 #[tauri::command]
 pub fn search_rules(

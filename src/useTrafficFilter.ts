@@ -9,14 +9,19 @@ import type { FlowSummary, ResourceKind } from "./types";
 
 type SetError = (value: string | null) => void;
 
-async function runContentSearch(
+export async function runContentSearch(
   contentTerms: ContentTerm[],
   seedIds: string[],
   isCancelled: () => boolean,
 ): Promise<string[] | null> {
   let ids = seedIds;
   for (const ct of contentTerms) {
-    const search = ct.field === "headers" ? api.searchHeaders : api.searchBodies;
+    const search =
+      ct.field === "headers"
+        ? api.searchHeaders
+        : ct.field === "cookies"
+          ? api.searchCookies
+          : api.searchBodies;
     const result = await search(ct.value, ct.side, ct.regex, ids);
     if (isCancelled()) return null;
     ids = ct.neg ? difference(ids, result) : intersection(ids, result);
@@ -59,7 +64,7 @@ export interface FilterMatch {
 
 /**
  * The full match pipeline for one filter (query + chip sets): instant summary
- * matching on the frontend plus the backend scan for body:/header: terms.
+ * matching on the frontend plus the backend scan for body:/header:/cookie: terms.
  * Shared by the filter bar and the solo'd saved filter (issue #90) —
  * `kinds`/`statuses` must be referentially stable while unchanged, or the
  * content-search effect refires on every render.

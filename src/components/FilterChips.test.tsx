@@ -74,6 +74,22 @@ describe("FilterChips", () => {
     expect(onFilterChange).toHaveBeenCalledWith("bar");
   });
 
+  it("keeps a quoted cookie pattern in one removable pill", async () => {
+    const onFilterChange = vi.fn();
+    const screen = await render(
+      <FilterChips
+        {...makeProps({
+          filter: 'req-cookie:"prefs=hello world" host:api',
+          onFilterChange,
+        })}
+      />,
+    );
+    const cookie = screen.getByText('req-cookie:"prefs=hello world"');
+    await expect.element(cookie).toBeVisible();
+    await cookie.click();
+    expect(onFilterChange).toHaveBeenCalledWith("host:api");
+  });
+
   it("hides the clear button and match count when no filter is active", async () => {
     const screen = await render(<FilterChips {...makeProps({ matchCount: null, total: 7 })} />);
     const clear = screen.getByRole("button", { name: "Clear filters" });

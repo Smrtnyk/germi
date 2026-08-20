@@ -122,13 +122,40 @@ pub struct MockBatch {
     pub rules: Vec<Rule>,
 }
 
-/// Which side(s) of a flow `search_bodies` scans.
+/// Which side(s) of a flow a content search scans.
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchSide {
     Request,
     Response,
     Either,
+}
+
+fn cookie_pair(raw: &str) -> Option<String> {
+    let (name, value) = raw.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(format!("{name}={}", value.trim()))
+}
+
+fn cookie_pairs(headers: &[(String, String)], side: SearchSide) -> Vec<String> {
+    let mut pairs = Vec::new();
+    for (name, value) in headers {
+        match side {
+            SearchSide::Request if name.eq_ignore_ascii_case("cookie") => {
+                pairs.extend(value.split(';').filter_map(cookie_pair));
+            }
+            SearchSide::Response if name.eq_ignore_ascii_case("set-cookie") => {
+                if let Some(pair) = value.split(';').next().and_then(cookie_pair) {
+                    pairs.push(pair);
+                }
+            }
+            _ => {}
+        }
+    }
+    pairs
 }
 
 /// A live proxy: its bound address, a shutdown signal, and the serving task's
@@ -536,7 +563,7 @@ impl ProxyController {
         regex: bool,
         candidates: Option<&[String]>,
     ) -> Vec<String> {
-        self.search_messages(pattern, side, regex, candidates, |body, headers| {
+        self.search_messages(pattern, side, regex, candidates, |_side, body, headers| {
             if !crate::flow::is_textual(headers) {
                 return None; // skip binary blobs (images/fonts/media)
             }
@@ -544,7 +571,7 @@ impl ProxyController {
                 Some((decoded, _truncated)) => decoded,
                 None => body.to_vec(),
             };
-            Some(String::from_utf8_lossy(&bytes).into_owned())
+            Some(vec![String::from_utf8_lossy(&bytes).into_owned()])
         })
     }
 
@@ -558,15 +585,36 @@ impl ProxyController {
         regex: bool,
         candidates: Option<&[String]>,
     ) -> Vec<String> {
-        self.search_messages(pattern, side, regex, candidates, |_body, headers| {
-            Some(
-                headers
-                    .iter()
-                    .map(|(k, v)| format!("{k}: {v}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
+        self.search_messages(pattern, side, regex, candidates, |_side, _body, headers| {
+            Some(vec![headers
+                .iter()
+                .map(|(k, v)| format!("{k}: {v}"))
+                .collect::<Vec<_>>()
+                .join("\n")])
         })
+    }
+
+    /// Scan parsed cookie `name=value` pairs. Request searches inspect every
+    /// Cookie header; response searches inspect only the leading pair of every
+    /// Set-Cookie header, never its attributes. Matching follows body/header
+    /// search semantics: case-insensitive plain substring or regex.
+    pub fn search_cookies(
+        &self,
+        pattern: &str,
+        side: SearchSide,
+        regex: bool,
+        candidates: Option<&[String]>,
+    ) -> Vec<String> {
+        self.search_messages(
+            pattern,
+            side,
+            regex,
+            candidates,
+            |message_side, _body, headers| {
+                let pairs = cookie_pairs(headers, message_side);
+                (!pairs.is_empty()).then_some(pairs)
+            },
+        )
     }
 
     /// Whether two flows' bodies are byte-identical, per side, for the compare
@@ -595,10 +643,11 @@ impl ProxyController {
         })
     }
 
-    /// Shared scan core for body/header content search. `extract` projects a
-    /// message (body + headers) to the searchable text, or `None` to skip that
-    /// message (e.g. a binary body). Per flow the request side wins first, then
-    /// the response, matching the original `search_bodies` short-circuit.
+    /// Shared scan core for body/header/cookie content search. `extract`
+    /// projects a message (body + headers) to one or more searchable text units,
+    /// or `None` to skip that message (e.g. a binary body). Per flow the request
+    /// side wins first, then the response, matching the original `search_bodies`
+    /// short-circuit.
     /// Scans a snapshot: flows are cloned out under the store lock (cheap —
     /// `Bytes` bodies are refcounted) and decoded/matched with it RELEASED, so a
     /// big search never stalls live capture.
@@ -608,7 +657,7 @@ impl ProxyController {
         side: SearchSide,
         regex: bool,
         candidates: Option<&[String]>,
-        extract: impl Fn(&[u8], &[(String, String)]) -> Option<String>,
+        extract: impl Fn(SearchSide, &[u8], &[(String, String)]) -> Option<Vec<String>>,
     ) -> Vec<String> {
         if pattern.is_empty() {
             return candidates.map(|c| c.to_vec()).unwrap_or_default();
@@ -636,27 +685,31 @@ impl ProxyController {
             }
         };
 
-        let hit = |body: &[u8], headers: &[(String, String)]| -> bool {
-            let Some(text) = extract(body, headers) else {
+        let hit = |message_side: SearchSide, body: &[u8], headers: &[(String, String)]| -> bool {
+            let Some(texts) = extract(message_side, body, headers) else {
                 return false;
             };
-            match &re {
+            texts.into_iter().any(|text| match &re {
                 Some(re) => re.is_match(&text),
                 None => text.to_lowercase().contains(&needle),
-            }
+            })
         };
 
         snapshot
             .into_iter()
             .filter(|flow| {
                 let req = matches!(side, SearchSide::Request | SearchSide::Either)
-                    && hit(&flow.request.body, &flow.request.headers);
+                    && hit(
+                        SearchSide::Request,
+                        &flow.request.body,
+                        &flow.request.headers,
+                    );
                 let resp = !req
                     && matches!(side, SearchSide::Response | SearchSide::Either)
                     && flow
                         .response
                         .as_ref()
-                        .is_some_and(|r| hit(&r.body, &r.headers));
+                        .is_some_and(|r| hit(SearchSide::Response, &r.body, &r.headers));
                 req || resp
             })
             .map(|flow| flow.id)
@@ -4653,6 +4706,171 @@ mod tests {
     }
 
     #[test]
+    fn search_cookies_scopes_request_and_response_pairs() {
+        let c = controller();
+        c.shared.record_new(flow_with_headers(
+            "both",
+            vec![("Cookie", "request-id=req-7")],
+            vec![("Set-Cookie", "response-id=resp-9; Path=/")],
+            b"body",
+        ));
+        c.shared.record_new(flow_with_headers(
+            "request-only",
+            vec![("Cookie", "request-id=req-7")],
+            vec![],
+            b"body",
+        ));
+        c.shared.record_new(flow_with_headers(
+            "response-only",
+            vec![],
+            vec![("Set-Cookie", "response-id=resp-9; Secure")],
+            b"body",
+        ));
+
+        assert_eq!(
+            c.search_cookies("request-id=req-7", SearchSide::Request, false, None),
+            vec!["both".to_string(), "request-only".to_string()]
+        );
+        assert_eq!(
+            c.search_cookies("response-id=resp-9", SearchSide::Response, false, None),
+            vec!["both".to_string(), "response-only".to_string()]
+        );
+        assert_eq!(
+            c.search_cookies("resp-9", SearchSide::Either, false, None),
+            vec!["both".to_string(), "response-only".to_string()],
+            "Either is request OR response"
+        );
+        assert_eq!(
+            c.search_cookies("id=", SearchSide::Either, false, None),
+            vec![
+                "both".to_string(),
+                "request-only".to_string(),
+                "response-only".to_string(),
+            ],
+            "Either unions request and response matches"
+        );
+
+        let request_matches =
+            c.search_cookies("request-id=req-7", SearchSide::Request, false, None);
+        assert_eq!(
+            c.search_cookies(
+                "response-id=resp-9",
+                SearchSide::Response,
+                false,
+                Some(&request_matches),
+            ),
+            vec!["both".to_string()],
+            "successive req-cookie and resp-cookie terms AND through candidates"
+        );
+    }
+
+    #[test]
+    fn search_cookies_keeps_empty_special_and_duplicate_values() {
+        let c = controller();
+        c.shared.record_new(flow_with_headers(
+            "f1",
+            vec![
+                ("Cookie", "empty=; token=a=b/c+z"),
+                ("cookie", "spaced=hello world; duplicate=first"),
+            ],
+            vec![
+                ("Set-Cookie", "duplicate=first; Path=/"),
+                ("set-cookie", "duplicate=second; HttpOnly"),
+                ("Set-Cookie", "quoted=\"a b=c\"; Secure"),
+            ],
+            b"body",
+        ));
+
+        for (pattern, side) in [
+            ("empty=", SearchSide::Request),
+            ("token=a=b/c+z", SearchSide::Request),
+            ("spaced=hello world", SearchSide::Request),
+            ("duplicate=first", SearchSide::Response),
+            ("duplicate=second", SearchSide::Response),
+            ("quoted=\"a b=c\"", SearchSide::Response),
+        ] {
+            assert_eq!(
+                c.search_cookies(pattern, side, false, None),
+                vec!["f1".to_string()],
+                "expected cookie pair {pattern:?}"
+            );
+        }
+        assert_eq!(
+            c.search_cookies("^duplicate=second$", SearchSide::Response, true, None),
+            vec!["f1".to_string()],
+            "a regex is evaluated against each duplicate cookie pair separately"
+        );
+    }
+
+    #[test]
+    fn search_cookies_omits_attributes_and_malformed_pairs() {
+        let c = controller();
+        c.shared.record_new(flow_with_headers(
+            "f1",
+            vec![("Cookie", "good=1; broken; =missing-name")],
+            vec![
+                ("Set-Cookie", "sid=abc; Path=/private; Secure"),
+                ("Set-Cookie", "broken; Domain=example.com"),
+                ("Set-Cookie", "=missing-name; SameSite=Lax"),
+            ],
+            b"body",
+        ));
+
+        for pattern in [
+            "Path=/private",
+            "Secure",
+            "Domain=example.com",
+            "SameSite=Lax",
+        ] {
+            assert!(
+                c.search_cookies(pattern, SearchSide::Response, false, None)
+                    .is_empty(),
+                "Set-Cookie attribute {pattern:?} is not a cookie pair"
+            );
+        }
+        assert!(
+            c.search_cookies("^broken$", SearchSide::Either, true, None)
+                .is_empty(),
+            "a pair without '=' is omitted"
+        );
+        assert!(
+            c.search_cookies("missing-name", SearchSide::Either, false, None)
+                .is_empty(),
+            "a pair without a name is omitted"
+        );
+        assert!(
+            c.search_cookies("(", SearchSide::Either, true, None)
+                .is_empty(),
+            "an invalid regex is a safe no-match"
+        );
+        assert_eq!(
+            c.search_headers("Path=/private", SearchSide::Response, false, None),
+            vec!["f1".to_string()],
+            "generic header search still sees the unchanged raw header table"
+        );
+    }
+
+    #[test]
+    fn search_cookies_is_case_insensitive_like_other_content_search() {
+        let c = controller();
+        c.shared.record_new(flow_with_headers(
+            "f1",
+            vec![("COOKIE", "Session=AbC")],
+            vec![("SET-COOKIE", "Token=XyZ; Path=/")],
+            b"body",
+        ));
+
+        assert_eq!(
+            c.search_cookies("session=abc", SearchSide::Request, false, None),
+            vec!["f1".to_string()]
+        );
+        assert_eq!(
+            c.search_cookies("^token=xyz$", SearchSide::Response, true, None),
+            vec!["f1".to_string()]
+        );
+    }
+
+    #[test]
     fn search_bodies_still_skips_binary() {
         let c = controller();
         c.shared.record_new(flow_with_headers(
@@ -4706,7 +4924,7 @@ mod tests {
             SearchSide::Either,
             false,
             None,
-            |body, _headers| {
+            |_side, body, _headers| {
                 // Live capture (`record_new` / `record_complete`) needs exactly
                 // this mutex: it must be acquirable while the scan decodes and
                 // matches bodies, or a big search stalls the proxy hot path.
@@ -4715,7 +4933,7 @@ mod tests {
                     "the store lock must not be held during the content scan"
                 );
                 probed.store(true, Ordering::Relaxed);
-                Some(String::from_utf8_lossy(body).into_owned())
+                Some(vec![String::from_utf8_lossy(body).into_owned()])
             },
         );
         assert!(

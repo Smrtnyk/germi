@@ -127,6 +127,7 @@ describe("hasContentTerms", () => {
   it("detects backend-scan terms and ignores summary terms", () => {
     expect(hasContentTerms("body:token")).toBe(true);
     expect(hasContentTerms("resp-header:etag host:x")).toBe(true);
+    expect(hasContentTerms("req-cookie:session=abc")).toBe(true);
     expect(hasContentTerms("host:x status:4xx")).toBe(false);
   });
 });
@@ -169,7 +170,7 @@ describe("computeFilterMatches", () => {
   });
 
   it("skips content-term filters entirely and reports no count", () => {
-    const filters = [saved({ id: "a", query: "host:api body:secret" })];
+    const filters = [saved({ id: "a", query: "host:api cookie:session=secret" })];
     const { tints, counts } = matches(flows, filters);
     expect(compileFilters(filters)).toEqual([]);
     expect(tints.size).toBe(0);

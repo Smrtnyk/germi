@@ -92,7 +92,7 @@ export function savedFilterLabel(f: SavedFilter): string {
   return parts.join(" ") || "(everything)";
 }
 
-/** body:/header: terms need a backend scan, so highlights (recomputed on every
+/** body:/header:/cookie: terms need a backend scan, so highlights (recomputed on every
  *  live batch) skip them; "only" honors them via the full search pipeline. */
 export function hasContentTerms(query: string): boolean {
   return parseFilter(query).contentTerms.length > 0;

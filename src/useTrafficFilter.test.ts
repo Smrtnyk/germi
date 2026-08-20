@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { applyScanVerdicts, mergeScan, type ScanState } from "./useTrafficFilter";
+import { parseFilter } from "./filter";
+import { api } from "./ipc";
+import { applyScanVerdicts, mergeScan, runContentSearch, type ScanState } from "./useTrafficFilter";
+
+afterEach(() => vi.restoreAllMocks());
 
 function scan(scanned: string[], matched: string[]): ScanState {
   return { scanned: new Set(scanned), matched: new Set(matched) };
@@ -27,5 +31,42 @@ describe("applyScanVerdicts", () => {
   it("treats flows the scan has not reached yet as matching", () => {
     const out = applyScanVerdicts(new Set(["1", "2", "9"]), scan(["1", "2"], ["2"]));
     expect([...out].sort()).toEqual(["2", "9"]);
+  });
+});
+
+describe("runContentSearch", () => {
+  it("ANDs request and response cookie terms on the same flow", async () => {
+    const search = vi
+      .spyOn(api, "searchCookies")
+      .mockImplementation((pattern) =>
+        Promise.resolve(
+          pattern === "request-id=req-7" ? ["both", "request-only"] : ["both", "response-only"],
+        ),
+      );
+    const terms = parseFilter(
+      "req-cookie:request-id=req-7 resp-cookie:response-id=resp-9",
+    ).contentTerms;
+
+    await expect(
+      runContentSearch(terms, ["both", "request-only", "response-only"], () => false),
+    ).resolves.toEqual(["both"]);
+    expect(search).toHaveBeenNthCalledWith(1, "request-id=req-7", "request", false, [
+      "both",
+      "request-only",
+      "response-only",
+    ]);
+    expect(search).toHaveBeenNthCalledWith(2, "response-id=resp-9", "response", false, [
+      "both",
+      "request-only",
+    ]);
+  });
+
+  it("subtracts matches for a negated cookie term", async () => {
+    vi.spyOn(api, "searchCookies").mockResolvedValue(["debug", "both"]);
+    const terms = parseFilter("-cookie:debug=true").contentTerms;
+
+    await expect(runContentSearch(terms, ["clean", "debug", "both"], () => false)).resolves.toEqual(
+      ["clean"],
+    );
   });
 });

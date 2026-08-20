@@ -102,7 +102,7 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   the open window from the new selection.
 - **Filtering** — highlights matches in place (Fiddler-style) with an `N of M` count:
   type/status chips, a token filter (`host: status:4xx kind:xhr is:imported -neg /regex/` —
-  see the `?` popover), and backend `body:` / `req-body:` / `resp-body:` content search.
+  see the `?` popover), plus backend body, header, and parsed-cookie content search.
 - **Columns** — configurable in **Settings → Columns** (show/hide, reorder, presets,
   drag-resize): a leading **request number (`#`)** to re-sort back to capture order and
   reference a request, scheme, sizes, **timing (TTFB / Time / Download)**, **Mocked-by**, an
