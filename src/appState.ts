@@ -1734,11 +1734,11 @@ function useSession(
 ) {
   const [harRulesOffer, setHarRulesOffer] = useState<ScenarioPreview[] | null>(null);
 
-  function opened(result: OpenedCapture) {
+  function opened(result: OpenedCapture, openedInViewer = viewer) {
     onOpened();
     notify("success", `Opened ${plural(result.count, "flow")}`);
     // A viewer can't edit or persist rules, so it never offers the import.
-    setHarRulesOffer(!viewer && result.embeddedRules?.length ? result.embeddedRules : null);
+    setHarRulesOffer(!openedInViewer && result.embeddedRules?.length ? result.embeddedRules : null);
   }
   async function saveSession(includeRules: boolean) {
     try {
@@ -1754,6 +1754,17 @@ function useSession(
       const result = await api.openCapture();
       if (result === null) return;
       opened(result);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+  /** Consume the native launch mailbox after startup installed the flow
+   *  subscriber. The backend owns at-most-once delivery across webview reloads. */
+  async function openLaunchCapture() {
+    try {
+      const result = await api.consumeLaunchCapture();
+      if (result === null) return;
+      opened(result.opened, result.viewer);
     } catch (e) {
       setError(String(e));
     }
@@ -1786,7 +1797,15 @@ function useSession(
   function dismissHarRules() {
     setHarRulesOffer(null);
   }
-  return { saveSession, openCapture, openDropped, harRulesOffer, applyHarRules, dismissHarRules };
+  return {
+    saveSession,
+    openCapture,
+    openLaunchCapture,
+    openDropped,
+    harRulesOffer,
+    applyHarRules,
+    dismissHarRules,
+  };
 }
 
 async function copyFlowAsCurlAction(id: string, notify: Notify, setError: SetError) {
@@ -2507,7 +2526,13 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
         setCaInfo,
         loadInitialFlows: flowStore.loadInitial,
         setError,
-      }).then(setProxyStartupReady);
+      }).then((ready) => {
+        setProxyStartupReady(ready);
+        // `loadInitialState` has completed the subscribe-then-snapshot flow
+        // handshake. Opening now cannot fall into a startup event gap, and its
+        // backend mailbox still survives an earlier frontend failure/reload.
+        void session.openLaunchCapture();
+      });
     }
     const focusTimer = window.setTimeout(() => filterInputRef.current?.focus(), 60);
     return () => clearTimeout(focusTimer);

@@ -52,6 +52,9 @@ pub struct AppState {
     /// field), held until the user confirms the offer and `apply_har_rules`
     /// imports it (issue #113).
     pub pending_har_rules: Mutex<Option<Vec<u8>>>,
+    /// Capture path supplied by the OS file association at process launch.
+    /// The frontend consumes it once after its flow subscription is ready.
+    pub launch_capture: crate::launch::PendingCapture,
     /// Standalone rules file picked by `peek_rules_import`, held until the UI
     /// either applies it directly or asks how an included General layer should
     /// be routed (issue #122).

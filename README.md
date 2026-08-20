@@ -119,9 +119,11 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   standard **HAR 1.2** archive any HTTP tool can open (bodies decoded, binary as
   base64, timings/comments/mock provenance included — a Germi-written HAR reopens
   in Germi losslessly); one **Open** loads a HAR or Fiddler SAZ, replacing the
-  current traffic (it confirms first when traffic is present). When mock rules
-  are live, Save offers to **embed them** (off by default) in a `_germiRules`
-  extension field other tools ignore — opening such a HAR in Germi offers to
+  current traffic (it confirms first when traffic is present). The Windows
+  installer also registers HAR and SAZ for **Open with…** and opens the selected
+  file automatically. When mock rules are live, Save offers to **embed them** (off
+  by default) in a `_germiRules` extension field other tools ignore — opening such
+  a HAR in Germi offers to
   import them as new scenarios, so one file shares both the traffic and the
   mocks that produced it. A rules-only export (Autoresponder → **Export rules**)
   uses the same envelope with zero entries, replacing the old `.germi-rules`
@@ -130,7 +132,9 @@ Then flip **System proxy: ON** (sets the OS proxy) or point a specific app at
   proxy-less window for inspecting saved HAR/SAZ captures *alongside* a
   capturing instance, without the two fighting over the proxy port or system proxy.
   The proxy controls and the (proxy-dependent) autoresponder are hidden and a
-  **Viewer mode** badge makes the state obvious.
+  **Viewer mode** badge makes the state obvious. If **Open with…** starts Germi
+  while the writable instance is already running, the new process opens that
+  file in viewer mode and leaves the existing instance's writable state alone.
 
 ## Limitations
 
