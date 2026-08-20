@@ -1,6 +1,7 @@
 //! Shared HTTP body decoding (Content-Encoding) used both when importing SAZ
 //! and when displaying live-captured bodies in the inspector.
 
+use std::borrow::Cow;
 use std::io::Read;
 use std::sync::LazyLock;
 
@@ -90,11 +91,19 @@ pub fn decode_body(headers: &[(String, String)], body: &[u8]) -> Option<(Vec<u8>
     if chain.is_empty() {
         return None;
     }
-    let mut data = body.to_vec();
+    decode_body_chain(&chain, body, try_decompress_checked)
+}
+
+fn decode_body_chain(
+    chain: &[String],
+    body: &[u8],
+    mut decompress: impl FnMut(&str, &[u8]) -> Option<(Vec<u8>, bool)>,
+) -> Option<(Vec<u8>, bool)> {
+    let mut data = Cow::Borrowed(body);
     let mut truncated = false;
     for enc in chain.iter().rev() {
-        let (decoded, t) = try_decompress_checked(enc, &data)?;
-        data = decoded;
+        let (decoded, t) = decompress(enc, data.as_ref())?;
+        data = Cow::Owned(decoded);
         if t {
             // A truncated layer means the inner layers can't be decoded
             // faithfully; stop and report the partial result as truncated.
@@ -102,7 +111,7 @@ pub fn decode_body(headers: &[(String, String)], body: &[u8]) -> Option<(Vec<u8>
             break;
         }
     }
-    Some((data, truncated))
+    Some((data.into_owned(), truncated))
 }
 
 /// A message body in its decoded form when a `Content-Encoding` chain decodes,
@@ -275,6 +284,20 @@ mod tests {
         assert!(!truncated);
         // No content-encoding => nothing to decode.
         assert!(decode_body(&[], b"plain").is_none());
+    }
+
+    #[test]
+    fn decode_body_first_layer_borrows_the_captured_input() {
+        let encoded = b"captured-compressed-bytes";
+        let mut calls = 0;
+        let decoded = decode_body_chain(&["gzip".to_string()], encoded, |_encoding, input| {
+            calls += 1;
+            assert_eq!(input.as_ptr(), encoded.as_ptr());
+            Some((b"decoded".to_vec(), false))
+        })
+        .expect("decode chain");
+        assert_eq!(calls, 1);
+        assert_eq!(decoded, (b"decoded".to_vec(), false));
     }
 
     #[test]

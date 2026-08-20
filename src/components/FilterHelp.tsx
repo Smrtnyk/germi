@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 
 const ROWS: { tokens: string[]; desc: string }[] = [
-  { tokens: ["host:", "path:", "method:", "scheme:"], desc: "URL parts" },
+  { tokens: ["url:", "host:", "path:", "method:", "scheme:"], desc: "URL-only and URL parts" },
   { tokens: ["status:"], desc: "404, a class (4xx), or a range (>=400, <500)" },
   { tokens: ["mime:", "kind:", "ext:"], desc: "content-type · inferred type · file extension" },
   { tokens: ["is:imported", "is:captured"], desc: "loaded from a file vs captured live" },
   { tokens: ["rule:"], desc: "matched autoresponder rule" },
   { tokens: ["larger-than:", "smaller-than:"], desc: "response size (k/m suffix)" },
   { tokens: ["slower-than:"], desc: "duration in ms" },
+  {
+    tokens: ["content:", "req-content:", "resp-content:"],
+    desc: "search headers OR decoded bodies (scans backend)",
+  },
   { tokens: ["body:", "req-body:", "resp-body:"], desc: "search body content (scans backend)" },
   {
     tokens: ["header:", "req-header:", "resp-header:"],
@@ -17,12 +21,14 @@ const ROWS: { tokens: string[]; desc: string }[] = [
     tokens: ["cookie:", "req-cookie:", "resp-cookie:"],
     desc: "search each parsed name=value pair, without attributes (case-insensitive)",
   },
-  { tokens: ["/regex/"], desc: "regular expression on the URL" },
+  { tokens: ["/regex/"], desc: "regular expression across URL, headers, and decoded bodies" },
   { tokens: ["-term"], desc: "negate any term" },
 ];
 const EXAMPLES = [
   "kind:xhr status:5xx",
   "host:api -mime:json",
+  'content:"trace id"',
+  "url:/api\\/v2/",
   "body:timeout",
   "header:authorization",
   'req-cookie:"session=abc 123"',
@@ -48,7 +54,10 @@ export function FilterHelp({ filter, onPick, inputRef }: Props) {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setOpen(false);
+      }
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -73,6 +82,7 @@ export function FilterHelp({ filter, onPick, inputRef }: Props) {
   return (
     <div className="filter-help" ref={ref}>
       <button
+        type="button"
         className="help-btn"
         aria-label="Filter syntax help"
         aria-expanded={open}
@@ -88,6 +98,10 @@ export function FilterHelp({ filter, onPick, inputRef }: Props) {
             Whitespace = AND. Click a token to insert it, or an example to try it.
           </p>
           <p className="muted small help-hint">
+            Bare terms search URL, request/response headers, and decoded bodies. Use{" "}
+            <code>url:</code> to restrict a term to the URL.
+          </p>
+          <p className="muted small help-hint">
             Quote the whole pattern after <code>:</code> when it contains spaces, for example{" "}
             <code>req-cookie:&quot;prefs=hello world&quot;</code>.
           </p>
@@ -97,7 +111,12 @@ export function FilterHelp({ filter, onPick, inputRef }: Props) {
                 <tr key={row.desc}>
                   <td>
                     {row.tokens.map((t) => (
-                      <button key={t} className="help-token" onClick={() => insertToken(t)}>
+                      <button
+                        key={t}
+                        type="button"
+                        className="help-token"
+                        onClick={() => insertToken(t)}
+                      >
                         {t}
                       </button>
                     ))}
@@ -109,7 +128,12 @@ export function FilterHelp({ filter, onPick, inputRef }: Props) {
           </table>
           <div className="help-examples">
             {EXAMPLES.map((e) => (
-              <button key={e} className="help-example" onClick={() => applyExample(e)}>
+              <button
+                key={e}
+                type="button"
+                className="help-example"
+                onClick={() => applyExample(e)}
+              >
                 {e}
               </button>
             ))}

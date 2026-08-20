@@ -2,12 +2,15 @@ import { delay } from "es-toolkit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook } from "vitest-browser-react";
 
+import { summary } from "./flowFixtures";
+import { api } from "./ipc";
 import type { SavedFilter } from "./savedFilters";
 import { useSavedFilters } from "./useSavedFilters";
 import type { FlowSummary } from "./types";
 
 const FILTERS_KEY = "germi.savedFilters";
 const NO_FLOWS: FlowSummary[] = [];
+const EMPTY_BAR = { query: "", kinds: [], statuses: [] } as const;
 const FILTERS: SavedFilter[] = [
   {
     id: "f1",
@@ -43,12 +46,13 @@ describe("useSavedFilters color preview lifecycle", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     localStorage.removeItem(FILTERS_KEY);
   });
 
   it("keeps one scoped preview and clears it when another operation takes over", async () => {
     const stored = localStorage.getItem(FILTERS_KEY);
-    const hook = await renderHook(() => useSavedFilters(NO_FLOWS, null, vi.fn()));
+    const hook = await renderHook(() => useSavedFilters(NO_FLOWS, EMPTY_BAR, vi.fn()));
     const baseTints = hook.result.current.tints;
     const basePresentations = hook.result.current.tintPresentations;
 
@@ -99,7 +103,7 @@ describe("useSavedFilters color preview lifecycle", () => {
   });
 
   it("drops the preview when its target filter disappears", async () => {
-    const hook = await renderHook(() => useSavedFilters(NO_FLOWS, null, vi.fn()));
+    const hook = await renderHook(() => useSavedFilters(NO_FLOWS, EMPTY_BAR, vi.fn()));
     hook.result.current.previewFilterColor("f1", { hex: "#112233", alphaPct: 40 });
     await vi.waitFor(() =>
       expect(filterColor(hook.result.current.filters, "f1")?.color).toBe("#112233"),
@@ -113,5 +117,48 @@ describe("useSavedFilters color preview lifecycle", () => {
         opacity: 24,
       });
     });
+  });
+
+  it("keeps legacy empty saved filters matching every row", async () => {
+    localStorage.setItem(
+      FILTERS_KEY,
+      JSON.stringify([{ ...FILTERS[0], query: "", kinds: [], statuses: [] }]),
+    );
+    const flows = [summary({ id: "one" }), summary({ id: "two" })];
+    const hook = await renderHook(() => useSavedFilters(flows, EMPTY_BAR, vi.fn()));
+
+    expect(hook.result.current.counts.get("f1")).toBe(2);
+    expect([...hook.result.current.tints.keys()]).toEqual(["one", "two"]);
+  });
+
+  it("converges saved counts and tints beyond one bounded backend batch", async () => {
+    localStorage.setItem(
+      FILTERS_KEY,
+      JSON.stringify([{ ...FILTERS[0], query: "needle", highlight: true }]),
+    );
+    vi.spyOn(api, "cancelFlowFilterSearch").mockResolvedValue();
+    const search = vi.spyOn(api, "searchFlowFilters").mockImplementation((requests) =>
+      Promise.resolve({
+        cancelled: false,
+        filters: requests.map((request) => ({ key: request.key, matched: request.candidates })),
+      }),
+    );
+    const flows = Array.from({ length: 700 }, (_, index) =>
+      summary({ id: `flow-${index}`, seq: index + 1 }),
+    );
+    const hook = await renderHook(() => useSavedFilters(flows, EMPTY_BAR, vi.fn()));
+
+    await vi.waitFor(() => {
+      expect(hook.result.current.counts.get("f1")).toBe(700);
+      expect(hook.result.current.tints.size).toBe(700);
+      expect(hook.result.current.tints.get("flow-0")?.filterId).toBe("f1");
+      expect(hook.result.current.tints.get("flow-699")?.filterId).toBe("f1");
+    });
+    expect(search.mock.calls.length).toBeGreaterThan(1);
+    for (const [requests] of search.mock.calls) {
+      expect(
+        requests.reduce((total, request) => total + request.candidates.length, 0),
+      ).toBeLessThanOrEqual(512);
+    }
   });
 });

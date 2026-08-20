@@ -29,7 +29,7 @@ import {
 import { loadBool, loadJson, loadString, persist } from "./localStore";
 import { useTrafficFilter } from "./useTrafficFilter";
 import { useSavedFilters } from "./useSavedFilters";
-import { savedFilterLabel } from "./savedFilters";
+import { savedFilterLabel, type PreparedFilterDraft } from "./savedFilters";
 import { DEFAULT_FILTER_COLOR_PRESETS } from "./filterColorPresets";
 import { backfillSeqColumn, resolveColumns, DEFAULT_COLUMNS, type ColumnDef } from "./columns";
 import { nextSort, resolveSort, sortFlows, type SortState } from "./sort";
@@ -527,6 +527,7 @@ function useFlowStore(setError: SetError, mutationQueue: OrderedTaskQueue) {
   const [tick, bump] = useReducer((n: number) => n + 1, 0);
 
   function handleFlowEvents(generation: number, events: FlowEvent[]) {
+    if (generation !== subscriptionRef.current.generation) return;
     routeSubscribedFlowEvents({
       generation,
       currentGeneration: subscriptionRef.current.generation,
@@ -1974,7 +1975,10 @@ async function copyFlowBodyAction(id: string, decode: boolean, notify: Notify, s
  *  filters" that wipes everything narrowing the list — the bar AND a solo'd
  *  saved filter (the saved list itself is untouched). */
 function useFilterActions(
-  filtering: ReturnType<typeof useTrafficFilter>,
+  filtering: ReturnType<typeof useTrafficFilter> & {
+    matchedIds: Set<string> | null;
+    searching: boolean;
+  },
   savedFilters: ReturnType<typeof useSavedFilters>,
   reveal: {
     rightCollapsed: boolean;
@@ -1987,6 +1991,22 @@ function useFilterActions(
   // hasFilter), so this can't drift from the pipeline's own notion of "active".
   const canSaveFilter = filtering.matchedIds !== null;
 
+  function revealSavedFilter(created: ReturnType<typeof savedFilters.addFilter>) {
+    if (reveal.rightCollapsed) reveal.setRightCollapsed(false);
+    reveal.setRightTab("filters");
+    notify("success", `Saved filter "${savedFilterLabel(created)}"`);
+  }
+
+  function saveFilterDraft(filter: PreparedFilterDraft) {
+    const created = savedFilters.addFilter(filter.query, filter.kinds, filter.statuses, {
+      color: filter.color,
+      opacity: filter.opacity,
+      highlight: filter.highlight,
+    });
+    revealSavedFilter(created);
+    return created;
+  }
+
   function saveCurrentFilter() {
     if (!canSaveFilter) {
       notify("info", "Type a filter or toggle some chips first");
@@ -1997,9 +2017,7 @@ function useFilterActions(
       [...filtering.typeChips],
       [...filtering.statusChips],
     );
-    if (reveal.rightCollapsed) reveal.setRightCollapsed(false);
-    reveal.setRightTab("filters");
-    notify("success", `Saved filter "${savedFilterLabel(created)}"`);
+    revealSavedFilter(created);
   }
 
   function clearAllFilters() {
@@ -2009,6 +2027,7 @@ function useFilterActions(
 
   return {
     canSaveFilter,
+    saveFilterDraft,
     saveCurrentFilter,
     clearAllFilters,
     searchBusy: filtering.searching || savedFilters.soloSearching,
@@ -2398,8 +2417,21 @@ function useTrafficWorkspace(
 ) {
   const columns = usePersistentColumns(headerColumns);
   const { sort, toggleSort, sortedFlows } = useFlowSort(flowStore.flows, columns.visibleColumns);
-  const filtering = useTrafficFilter(sortedFlows, setError);
-  const savedFilters = useSavedFilters(sortedFlows, filtering.matchedIds, setError);
+  const filterState = useTrafficFilter(sortedFlows, setError);
+  const savedFilters = useSavedFilters(
+    sortedFlows,
+    {
+      query: filterState.filter,
+      kinds: [...filterState.typeChips],
+      statuses: [...filterState.statusChips],
+    },
+    setError,
+  );
+  const filtering = {
+    ...filterState,
+    matchedIds: savedFilters.barMatchedIds,
+    searching: savedFilters.searching,
+  };
   const filterActions = useFilterActions(
     filtering,
     savedFilters,

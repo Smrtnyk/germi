@@ -2,17 +2,15 @@ import type { FlowSummary, ResourceKind } from "./types";
 
 // ---- the token filter ----
 //
-// Grammar (DevTools-flavored): whitespace-separated terms = AND. A bare word (or
-// "quoted phrase") is a case-insensitive substring over `method scheme://host
-// path`. A `/regex/` term is a regex over that same string. A leading `-`
-// negates any term (`-"foo bar"` negates the phrase; a `-` inside quotes is
-// literal). `key:value` tokens filter structured fields. `body:` /
-// `req-body:` / `resp-body:`, `header:` / `req-header:` / `resp-header:`, and
-// `cookie:` / `req-cookie:` / `resp-cookie:` are the only tokens that cross
-// into the backend.
+// Grammar (DevTools-flavored): whitespace-separated terms = AND. A bare word,
+// quoted phrase, or /regex/ searches one logical "all" projection: request URL
+// OR request/response headers OR decoded request/response bodies. A leading `-`
+// negates that whole OR result. `url:` is the explicit URL-only form.
+// `content:` / `req-content:` / `resp-content:` search headers OR decoded body
+// on the chosen side. body:, header:, and cookie: retain their narrower meaning.
 
 export interface ContentTerm {
-  field: "body" | "headers" | "cookies";
+  field: "all" | "content" | "body" | "headers" | "cookies";
   side: "request" | "response" | "either";
   value: string;
   regex: boolean;
@@ -21,17 +19,22 @@ export interface ContentTerm {
 
 type SummaryTerm =
   | { t: "text"; value: string; neg: boolean }
-  | { t: "regex"; re: RegExp; neg: boolean }
+  | { t: "regex"; re: RegExp | null; neg: boolean }
+  | { t: "url-text"; value: string; neg: boolean }
+  | { t: "url-regex"; re: RegExp | null; neg: boolean }
   | { t: "kv"; key: string; value: string; neg: boolean };
 
 export interface ParsedFilter {
-  /** Predicate over a FlowSummary for all non-content terms (instant, frontend). */
+  /** URL projection used by summary-only consumers such as Compare. */
   matchSummary: (s: FlowSummary) => boolean;
+  /** Hard frontend constraints safe to apply before an all/content scan. */
+  matchCandidates: (s: FlowSummary) => boolean;
   /** Content terms requiring a backend scan. Empty = no backend call needed. */
   contentTerms: ContentTerm[];
 }
 
 const SUMMARY_KEYS = new Set([
+  "url",
   "method",
   "host",
   "domain",
@@ -52,53 +55,44 @@ const SUMMARY_KEYS = new Set([
 const BODY_KEYS = new Set(["body", "req-body", "resp-body"]);
 const HEADER_KEYS = new Set(["header", "req-header", "resp-header"]);
 const COOKIE_KEYS = new Set(["cookie", "req-cookie", "resp-cookie"]);
+const CONTENT_KEYS = new Set(["content", "req-content", "resp-content"]);
 
 function skipSpaces(s: string, i: number): number {
   while (i < s.length && /\s/.test(s[i])) i++;
   return i;
 }
 
-function findClosingQuote(s: string, open: number): number {
-  for (let j = open + 1; j < s.length; j++) {
-    if (s[j] === '"') return j;
-  }
-  return -1;
-}
-
 interface RawTerm {
   text: string;
   neg: boolean;
+  quoted: boolean;
+  quotedStart: boolean;
 }
 
-function readTokenText(s: string, i: number): [string, number, boolean] {
+function readTokenText(s: string, i: number): [string, number, boolean, boolean] {
+  const start = i;
   let tok = "";
-  let quotedStart = false;
-  while (i < s.length && !/\s/.test(s[i])) {
-    const phraseStart = tok === "" || tok.endsWith(":");
-    if (s[i] === '"' && phraseStart) {
-      const close = findClosingQuote(s, i);
-      if (close === -1) {
-        tok += s[i++];
-        continue;
-      }
-      if (tok === "") quotedStart = true;
-      tok += s.slice(i + 1, close);
-      i = close + 1;
+  let quoted = false;
+  let inQuote = false;
+  while (i < s.length && (inQuote || !/\s/.test(s[i]))) {
+    if (s[i] === '"' && !isEscaped(s, i, start)) {
+      quoted = true;
+      inQuote = !inQuote;
+      i++;
+    } else if (inQuote && s[i] === "\\" && (s[i + 1] === '"' || s[i + 1] === "\\")) {
+      tok += s[i + 1];
+      i += 2;
     } else {
       tok += s[i++];
     }
   }
-  return [tok, i, quotedStart];
+  return [tok, i, quoted, s[start] === '"'];
 }
 
 function readToken(s: string, i: number): [RawTerm, number] {
-  const negatedPhrase = s[i] === "-" && s[i + 1] === '"';
-  const [tok, next, quotedStart] = readTokenText(s, negatedPhrase ? i + 1 : i);
-  if (negatedPhrase) return [{ text: tok, neg: true }, next];
-  if (!quotedStart && tok.startsWith("-") && tok.length > 1) {
-    return [{ text: tok.slice(1), neg: true }, next];
-  }
-  return [{ text: tok, neg: false }, next];
+  const neg = s[i] === "-" && i + 1 < s.length && !/\s/.test(s[i + 1]);
+  const [text, next, quoted, quotedStart] = readTokenText(s, neg ? i + 1 : i);
+  return [{ text, neg, quoted, quotedStart }, next];
 }
 
 function tokenize(s: string): RawTerm[] {
@@ -126,7 +120,7 @@ export function rawSegments(s: string): string[] {
     const start = i;
     let inQuote = false;
     while (i < s.length && (inQuote || !/\s/.test(s[i]))) {
-      if (s[i] === '"') inQuote = !inQuote;
+      if (s[i] === '"' && !isEscaped(s, i, start)) inQuote = !inQuote;
       i++;
     }
     out.push(s.slice(start, i));
@@ -134,68 +128,130 @@ export function rawSegments(s: string): string[] {
   return out;
 }
 
-type ClassifiedTerm =
-  | { kind: "summary"; term: SummaryTerm }
-  | { kind: "content"; term: ContentTerm };
-
-function contentTermOf(key: string, value: string, neg: boolean): ContentTerm {
-  const field = HEADER_KEYS.has(key) ? "headers" : COOKIE_KEYS.has(key) ? "cookies" : "body";
-  const side =
-    key === "req-body" || key === "req-header" || key === "req-cookie"
-      ? "request"
-      : key === "resp-body" || key === "resp-header" || key === "resp-cookie"
-        ? "response"
-        : "either";
-  const m = /^\/(.*)\/$/.exec(value);
-  return { field, side, value: m ? m[1] : value, regex: !!m, neg };
+function isEscaped(value: string, index: number, start: number): boolean {
+  let slashes = 0;
+  for (let cursor = index - 1; cursor >= start && value[cursor] === "\\"; cursor--) slashes++;
+  return slashes % 2 !== 0;
 }
 
-function regexTermOf(raw: string, neg: boolean): SummaryTerm | null {
+interface ClassifiedTerm {
+  summary?: SummaryTerm;
+  content?: ContentTerm;
+  /** Bare terms project onto the URL for summary-only consumers, but are not a
+   * safe prefilter for traffic because their header/body branch may match. */
+  candidateSafe: boolean;
+}
+
+function contentField(key: string): ContentTerm["field"] {
+  if (HEADER_KEYS.has(key)) return "headers";
+  if (COOKIE_KEYS.has(key)) return "cookies";
+  if (CONTENT_KEYS.has(key)) return "content";
+  if (BODY_KEYS.has(key)) return "body";
+  return "all";
+}
+
+function contentSide(key: string): ContentTerm["side"] {
+  if (key.startsWith("req-")) return "request";
+  if (key.startsWith("resp-")) return "response";
+  return "either";
+}
+
+function contentTermOf(key: string, value: string, neg: boolean, quoted: boolean): ContentTerm {
+  const m = quoted ? null : /^\/(.*)\/$/.exec(value);
+  return {
+    field: contentField(key),
+    side: contentSide(key),
+    value: m ? m[1] : value,
+    regex: !!m,
+    neg,
+  };
+}
+
+function regexTermOf(raw: string, neg: boolean, urlOnly = false): SummaryTerm | null {
   const rx = /^\/(.*)\/$/.exec(raw);
   if (!rx) return null;
+  let re: RegExp | null = null;
   try {
-    return { t: "regex", re: new RegExp(rx[1], "i"), neg };
-  } catch {
-    return null;
-  }
+    re = new RegExp(rx[1], "i");
+  } catch {}
+  return { t: urlOnly ? "url-regex" : "regex", re, neg };
 }
 
-function classifyTerm(raw: string, neg: boolean): ClassifiedTerm {
+function classifyTerm(
+  raw: string,
+  neg: boolean,
+  quoted: boolean,
+  quotedStart: boolean,
+): ClassifiedTerm {
   const colon = raw.indexOf(":");
-  if (colon > 0) {
+  if (!quotedStart && colon > 0) {
     const key = raw.slice(0, colon).toLowerCase();
     const value = raw.slice(colon + 1);
-    if (BODY_KEYS.has(key) || HEADER_KEYS.has(key) || COOKIE_KEYS.has(key)) {
-      return { kind: "content", term: contentTermOf(key, value, neg) };
+    if (
+      BODY_KEYS.has(key) ||
+      HEADER_KEYS.has(key) ||
+      COOKIE_KEYS.has(key) ||
+      CONTENT_KEYS.has(key)
+    ) {
+      return { content: contentTermOf(key, value, neg, quoted), candidateSafe: true };
     }
-    if (SUMMARY_KEYS.has(key)) return { kind: "summary", term: { t: "kv", key, value, neg } };
+    if (key === "url") {
+      return {
+        summary: (!quoted && regexTermOf(value, neg, true)) || {
+          t: "url-text",
+          value: value.toLowerCase(),
+          neg,
+        },
+        candidateSafe: true,
+      };
+    }
+    if (SUMMARY_KEYS.has(key)) {
+      return { summary: { t: "kv", key, value, neg }, candidateSafe: true };
+    }
   }
 
-  const regex = regexTermOf(raw, neg);
-  if (regex) return { kind: "summary", term: regex };
-  return { kind: "summary", term: { t: "text", value: raw.toLowerCase(), neg } };
+  const summary = (!quoted && regexTermOf(raw, neg)) || {
+    t: "text" as const,
+    value: raw.toLowerCase(),
+    neg,
+  };
+  return {
+    summary,
+    content: contentTermOf("all", raw, neg, quoted),
+    candidateSafe: false,
+  };
 }
 
 export function parseFilter(input: string): ParsedFilter {
   const summaryTerms: SummaryTerm[] = [];
+  const candidateTerms: SummaryTerm[] = [];
   const contentTerms: ContentTerm[] = [];
 
-  for (const { text, neg } of tokenize(input)) {
+  for (const { text, neg, quoted, quotedStart } of tokenize(input)) {
     if (!text) continue;
-    const classified = classifyTerm(text, neg);
-    if (classified.kind === "content") {
-      if (classified.term.value !== "") contentTerms.push(classified.term);
-    } else summaryTerms.push(classified.term);
+    const classified = classifyTerm(text, neg, quoted, quotedStart);
+    if (classified.summary) {
+      summaryTerms.push(classified.summary);
+      if (classified.candidateSafe) candidateTerms.push(classified.summary);
+    }
+    if (classified.content && classified.content.value !== "") {
+      contentTerms.push(classified.content);
+    }
   }
 
   return {
     matchSummary: (s) => summaryTerms.every((term) => matchTerm(term, s)),
+    matchCandidates: (s) => candidateTerms.every((term) => matchTerm(term, s)),
     contentTerms,
   };
 }
 
 function urlOf(s: FlowSummary): string {
   return `${s.method} ${s.scheme}://${s.host}${s.path}`;
+}
+
+function explicitUrlOf(s: FlowSummary): string {
+  return `${s.scheme}://${s.host}${s.path}`;
 }
 
 function extOf(path: string): string {
@@ -311,8 +367,11 @@ const MAX_REGEX_INPUT = 2048;
 function matchTerm(term: SummaryTerm, s: FlowSummary): boolean {
   let r: boolean;
   if (term.t === "text") r = urlOf(s).toLowerCase().includes(term.value);
-  else if (term.t === "regex") r = term.re.test(urlOf(s).slice(0, MAX_REGEX_INPUT));
-  else {
+  else if (term.t === "regex") r = term.re?.test(urlOf(s).slice(0, MAX_REGEX_INPUT)) ?? false;
+  else if (term.t === "url-text") r = explicitUrlOf(s).toLowerCase().includes(term.value);
+  else if (term.t === "url-regex") {
+    r = term.re?.test(explicitUrlOf(s).slice(0, MAX_REGEX_INPUT)) ?? false;
+  } else {
     // A malformed numeric value (empty while typing, or junk like "10gb")
     // matches nothing regardless of negation — otherwise `-larger-than:bogus`
     // or `slower-than:` would highlight every flow.
@@ -335,7 +394,9 @@ export function matchesFilter(
   return parsed.matchSummary(s);
 }
 
-export function collectMatched(
+/** Candidate seed for a backend scan. Bare/all terms are intentionally absent:
+ * a URL miss cannot rule out a hit in headers or a decoded body. */
+export function collectCandidates(
   flows: FlowSummary[],
   parsed: ParsedFilter,
   typeChips: Set<ResourceKind>,
@@ -343,7 +404,9 @@ export function collectMatched(
 ): Set<string> {
   const set = new Set<string>();
   for (const s of flows) {
-    if (matchesFilter(s, parsed, typeChips, statusChips)) set.add(s.id);
+    if (typeChips.size && !typeChips.has(s.kind)) continue;
+    if (statusChips.size && !statusChips.has(statusClass(s.status))) continue;
+    if (parsed.matchCandidates(s)) set.add(s.id);
   }
   return set;
 }

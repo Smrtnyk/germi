@@ -4,8 +4,8 @@ import { clamp } from "es-toolkit";
 import { accelFromKeyboardEvent, prettyAccel } from "../hotkey";
 import {
   accelFromEvent,
+  assignBinding,
   DEFAULT_SHORTCUTS,
-  findConflict,
   prettyShortcut,
   SHORTCUT_COMMANDS,
   type Bindings,
@@ -529,6 +529,7 @@ function InAppShortcutsSection({
 }) {
   const [recordingId, setRecordingId] = useState<CommandId | null>(null);
   const [conflict, setConflict] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (!recordingId) return;
@@ -542,18 +543,19 @@ function InAppShortcutsSection({
       }
       const accel = accelFromEvent(e);
       if (!accel) return;
-      const clash = findConflict(bindings, accel, id);
-      if (clash) {
-        setConflict(
-          clash.kind === "reserved"
-            ? `${prettyShortcut(accel)} is reserved by Germi`
-            : `${prettyShortcut(accel)} is already used by “${labelOf(clash.id)}”`,
-        );
+      const result = assignBinding(bindings, id, accel);
+      if (!result.ok) {
+        setConflict(`${prettyShortcut(accel)} is reserved by Germi`);
         return;
       }
-      onChange({ ...bindings, [id]: accel });
+      onChange(result.bindings);
       setRecordingId(null);
       setConflict(null);
+      setNotice(
+        result.swappedWith
+          ? `Assigned ${prettyShortcut(accel)} to “${labelOf(id)}” and moved “${labelOf(result.swappedWith)}” to ${prettyShortcut(bindings[id]) || "Unassigned"}.`
+          : null,
+      );
     }
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
@@ -561,7 +563,22 @@ function InAppShortcutsSection({
 
   function record(id: CommandId) {
     setConflict(null);
+    setNotice(null);
     setRecordingId((cur) => (cur === id ? null : id));
+  }
+
+  function assign(id: CommandId, accel: string) {
+    const result = assignBinding(bindings, id, accel);
+    if (!result.ok) return;
+    onChange(result.bindings);
+    setConflict(null);
+    setNotice(
+      accel
+        ? result.swappedWith
+          ? `Reset “${labelOf(id)}” and swapped “${labelOf(result.swappedWith)}” to ${prettyShortcut(bindings[id]) || "Unassigned"}.`
+          : null
+        : `“${labelOf(id)}” is now unassigned.`,
+    );
   }
 
   return (
@@ -570,6 +587,7 @@ function InAppShortcutsSection({
       <p className="muted small">
         These work while Germi is focused. Click Record, then press the keys (Esc cancels). Use
         Ctrl, Alt, or ⌘ — optionally with Shift — plus a key, or a function key like <kbd>F2</kbd>.
+        If another command owns the keys, the two commands swap. Clear leaves a command unassigned.
       </p>
       <ul className="shortcut-grid">
         {SHORTCUT_COMMANDS.map((c) => {
@@ -577,18 +595,27 @@ function InAppShortcutsSection({
           return (
             <li className="shortcut-row" key={c.id}>
               <span className="shortcut-cmd">{c.label}</span>
-              <span className={`btn small hotkey-display ${recording ? "recording" : ""}`}>
-                {recording ? "Press keys…" : prettyShortcut(bindings[c.id])}
+              <span
+                className={`btn small hotkey-display ${recording ? "recording" : ""} ${!bindings[c.id] ? "unset" : ""}`}
+              >
+                {recording ? "Press keys…" : prettyShortcut(bindings[c.id]) || "Unassigned"}
               </span>
               <Button size="small" onClick={() => record(c.id)}>
                 {recording ? "Cancel" : "Record"}
               </Button>
               <Button
                 size="small"
-                onClick={() => onChange({ ...bindings, [c.id]: DEFAULT_SHORTCUTS[c.id] })}
+                onClick={() => assign(c.id, DEFAULT_SHORTCUTS[c.id])}
                 disabled={bindings[c.id] === DEFAULT_SHORTCUTS[c.id] || recording}
               >
                 Reset
+              </Button>
+              <Button
+                size="small"
+                onClick={() => assign(c.id, "")}
+                disabled={!bindings[c.id] || recording}
+              >
+                Clear
               </Button>
             </li>
           );
@@ -599,6 +626,7 @@ function InAppShortcutsSection({
           <IconWarn /> {conflict}
         </p>
       )}
+      {notice && <p className="muted small">{notice}</p>}
       <div className="col-add-list">
         <Button size="small" onClick={() => onChange(DEFAULT_SHORTCUTS)}>
           Reset all to defaults

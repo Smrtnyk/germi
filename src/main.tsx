@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 
 import { App } from "./App";
 import { CompareWindow } from "./components/CompareWindow";
+import { FilterWindow } from "./components/FilterWindow";
 import { RuleDetailWindow } from "./components/RuleDetailWindow";
 import { ScriptsWindow } from "./components/ScriptsWindow";
 import { SettingsWindow } from "./components/SettingsWindow";
@@ -14,7 +15,8 @@ import "./styles.css";
 
 // Secondary OS windows load the same bundle but with a routing query in their
 // URL: `?rule=<id>&scenario=<sid>` renders a detached rule editor (issue #72),
-// `?compare=1` the compare window (issue #86), `?scripts=1` the scripts editor.
+// `?compare=1` the compare window (issue #86), `?scripts=1` the scripts editor,
+// `?settings=<session>` the Settings window, and `?filter=1` the modeless saved-filter builder.
 // Everything else is the app.
 function root(): React.ReactElement {
   const route = resolveWindowRoute(window.location.search);
@@ -27,6 +29,8 @@ function root(): React.ReactElement {
       return <ScriptsWindow />;
     case "settings":
       return <SettingsWindow sessionId={route.sessionId} />;
+    case "filter":
+      return <FilterWindow />;
     case "app":
       return <App />;
   }

@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for Germi's main and secondary windows",
-  "windows": ["main", "rule-*", "compare", "scripts", "settings"],
+  "windows": ["main", "rule-*", "compare", "scripts", "settings", "filter-builder"],
   "permissions": [
     "core:default",
     "core:webview:allow-create-webview-window",

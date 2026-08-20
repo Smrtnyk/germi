@@ -496,6 +496,31 @@ describe("main-owned Settings window controller", () => {
     expect(eventMocks.sendState).not.toHaveBeenCalled();
   });
 
+  it("rebroadcasts an active preview to a late filter window and reverts it on Settings close", async () => {
+    const { controllerOptions, sessionId } = await openController();
+    dispatch("preview", {
+      sessionId,
+      revision: 1,
+      appearance: { theme: "light", highlightColors: { selected: "filter-preview" } },
+    });
+    await vi.waitFor(() => expect(eventMocks.broadcastPreview).toHaveBeenCalledOnce());
+    const activePreview = eventMocks.broadcastPreview.mock.calls[0][0];
+
+    eventMocks.broadcastPreview.mockClear();
+    dispatch("themeReady", null);
+    await vi.waitFor(() => expect(eventMocks.broadcastPreview).toHaveBeenCalledWith(activePreview));
+
+    windowMocks.isOpen.mockResolvedValue(false);
+    dispatch("closed", { sessionId: null });
+    await vi.waitFor(() => expect(controllerOptions.clearListenerError).toHaveBeenCalledOnce());
+    expect(eventMocks.broadcastCleared).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId,
+        durableAppearance: { theme: "dark", highlightColors: { selected: "saved" } },
+      }),
+    );
+  });
+
   it("ignores a late unscoped destroy event after a replacement singleton opens", async () => {
     const { controllerOptions } = await openController();
     dispatch("closed", { sessionId: null });

@@ -1,5 +1,6 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 
+import type { ContentTerm } from "./filter";
 import type {
   AutoResponderSummary,
   AvailabilityProgress,
@@ -31,6 +32,17 @@ import type {
   TestInput,
   TestResult,
 } from "./types";
+
+export interface FlowFilterRequest {
+  key: string;
+  candidates: string[];
+  terms: ContentTerm[];
+}
+
+export interface FlowFilterBatchResult {
+  cancelled: boolean;
+  filters: { key: string; matched: string[] }[];
+}
 
 function captureImportChannel(onEvent: (event: CaptureImportEvent) => void) {
   const progress = new Channel<CaptureImportEvent>();
@@ -208,6 +220,9 @@ export const api = {
     regex: boolean,
     candidates: string[] | null,
   ) => invoke<string[]>("search_cookies", { pattern, side, regex, candidates }),
+  searchFlowFilters: (filters: FlowFilterRequest[]) =>
+    invoke<FlowFilterBatchResult>("search_flow_filters", { filters }),
+  cancelFlowFilterSearch: () => invoke<void>("cancel_flow_filter_search"),
   searchRules: (scenarioId: string, pattern: string, scope: RuleSearchScope) =>
     invoke<string[]>("search_rules", { scenarioId, pattern, scope }),
 

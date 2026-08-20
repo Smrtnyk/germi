@@ -18,6 +18,21 @@ function onCurrentWindowCloseRequested(handler: CloseRequestedHandler) {
   return getCurrentWindow().onCloseRequested(handler);
 }
 
+/** Prevent native X from bypassing a window's cooperative close workflow. */
+export function useNativeWindowCloseRequest(
+  requestClose: () => void,
+  onSetupError?: CloseFailureHandler,
+): boolean {
+  return useAsyncSubscription(
+    onCurrentWindowCloseRequested,
+    (event) => {
+      event.preventDefault();
+      requestClose();
+    },
+    onSetupError,
+  );
+}
+
 /** Coordinate a detached window's Escape and OS-close paths. Only one close
  * operation runs at a time, and a failed flush/destroy leaves the window open. */
 export function useSafeWindowClose({
@@ -80,14 +95,7 @@ export function useSafeWindowClose({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [close, closeOnEscape]);
 
-  const ready = useAsyncSubscription(
-    onCurrentWindowCloseRequested,
-    (event) => {
-      event.preventDefault();
-      void close();
-    },
-    onSetupError,
-  );
+  const ready = useNativeWindowCloseRequest(() => void close(), onSetupError);
 
   return { beginClose, close, closing, closingRef, ready };
 }

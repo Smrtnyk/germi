@@ -87,6 +87,35 @@ beforeEach(() => {
 });
 
 describe("theme synchronization", () => {
+  it("hydrates a late filter window from the active Settings preview and applies its cancel", async () => {
+    apiMocks.getSettings.mockResolvedValueOnce(settings("dark", { selected: "#aa000080" }));
+    eventMocks.emit.mockImplementation((name) => {
+      if (name === "germi://theme-sync-ready") {
+        dispatch("germi://settings-preview-accepted", {
+          sessionId: "settings-with-filter-open",
+          epoch: 20_000,
+          revision: 1,
+          appearance: { theme: "light", highlightColors: { selected: "#00aa0080" } },
+        });
+      }
+      return Promise.resolve();
+    });
+
+    await initThemeSync();
+
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(document.documentElement.style.getPropertyValue("--sel-bg")).toBe("#00aa0080");
+
+    dispatch("germi://settings-preview-cleared", {
+      sessionId: "settings-with-filter-open",
+      epoch: 20_000,
+      revision: 2,
+      durableAppearance: { theme: "dark", highlightColors: { selected: "#aa000080" } },
+    });
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(document.documentElement.style.getPropertyValue("--sel-bg")).toBe("#aa000080");
+  });
+
   it("composes System previews with a changing durable fallback without stale application", async () => {
     const scheme = mockPreferredScheme("dark");
     try {
@@ -104,7 +133,7 @@ describe("theme synchronization", () => {
 
       dispatch("germi://settings-preview-accepted", {
         sessionId: "settings-1",
-        epoch: 10_000,
+        epoch: 30_000,
         revision: 1,
         appearance: { theme: "system", highlightColors: { selected: "#ffffff80" } },
       });
@@ -120,7 +149,7 @@ describe("theme synchronization", () => {
 
       dispatch("germi://settings-preview-accepted", {
         sessionId: "settings-1",
-        epoch: 10_000,
+        epoch: 30_000,
         revision: 1,
         appearance: { theme: "dark", highlightColors: { selected: "#00000080" } },
       });
@@ -129,7 +158,7 @@ describe("theme synchronization", () => {
 
       dispatch("germi://settings-preview-cleared", {
         sessionId: "settings-1",
-        epoch: 10_000,
+        epoch: 30_000,
         revision: 2,
         durableAppearance: { theme: "light", highlightColors: { selected: "#00ff0080" } },
       });

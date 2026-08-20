@@ -1,22 +1,22 @@
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { loadJson, loadString, persist } from "./localStore";
 import {
   applyVisibility,
   combineMatches,
-  compileFilters,
-  computeFilterMatches,
   DEFAULT_FILTER_OPACITY,
-  hasContentTerms,
   nextFilterColor,
   normalizeFilterOpacity,
   sanitizeSavedFilters,
   savedFilterLabel,
+  type FilterDraft,
   type FilterViewMode,
+  type PreparedFilterDraft,
+  type RowTint,
   type RowTintPresentation,
   type SavedFilter,
 } from "./savedFilters";
-import { useFilterMatch } from "./useTrafficFilter";
+import { useFilterMatches, type FilterMatch, type TrafficFilterSpec } from "./useTrafficFilter";
 import type { ColorParts } from "./theme";
 import type { FlowSummary, ResourceKind } from "./types";
 
@@ -31,6 +31,11 @@ interface FilterColorPreview {
   opacity: number;
 }
 
+interface DraftPreviewState {
+  draft: FilterDraft;
+  only: boolean;
+}
+
 function presentFilters(filters: SavedFilter[], preview: FilterColorPreview | null): SavedFilter[] {
   if (!preview || !filters.some((f) => f.id === preview.id)) return filters;
   return filters.map((f) =>
@@ -38,10 +43,10 @@ function presentFilters(filters: SavedFilter[], preview: FilterColorPreview | nu
   );
 }
 
-function tintPresentations(filters: SavedFilter[]): Map<string, RowTintPresentation> {
+function buildTintPresentations(filters: SavedFilter[]): Map<string, RowTintPresentation> {
   const presentations = new Map<string, RowTintPresentation>();
   for (const filter of filters) {
-    if (!filter.highlight || hasContentTerms(filter.query)) continue;
+    if (!filter.highlight) continue;
     presentations.set(filter.id, {
       color: filter.color,
       opacity: filter.opacity,
@@ -60,7 +65,7 @@ function useFilterColorPresentation(filters: SavedFilter[]) {
     () => new Map(presentedFilters.map((f) => [f.id, f])),
     [presentedFilters],
   );
-  const presentations = useMemo(() => tintPresentations(presentedFilters), [presentedFilters]);
+  const presentations = useMemo(() => buildTintPresentations(presentedFilters), [presentedFilters]);
 
   function previewFilterColor(id: string, value: ColorParts) {
     setPreview(
@@ -84,30 +89,6 @@ function useFilterColorPresentation(filters: SavedFilter[]) {
   };
 }
 
-/** The solo'd ("only") filter fed through the full match pipeline, so its
- *  body:/header:/cookie: terms hit the backend scan like the bar filter's do. The chip
- *  sets are keyed by content, not entry identity, so editing an unrelated field
- *  (color, highlight) doesn't refire the content-search effect. */
-function useSoloMatch(flows: FlowSummary[], solo: SavedFilter | null, setError: SetError) {
-  const kindsKey = (solo?.kinds ?? []).join(" ");
-  const statusesKey = (solo?.statuses ?? []).join(" ");
-  const kinds = useMemo(
-    () => new Set<ResourceKind>(solo?.kinds ?? []),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [kindsKey],
-  );
-  const statuses = useMemo(
-    () => new Set(solo?.statuses ?? []),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [statusesKey],
-  );
-  const match = useFilterMatch(flows, solo?.query ?? "", kinds, statuses, setError);
-  return {
-    matchedIds: solo ? match.matchedIds : null,
-    searching: solo ? match.searching : false,
-  };
-}
-
 function usePersistentViewMode() {
   const [viewMode, setViewModeState] = useState<FilterViewMode>(() =>
     loadString(MODE_KEY, ["hide", "dim"] as const, "hide"),
@@ -119,6 +100,126 @@ function usePersistentViewMode() {
   return { viewMode, setViewMode };
 }
 
+function buildMatchSpecs(
+  bar: { query: string; kinds: readonly ResourceKind[]; statuses: readonly string[] },
+  filters: SavedFilter[],
+  draftPreview: DraftPreviewState | null,
+): TrafficFilterSpec[] {
+  const specs: TrafficFilterSpec[] = [
+    { id: "bar", query: bar.query, kinds: bar.kinds, statuses: bar.statuses },
+    ...filters.map((filter) => ({
+      id: `saved:${filter.id}`,
+      query: filter.query,
+      kinds: filter.kinds,
+      statuses: filter.statuses,
+      emptyMatchesAll: true,
+    })),
+  ];
+  if (draftPreview) {
+    specs.push({
+      id: "draft",
+      query: draftPreview.draft.query,
+      kinds: draftPreview.draft.kinds,
+      statuses: draftPreview.draft.statuses,
+      emptyMatchesAll: true,
+    });
+  }
+  return specs;
+}
+
+function computeMarks(
+  flows: FlowSummary[],
+  filters: SavedFilter[],
+  matches: ReadonlyMap<string, FilterMatch>,
+  draftPreview: DraftPreviewState | null,
+): { counts: Map<string, number | null>; tints: Map<string, RowTint> } {
+  const counts = new Map<string, number | null>();
+  const tints = new Map<string, RowTint>();
+  for (const filter of filters) {
+    const match = matches.get(`saved:${filter.id}`);
+    counts.set(
+      filter.id,
+      match?.searching || match?.failed ? null : (match?.confirmedIds?.size ?? 0),
+    );
+  }
+  for (const flow of flows) {
+    const tint = tintForFlow(flow.id, filters, matches, draftPreview);
+    if (tint) tints.set(flow.id, tint);
+  }
+  return { counts, tints };
+}
+
+function tintForFlow(
+  flowId: string,
+  filters: SavedFilter[],
+  matches: ReadonlyMap<string, FilterMatch>,
+  draftPreview: DraftPreviewState | null,
+): RowTint | undefined {
+  if (draftPreview?.draft.highlight && matches.get("draft")?.confirmedIds?.has(flowId)) {
+    return {
+      filterId: "draft",
+      color: draftPreview.draft.color,
+      opacity: draftPreview.draft.opacity,
+      label: `${savedFilterLabel(draftPreview.draft)} (preview)`,
+    };
+  }
+  const filter = filters.find(
+    (candidate) =>
+      candidate.highlight && matches.get(`saved:${candidate.id}`)?.confirmedIds?.has(flowId),
+  );
+  return filter
+    ? {
+        filterId: filter.id,
+        color: filter.color,
+        opacity: filter.opacity,
+        label: savedFilterLabel(filter),
+      }
+    : undefined;
+}
+
+const EMPTY_MATCH: FilterMatch = {
+  matchedIds: null,
+  confirmedIds: null,
+  searching: false,
+  failed: false,
+};
+
+function useMatchedFilterView(
+  flows: FlowSummary[],
+  bar: { query: string; kinds: readonly ResourceKind[]; statuses: readonly string[] },
+  filters: SavedFilter[],
+  solo: SavedFilter | null,
+  draftPreview: DraftPreviewState | null,
+  viewMode: FilterViewMode,
+  setError: SetError,
+) {
+  const barKindsKey = bar.kinds.join(" ");
+  const barStatusesKey = bar.statuses.join(" ");
+  const specs = useMemo<TrafficFilterSpec[]>(
+    () => buildMatchSpecs(bar, filters, draftPreview),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [bar.query, barKindsKey, barStatusesKey, filters, draftPreview],
+  );
+  const matches = useFilterMatches(flows, specs, setError);
+  const barMatch = matches.byId.get("bar") ?? EMPTY_MATCH;
+  const soloMatch = solo ? matches.byId.get(`saved:${solo.id}`) : undefined;
+  const draftMatch = draftPreview ? matches.byId.get("draft") : undefined;
+  const effectiveSolo = draftPreview?.only ? draftMatch?.matchedIds : soloMatch?.matchedIds;
+  const view = useMemo(
+    () => applyVisibility(flows, viewMode, barMatch.matchedIds, effectiveSolo ?? null),
+    [flows, viewMode, barMatch.matchedIds, effectiveSolo],
+  );
+  const combinedMatchedIds = useMemo(
+    () => combineMatches(barMatch.matchedIds, effectiveSolo ?? null),
+    [barMatch.matchedIds, effectiveSolo],
+  );
+  const marks = useMemo(
+    () => computeMarks(flows, filters, matches.byId, draftPreview),
+    [draftPreview, filters, flows, matches.byId],
+  );
+  return { barMatch, soloMatch, matches, view, combinedMatchedIds, marks };
+}
+
 /**
  * The saved-filter list + the traffic-list view it produces (issue #90):
  * persistent colored filters that tint their matching rows, an exclusive
@@ -128,13 +229,14 @@ function usePersistentViewMode() {
  */
 export function useSavedFilters(
   flows: FlowSummary[],
-  barMatchedIds: Set<string> | null,
+  bar: { query: string; kinds: readonly ResourceKind[]; statuses: readonly string[] },
   setError: SetError,
 ) {
   const [filters, setFilters] = useState<SavedFilter[]>(() =>
     sanitizeSavedFilters(loadJson(FILTERS_KEY)),
   );
   const [soloId, setSoloId] = useState<string | null>(null);
+  const [draftPreview, setDraftPreview] = useState<DraftPreviewState | null>(null);
   const { viewMode, setViewMode } = usePersistentViewMode();
 
   // Debounced persistence: the panel's editor updates `filters` per keystroke,
@@ -145,39 +247,43 @@ export function useSavedFilters(
   }, [filters]);
 
   const solo = filters.find((f) => f.id === soloId) ?? null;
-  const soloMatch = useSoloMatch(flows, solo, setError);
-
-  // Deferred like the bar query: a keystroke in the panel's editor must not
-  // synchronously re-match every flow before the input echoes.
-  const deferredFilters = useDeferredValue(filters);
-  const compiled = useMemo(() => compileFilters(deferredFilters), [deferredFilters]);
-  const marks = useMemo(
-    () => computeFilterMatches(flows, deferredFilters, compiled),
-    [flows, deferredFilters, compiled],
+  const matchedView = useMatchedFilterView(
+    flows,
+    bar,
+    filters,
+    solo,
+    draftPreview,
+    viewMode,
+    setError,
   );
-  // Matching stays deferred and committed-state-only, while tint presentation
-  // follows the current committed/preview color immediately. The filter id on
-  // each mark preserves first-match precedence when filters overlap.
   const colorPresentation = useFilterColorPresentation(filters);
-  const combinedMatchedIds = useMemo(
-    () => combineMatches(barMatchedIds, soloMatch.matchedIds),
-    [barMatchedIds, soloMatch.matchedIds],
-  );
-  const view = useMemo(
-    () => applyVisibility(flows, viewMode, barMatchedIds, soloMatch.matchedIds),
-    [flows, viewMode, barMatchedIds, soloMatch.matchedIds],
-  );
   const presentedSolo = solo ? (colorPresentation.byId.get(solo.id) ?? solo) : null;
+  const presentedTints = useMemo(() => {
+    const presentations = new Map(colorPresentation.tintPresentations);
+    if (draftPreview?.draft.highlight) {
+      presentations.set("draft", {
+        color: draftPreview.draft.color,
+        opacity: draftPreview.draft.opacity,
+        label: `${savedFilterLabel(draftPreview.draft)} (preview)`,
+      });
+    }
+    return presentations;
+  }, [colorPresentation.tintPresentations, draftPreview]);
 
-  function addFilter(query: string, kinds: ResourceKind[], statuses: string[]): SavedFilter {
+  function addFilter(
+    query: string,
+    kinds: ResourceKind[],
+    statuses: string[],
+    options?: Pick<PreparedFilterDraft, "color" | "opacity" | "highlight">,
+  ): SavedFilter {
     const created: SavedFilter = {
       id: crypto.randomUUID(),
       query: query.trim(),
-      kinds,
-      statuses,
-      color: nextFilterColor(filters),
-      opacity: DEFAULT_FILTER_OPACITY,
-      highlight: true,
+      kinds: [...kinds],
+      statuses: [...statuses],
+      color: options?.color ?? nextFilterColor(filters),
+      opacity: options?.opacity ?? DEFAULT_FILTER_OPACITY,
+      highlight: options?.highlight ?? true,
     };
     colorPresentation.clear();
     setFilters((prev) => [...prev, created]);
@@ -215,14 +321,18 @@ export function useSavedFilters(
     viewMode,
     setViewMode,
     toggleViewMode: () => setViewMode(viewMode === "hide" ? "dim" : "hide"),
-    tints: marks.tints,
-    tintPresentations: colorPresentation.tintPresentations,
-    counts: marks.counts,
-    soloSearching: soloMatch.searching,
-    combinedMatchedIds,
-    visibleFlows: view.visible,
-    listMatchedIds: view.listMatched,
+    tints: matchedView.marks.tints,
+    tintPresentations: presentedTints,
+    counts: matchedView.marks.counts,
+    barMatchedIds: matchedView.barMatch.matchedIds,
+    searching: matchedView.matches.searching,
+    soloSearching: matchedView.soloMatch?.searching ?? false,
+    combinedMatchedIds: matchedView.combinedMatchedIds,
+    visibleFlows: matchedView.view.visible,
+    listMatchedIds: matchedView.view.listMatched,
     addFilter,
+    setDraftPreview,
+    clearDraftPreview: () => setDraftPreview(null),
     previewFilterColor: colorPresentation.previewFilterColor,
     cancelFilterColorPreview: colorPresentation.cancelFilterColorPreview,
     updateFilter,

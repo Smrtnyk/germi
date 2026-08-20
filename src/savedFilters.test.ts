@@ -11,11 +11,13 @@ import {
   hasContentTerms,
   nextFilterColor,
   normalizeFilterOpacity,
+  prepareFilterDraft,
   resolvePresentedTint,
   sanitizeSavedFilters,
   savedFilterLabel,
   type FilterMatches,
   type RowTint,
+  type FilterDraft,
   type SavedFilter,
 } from "./savedFilters";
 import type { FlowSummary } from "./types";
@@ -120,6 +122,60 @@ describe("savedFilterLabel", () => {
 
   it("falls back for an empty filter", () => {
     expect(savedFilterLabel(saved())).toBe("(everything)");
+  });
+});
+
+describe("prepareFilterDraft", () => {
+  const draft: FilterDraft = {
+    query: " host:api ",
+    kinds: ["xhr"],
+    statuses: ["4xx"],
+    color: "#123456",
+    opacity: 47.6,
+    highlight: false,
+  };
+
+  it("normalizes a meaningful draft into the existing saved-filter shape", () => {
+    expect(prepareFilterDraft(draft, [])).toEqual({
+      ok: true,
+      filter: {
+        query: "host:api",
+        kinds: ["xhr"],
+        statuses: ["4xx"],
+        color: "#123456",
+        opacity: 48,
+        highlight: false,
+      },
+    });
+  });
+
+  it("rejects an all-empty draft", () => {
+    expect(prepareFilterDraft({ ...draft, query: " ", kinds: [], statuses: [] }, [])).toEqual({
+      ok: false,
+      error: "Add a query, resource type, or status before saving.",
+    });
+  });
+
+  it("normalizes a six-digit color and rejects malformed values", () => {
+    const normalized = prepareFilterDraft({ ...draft, color: "#ABCDEF" }, []);
+    expect(normalized.ok && normalized.filter.color).toBe("#abcdef");
+    expect(prepareFilterDraft({ ...draft, color: "red" }, [])).toEqual({
+      ok: false,
+      error: "Choose a valid six-digit highlight color.",
+    });
+  });
+
+  it("rejects duplicate conditions regardless of chip order or color", () => {
+    const duplicate = saved({
+      query: "host:api",
+      kinds: ["xhr"],
+      statuses: ["4xx"],
+      color: "#ffffff",
+    });
+    expect(prepareFilterDraft(draft, [duplicate])).toEqual({
+      ok: false,
+      error: "This filter is already saved as “host:api xhr 4xx”.",
+    });
   });
 });
 

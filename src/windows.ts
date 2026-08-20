@@ -13,8 +13,10 @@ type WindowOptions = NonNullable<ConstructorParameters<typeof WebviewWindow>[1]>
 export async function openOrFocusWindow(
   label: string,
   options: WindowOptions,
+  signal?: AbortSignal,
 ): Promise<"focused" | "created"> {
   const existing = await WebviewWindow.getByLabel(label);
+  signal?.throwIfAborted();
   if (existing) {
     await existing.setFocus();
     return "focused";
@@ -24,10 +26,18 @@ export async function openOrFocusWindow(
     typeof url === "string"
       ? { ...options, url: `${url}${url.includes("?") ? "&" : "?"}theme=${getTheme()}` }
       : options;
+  signal?.throwIfAborted();
   const win = new WebviewWindow(label, themedOptions);
+  let abort: (() => void) | undefined;
   await new Promise<void>((resolve, reject) => {
+    abort = () => reject(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
     void win.once("tauri://created", () => resolve());
     void win.once("tauri://error", (e) => reject(new Error(String(e.payload))));
+  }).finally(() => {
+    // An aborted lookup cannot create a window after a newer attempt starts,
+    // and an aborted native creation is cleaned up by its owning caller.
+    if (abort) signal?.removeEventListener("abort", abort);
   });
   return "created";
 }
