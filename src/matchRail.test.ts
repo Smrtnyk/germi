@@ -39,15 +39,15 @@ describe("bandsToGradient", () => {
     const g = bandsToGradient([0, 1]);
     expect(g.startsWith("linear-gradient(to bottom,")).toBe(true);
     expect(g).toContain("transparent 0.00%");
-    expect(g).toContain("rgba(45, 212, 191,");
+    expect(g).toContain("rgba(var(--accent-rgb),");
     expect(g.match(/%/g)).toHaveLength(4);
   });
 
   it("ramps opacity above a visible floor with density", () => {
     const faint = bandsToGradient([0.01]);
     const solid = bandsToGradient([1]);
-    expect(faint).toContain("rgba(45, 212, 191, 0.35");
-    expect(solid).toContain("rgba(45, 212, 191, 1.000)");
+    expect(faint).toContain("rgba(var(--accent-rgb), 0.35");
+    expect(solid).toContain("rgba(var(--accent-rgb), 1.000)");
   });
 });
 

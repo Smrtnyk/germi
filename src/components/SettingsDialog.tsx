@@ -15,7 +15,7 @@ import {
 import { useHotkeyMode } from "../useHotkeyMode";
 import type { AutoLayout } from "../appState";
 import { hasUnsavedSettingsChanges, type SettingsDialogDraft } from "../settingsDraft";
-import { applyHighlightColors } from "../theme";
+import { applyAppearance } from "../theme";
 import type { ProxySettings, SettingsSectionSummary } from "../types";
 import { useToast } from "../toast";
 import { AppearanceSettings } from "./AppearanceSettings";
@@ -784,19 +784,28 @@ function useSettingsDialogState({
   const [draftAutoLayout, setDraftAutoLayout] = useState(autoLayout);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const durableColorsRef = useRef(settings.highlightColors);
-  durableColorsRef.current = settings.highlightColors;
-  const savedColorsRef = useRef<Record<string, string> | null>(null);
+  const durableAppearanceRef = useRef({
+    theme: settings.theme,
+    highlightColors: settings.highlightColors,
+  });
+  durableAppearanceRef.current = {
+    theme: settings.theme,
+    highlightColors: settings.highlightColors,
+  };
+  const savedAppearanceRef = useRef<typeof durableAppearanceRef.current | null>(null);
 
   function resetAfterImport(imported: ProxySettings) {
-    durableColorsRef.current = imported.highlightColors;
+    durableAppearanceRef.current = {
+      theme: imported.theme,
+      highlightColors: imported.highlightColors,
+    };
     setDraftSettings(imported);
     setDraftColumnOrder(columnOrder);
     setDraftShortcuts(shortcuts);
     setDraftAutoLayout(autoLayout);
     setActive(loadSection());
     setSaveError(null);
-    applyHighlightColors(imported.highlightColors);
+    applyAppearance(imported.theme, imported.highlightColors);
   }
 
   const transfer = useSettingsTransfer(onFlushSettings, onImportApplied, resetAfterImport);
@@ -817,11 +826,15 @@ function useSettingsDialogState({
   };
 
   useEffect(() => {
-    return () => applyHighlightColors(savedColorsRef.current ?? durableColorsRef.current);
+    return () => {
+      const appearance = savedAppearanceRef.current ?? durableAppearanceRef.current;
+      applyAppearance(appearance.theme, appearance.highlightColors);
+    };
   }, []);
 
   function discard() {
-    applyHighlightColors(durableColorsRef.current);
+    const appearance = durableAppearanceRef.current;
+    applyAppearance(appearance.theme, appearance.highlightColors);
     onClose();
   }
 
@@ -830,8 +843,11 @@ function useSettingsDialogState({
     setSaveError(null);
     try {
       await onSave(currentDraft);
-      savedColorsRef.current = draftSettings.highlightColors;
-      applyHighlightColors(draftSettings.highlightColors);
+      savedAppearanceRef.current = {
+        theme: draftSettings.theme,
+        highlightColors: draftSettings.highlightColors,
+      };
+      applyAppearance(draftSettings.theme, draftSettings.highlightColors);
       onClose();
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));

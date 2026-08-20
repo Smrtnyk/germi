@@ -1,14 +1,13 @@
 import { emit, listen } from "@tauri-apps/api/event";
 
 import { api } from "./ipc";
-import { applyHighlightColors } from "./theme";
+import { applyAppearance } from "./theme";
 
 /**
- * Keeps every window's highlight colors in step with the saved settings
- * (issue #93). `main.tsx` runs the init in each window (main, compare, rule
- * editors — they all load the same bundle), and whoever saves settings
- * broadcasts SETTINGS_CHANGED so the others re-read and re-apply. The same
- * pattern as `compareWindow.ts`'s seed event.
+ * Keeps every window's theme and highlight colors in step with the saved
+ * settings. `main.tsx` runs the init before rendering each window (main,
+ * compare, rule editors and scripts), and whoever saves settings broadcasts
+ * SETTINGS_CHANGED so the others re-read and re-apply.
  */
 const SETTINGS_CHANGED = "germi://settings-changed";
 let refreshGeneration = 0;
@@ -17,21 +16,21 @@ export function emitSettingsChanged(): void {
   void emit(SETTINGS_CHANGED, null);
 }
 
-async function refreshHighlightColors(): Promise<void> {
+async function refreshAppearance(): Promise<void> {
   const generation = ++refreshGeneration;
-  const colors = (await api.getSettings()).highlightColors;
-  if (generation === refreshGeneration) applyHighlightColors(colors);
+  const settings = await api.getSettings();
+  if (generation === refreshGeneration) applyAppearance(settings.theme, settings.highlightColors);
 }
 
-/** Apply this window's overrides on boot and follow later settings saves.
- *  Colors are cosmetic, so failures (e.g. outside a Tauri webview) stay silent. */
-export async function initHighlightColorSync(): Promise<void> {
+/** Apply this window's durable appearance before React renders and follow later
+ *  settings saves. Failures outside Tauri keep the cached/default theme. */
+export async function initThemeSync(): Promise<void> {
   try {
     await listen(SETTINGS_CHANGED, () => {
-      void refreshHighlightColors().catch(() => undefined);
+      void refreshAppearance().catch(() => undefined);
     });
-    await refreshHighlightColors();
+    await refreshAppearance();
   } catch {
-    /* not running under Tauri, or settings unavailable — keep defaults */
+    /* not running under Tauri, or settings unavailable — keep cached/default appearance */
   }
 }

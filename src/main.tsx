@@ -7,12 +7,8 @@ import { RuleDetailWindow } from "./components/RuleDetailWindow";
 import { ScriptsWindow } from "./components/ScriptsWindow";
 import { installDefaultContextMenuBlocker } from "./contextMenuPolicy";
 import { installContextualSelectAll } from "./selectAllContext";
-import { initHighlightColorSync } from "./themeSync";
+import { initThemeSync } from "./themeSync";
 import "./styles.css";
-
-// Every window overrides its highlight colors from the saved settings and
-// follows later saves (issue #93); rendering never waits on this.
-void initHighlightColorSync();
 
 // Secondary OS windows load the same bundle but with a routing query in their
 // URL: `?rule=<id>&scenario=<sid>` renders a detached rule editor (issue #72),
@@ -35,8 +31,16 @@ function Root(): React.ReactElement {
   return root();
 }
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <Root />
-  </React.StrictMode>,
-);
+async function start() {
+  // The head script applies the startup cache before first paint. Confirm the
+  // durable setting and install cross-window synchronization before React (and
+  // a lazy CodeMirror editor) renders.
+  await initThemeSync();
+  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+    <React.StrictMode>
+      <Root />
+    </React.StrictMode>,
+  );
+}
+
+void start();

@@ -3,18 +3,21 @@ import { isEqual } from "es-toolkit";
 
 import { COLOR_DRAG_MIME, hasColorDrag } from "../dnd";
 import {
-  applyHighlightColors,
+  applyAppearance,
   effectiveColor,
   HIGHLIGHT_COLORS,
   joinHex8,
   parseHexEntry,
   splitHex8,
+  useTheme,
   withOverride,
   type HighlightColorSpec,
 } from "../theme";
 import type { ProxySettings } from "../types";
 import { ColorPicker } from "./ColorPicker";
 import { Button } from "./ui/Button";
+import { IconMoon, IconSun, IconSystemTheme } from "./icons";
+import { SegmentedControl } from "./ui/SegmentedControl";
 
 const GROUPS: { id: HighlightColorSpec["group"]; label: string }[] = [
   { id: "rows", label: "Traffic rows" },
@@ -35,15 +38,16 @@ export function AppearanceSettings({
   onChange: (s: ProxySettings) => void;
 }) {
   const colors = settings.highlightColors;
+  const resolvedTheme = useTheme();
 
   function commit(spec: HighlightColorSpec, value: string | null) {
-    const next = withOverride(colors, spec, value);
-    applyHighlightColors(next);
+    const next = withOverride(colors, spec, value, resolvedTheme);
+    applyAppearance(settings.theme, next);
     if (!isEqual(next, colors)) onChange({ ...settings, highlightColors: next });
   }
 
   function resetAll() {
-    applyHighlightColors({});
+    applyAppearance(settings.theme, {});
     onChange({ ...settings, highlightColors: {} });
   }
 
@@ -52,6 +56,46 @@ export function AppearanceSettings({
   return (
     <div className="settings-pane">
       <h4>Appearance</h4>
+      <div className="appearance-theme">
+        <div>
+          <div className="appearance-theme-label">Color theme</div>
+          <div className="muted small">Applied to every Germi window and editor.</div>
+        </div>
+        <SegmentedControl
+          ariaLabel="Color theme"
+          value={settings.theme}
+          options={[
+            {
+              value: "system",
+              label: (
+                <>
+                  <IconSystemTheme /> System
+                </>
+              ),
+            },
+            {
+              value: "dark",
+              label: (
+                <>
+                  <IconMoon /> Dark
+                </>
+              ),
+            },
+            {
+              value: "light",
+              label: (
+                <>
+                  <IconSun /> Light
+                </>
+              ),
+            },
+          ]}
+          onChange={(theme) => {
+            applyAppearance(theme, colors);
+            onChange({ ...settings, theme });
+          }}
+        />
+      </div>
       <p className="muted small">
         Highlight tints for the traffic list and the compare window. Most are translucent by design,
         so each color picker includes opacity. Drafts preview live; Apply keeps a choice in this
@@ -65,10 +109,10 @@ export function AppearanceSettings({
               <ColorRow
                 key={spec.key}
                 spec={spec}
-                effective={effectiveColor(colors, spec)}
+                effective={effectiveColor(colors, spec, resolvedTheme)}
                 overridden={colors[spec.key] !== undefined}
-                onPreview={(v) => applyHighlightColors({ ...colors, [spec.key]: v })}
-                onCancel={() => applyHighlightColors(colors)}
+                onPreview={(v) => applyAppearance(settings.theme, { ...colors, [spec.key]: v })}
+                onCancel={() => applyAppearance(settings.theme, colors)}
                 onCommit={(v) => commit(spec, v)}
               />
             ))}

@@ -4,11 +4,24 @@ import { render } from "vitest-browser-react";
 import { delay } from "es-toolkit";
 
 import "../styles.css";
-import { applyHighlightColors, HIGHLIGHT_COLORS } from "../theme";
-import type { ProxySettings } from "../types";
+import {
+  applyAppearance,
+  applyHighlightColors,
+  compositeHex8,
+  contrastRatio,
+  HIGHLIGHT_COLORS,
+  LEGACY_DARK_CONTRAST_PAIRS,
+  LIGHT_THEME_CONTRAST_PAIRS,
+  REQUIRED_THEME_TOKENS,
+} from "../theme";
+import type { ThemeContrastPair } from "../theme";
+import type { ProxySettings, Theme, ThemePreference } from "../types";
 import { AppearanceSettings } from "./AppearanceSettings";
 
-function settings(colors: Record<string, string> = {}): ProxySettings {
+function settings(
+  colors: Record<string, string> = {},
+  theme: ThemePreference = "dark",
+): ProxySettings {
   return {
     excludedHosts: [],
     headerColumns: [],
@@ -19,7 +32,39 @@ function settings(colors: Record<string, string> = {}): ProxySettings {
     autoStartOnLaunch: true,
     responseDelayMs: 0,
     systemProxyHotkey: "",
+    theme,
     highlightColors: colors,
+  };
+}
+
+function mockPreferredScheme(initial: Theme) {
+  const original = window.matchMedia.bind(window);
+  let matches = initial === "dark";
+  const listeners = new Set<(event: MediaQueryListEvent) => void>();
+  const query = {
+    get matches() {
+      return matches;
+    },
+    media: "(prefers-color-scheme: dark)",
+    onchange: null,
+    addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) =>
+      listeners.add(listener),
+    removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) =>
+      listeners.delete(listener),
+  } as unknown as MediaQueryList;
+  const spy = vi
+    .spyOn(window, "matchMedia")
+    .mockImplementation((media) => (media === query.media ? query : original(media)));
+  return {
+    set(theme: Theme) {
+      matches = theme === "dark";
+      const event = { matches, media: query.media } as MediaQueryListEvent;
+      for (const listener of listeners) listener(event);
+    },
+    restore() {
+      applyAppearance("dark", {});
+      spy.mockRestore();
+    },
   };
 }
 
@@ -75,21 +120,263 @@ function AppliedHighlightSurfaces() {
   );
 }
 
+const LEGACY_DARK_TOKEN_BASELINE = {
+  "--bg": "#0e1116",
+  "--bg-1": "#151a21",
+  "--bg-2": "#1c232c",
+  "--bg-3": "#232c38",
+  "--line": "#2a333f",
+  "--text": "#d7dee8",
+  "--muted": "#8a96a6",
+  "--accent": "#2dd4bf",
+  "--accent-dim": "#0d9488",
+  "--accent-bg": "#113333",
+  "--danger": "#f87171",
+  "--warn": "#fbbf24",
+  "--imported": "#a78bfa",
+  "--s2": "#34d399",
+  "--s3": "#60a5fa",
+  "--s4": "#fbbf24",
+  "--s5": "#f87171",
+  "--sel-bg": "#173a36",
+  "--sel-multi-bg": "rgba(96, 165, 250, 0.13)",
+  "--row-match-bg": "rgba(45, 212, 191, 0.08)",
+  "--row-mock-bg": "rgba(45, 212, 191, 0.05)",
+  "--row-imported-bg": "rgba(167, 139, 250, 0.06)",
+  "--drop-overlay": "rgba(45, 212, 191, 0.13)",
+  "--bar-accent-bg": "#13302c",
+  "--chip-on-bg": "#112e2e",
+  "--banner-warn-bg": "#2a2410",
+  "--banner-warn-line": "#5b4a1e",
+  "--diff-add-bg": "rgba(52, 211, 153, 0.09)",
+  "--diff-del-bg": "rgba(248, 113, 113, 0.1)",
+  "--diff-add-hl": "rgba(52, 211, 153, 0.28)",
+  "--diff-del-hl": "rgba(248, 113, 113, 0.3)",
+  "--match-a-bg": "rgba(45, 212, 191, 0.08)",
+  "--match-b-bg": "rgba(96, 165, 250, 0.09)",
+  "--scrollbar-thumb": "#3a4655",
+  "--scrollbar-track": "transparent",
+} as const;
+
+function expectContrastPairs(theme: Theme, pairs: readonly ThemeContrastPair[]) {
+  applyAppearance(theme, {});
+  const computed = getComputedStyle(document.documentElement);
+  for (const pair of pairs) {
+    const foregroundValue = canonical(computed.getPropertyValue(pair.foreground).trim());
+    expect(foregroundValue.endsWith("ff"), `${theme} ${pair.foreground} must be opaque`).toBe(true);
+    const foreground = foregroundValue.slice(0, 7);
+    const backgroundValue = canonical(computed.getPropertyValue(pair.background).trim());
+    if (!backgroundValue.endsWith("ff") && pair.surface === undefined) {
+      throw new Error(`${theme} ${pair.background} needs its underlying surface`);
+    }
+    const background = backgroundValue.endsWith("ff")
+      ? backgroundValue.slice(0, 7)
+      : compositeHex8(
+          backgroundValue,
+          canonical(computed.getPropertyValue(pair.surface ?? "").trim()).slice(0, 7),
+        );
+    if (!backgroundValue.endsWith("ff")) {
+      expect(pair.surface, `${theme} ${pair.background} needs its underlying surface`).toBe("--bg");
+    }
+    expect(
+      contrastRatio(foreground, background),
+      `${theme} ${pair.foreground} on ${pair.background}`,
+    ).toBeGreaterThanOrEqual(pair.minimum);
+  }
+}
+
 beforeEach(() => {
   document.documentElement.removeAttribute("style");
+  applyAppearance("dark", {});
+  if (!document.querySelector('meta[name="color-scheme"]')) {
+    const meta = document.createElement("meta");
+    meta.name = "color-scheme";
+    document.head.append(meta);
+  }
 });
 
 describe("HIGHLIGHT_COLORS vs styles.css", () => {
-  it("mirrors every :root default", () => {
+  it("mirrors every theme default", () => {
+    for (const theme of ["dark", "light"] as const) {
+      applyAppearance(theme, {});
+      const computed = getComputedStyle(document.documentElement);
+      for (const spec of HIGHLIGHT_COLORS) {
+        expect(canonical(computed.getPropertyValue(spec.cssVar).trim()), spec.cssVar).toBe(
+          spec.defaultValues[theme],
+        );
+        expect(computed.getPropertyValue(spec.foregroundVar).trim()).not.toBe("");
+        if (spec.derivedVar) expect(computed.getPropertyValue(spec.derivedVar).trim()).not.toBe("");
+      }
+    }
+  });
+
+  it("defines every required semantic token in the light theme", () => {
+    applyAppearance("light", {});
     const computed = getComputedStyle(document.documentElement);
-    for (const s of HIGHLIGHT_COLORS) {
-      expect(canonical(computed.getPropertyValue(s.cssVar).trim()), s.cssVar).toBe(s.defaultValue);
-      if (s.derivedVar) expect(computed.getPropertyValue(s.derivedVar).trim()).not.toBe("");
+    for (const token of REQUIRED_THEME_TOKENS) {
+      expect(computed.getPropertyValue(token).trim(), `light ${token}`).not.toBe("");
+    }
+  });
+
+  it("meets light WCAG contrast and preserves compliant legacy dark pairs", () => {
+    expectContrastPairs("light", LIGHT_THEME_CONTRAST_PAIRS);
+    expectContrastPairs("dark", LEGACY_DARK_CONTRAST_PAIRS);
+  });
+});
+
+describe("legacy dark appearance", () => {
+  it("locks the pre-light token palette and representative computed states", () => {
+    applyAppearance("dark", {});
+    const root = getComputedStyle(document.documentElement);
+    for (const [token, expected] of Object.entries(LEGACY_DARK_TOKEN_BASELINE)) {
+      expect(root.getPropertyValue(token).trim(), token).toBe(expected);
+    }
+    expect(root.colorScheme).toBe("dark");
+
+    const fixture = document.createElement("div");
+    fixture.innerHTML = `
+      <button class="btn primary legacy-primary">Save</button>
+      <button class="btn danger legacy-danger">Delete</button>
+      <div class="error-bar legacy-error">Failed</div>
+      <button class="fchip s-2xx on legacy-status">2xx</button>
+      <div class="flow-canvas">
+        <div class="flow-row selected legacy-selected"><span class="c-kind">GET</span></div>
+        <div class="flow-row checked legacy-checked">Checked</div>
+        <div class="flow-row match legacy-match">Match</div>
+        <div class="flow-row ruled legacy-ruled">Mocked</div>
+        <div class="flow-row imported legacy-imported">Imported</div>
+        <div class="flow-row dim legacy-dim">Dimmed</div>
+      </div>
+      <mark class="vmatch active legacy-find">match</mark>
+      <div class="compare-row selected legacy-compare"><span class="compare-seq">1</span></div>
+      <div class="diff-line add legacy-diff"><span class="diff-sign">+</span>line</div>
+      <span class="outcome-badge respond legacy-outcome">Respond</span>
+      <div class="toast error legacy-toast"><span class="toast-icon">!</span></div>
+      <span class="notification-badge legacy-notification">1</span>
+      <span class="tooltip-popup legacy-tooltip">Help</span>
+    `;
+    document.body.append(fixture);
+    const pick = (selector: string) =>
+      getComputedStyle(fixture.querySelector<HTMLElement>(selector)!);
+    const colorProbe = document.createElement("span");
+    colorProbe.style.color = "color-mix(in srgb, #34d399 15%, #1c232c)";
+    fixture.append(colorProbe);
+
+    try {
+      expect(pick(".legacy-primary").backgroundColor).toBe("rgb(13, 148, 136)");
+      expect(pick(".legacy-primary").color).toBe("rgb(4, 32, 28)");
+      expect(pick(".legacy-danger").borderTopColor).toBe("rgb(107, 43, 43)");
+      expect(pick(".legacy-error").backgroundColor).toBe("rgb(58, 29, 29)");
+      expect(pick(".legacy-error").color).toBe("rgb(255, 215, 215)");
+      expect(pick(".legacy-error").borderBottomColor).toBe("rgb(91, 42, 42)");
+      expect(pick(".legacy-status").backgroundColor).toBe(getComputedStyle(colorProbe).color);
+
+      expect(pick(".legacy-selected").backgroundColor).toBe("rgb(23, 58, 54)");
+      expect(pick(".legacy-selected").color).toBe("rgb(215, 222, 232)");
+      expect(pick(".legacy-selected").outlineStyle).toBe("none");
+      expect(pick(".legacy-selected .c-kind").color).toBe("rgb(138, 150, 166)");
+      expect(pick(".legacy-selected").borderBottomColor).toBe("rgb(26, 33, 42)");
+      expect(pick(".legacy-checked").backgroundColor).toBe("rgba(96, 165, 250, 0.13)");
+      expect(pick(".legacy-checked").outlineStyle).toBe("none");
+      expect(pick(".legacy-match").backgroundColor).toBe("rgba(45, 212, 191, 0.08)");
+      expect(pick(".legacy-ruled").backgroundColor).toBe("rgba(45, 212, 191, 0.05)");
+      expect(pick(".legacy-imported").backgroundColor).toBe("rgba(167, 139, 250, 0.06)");
+      expect(pick(".legacy-dim").opacity).toBe("0.32");
+
+      expect(pick(".legacy-find").backgroundColor).toBe("rgb(45, 212, 191)");
+      expect(pick(".legacy-find").color).toBe("rgb(4, 32, 28)");
+      expect(pick(".legacy-compare").outlineStyle).toBe("none");
+      expect(pick(".legacy-compare .compare-seq").color).toBe("rgb(138, 150, 166)");
+      expect(pick(".legacy-diff").backgroundColor).toBe("rgba(52, 211, 153, 0.09)");
+      expect(pick(".legacy-diff").color).toBe("rgb(215, 222, 232)");
+      expect(pick(".legacy-diff .diff-sign").color).toBe("rgb(52, 211, 153)");
+      expect(pick(".legacy-outcome").backgroundColor).toBe("rgb(19, 59, 54)");
+      expect(pick(".legacy-toast").borderTopColor).toBe("rgb(107, 43, 43)");
+      expect(pick(".legacy-toast").boxShadow).toContain("rgba(0, 0, 0, 0.5)");
+      expect(pick(".legacy-toast .toast-icon").color).toBe("rgb(42, 12, 12)");
+      expect(pick(".legacy-notification").color).toBe("rgb(255, 255, 255)");
+      expect(pick(".legacy-tooltip").boxShadow).toContain("rgba(0, 0, 0, 0.3)");
+
+      applyAppearance("dark", { selected: "#ffffff80" });
+      expect(rootStyle().getPropertyValue("--sel-bg")).toBe("#ffffff80");
+      expect(rootStyle().getPropertyValue("--sel-fg")).toBe("");
+    } finally {
+      fixture.remove();
     }
   });
 });
 
 describe("AppearanceSettings", () => {
+  it("resolves System initially and follows live operating-system changes", async () => {
+    const scheme = mockPreferredScheme("light");
+    try {
+      applyAppearance("system", {});
+      expect(document.documentElement.dataset.theme).toBe("light");
+      expect(localStorage.getItem("germi.theme-cache")).toBe("light");
+      expect(localStorage.getItem("germi.theme-preference-cache")).toBe("system");
+
+      const screen = await render(
+        <AppearanceSettings settings={settings({}, "system")} onChange={vi.fn()} />,
+      );
+      await expect.element(screen.getByRole("button", { name: "System" })).toHaveClass("on");
+
+      scheme.set("dark");
+      expect(document.documentElement.dataset.theme).toBe("dark");
+      expect(getComputedStyle(document.documentElement).colorScheme).toBe("dark");
+      expect(localStorage.getItem("germi.theme-cache")).toBe("dark");
+    } finally {
+      scheme.restore();
+    }
+  });
+
+  it("keeps explicit Dark and Light choices independent of OS changes", () => {
+    const scheme = mockPreferredScheme("light");
+    try {
+      applyAppearance("system", {});
+      applyAppearance("dark", {});
+      scheme.set("light");
+      expect(document.documentElement.dataset.theme).toBe("dark");
+
+      applyAppearance("light", {});
+      scheme.set("dark");
+      expect(document.documentElement.dataset.theme).toBe("light");
+    } finally {
+      scheme.restore();
+    }
+  });
+
+  it("persists the System choice from the Appearance control", async () => {
+    const scheme = mockPreferredScheme("light");
+    try {
+      const onChange = vi.fn();
+      const screen = await render(
+        <AppearanceSettings settings={settings({}, "dark")} onChange={onChange} />,
+      );
+      await screen.getByRole("button", { name: "System" }).click();
+      expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ theme: "system" }));
+      expect(document.documentElement.dataset.theme).toBe("light");
+      expect(localStorage.getItem("germi.theme-cache")).toBe("light");
+      expect(localStorage.getItem("germi.theme-preference-cache")).toBe("system");
+    } finally {
+      scheme.restore();
+    }
+  });
+
+  it("switches and persists the applied light theme", async () => {
+    const onChange = vi.fn();
+    const screen = await render(<AppearanceSettings settings={settings()} onChange={onChange} />);
+    await screen.getByRole("button", { name: "Light" }).click();
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ theme: "light" }));
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(getComputedStyle(document.documentElement).colorScheme).toBe("light");
+    expect(document.querySelector<HTMLMetaElement>('meta[name="color-scheme"]')?.content).toBe(
+      "light",
+    );
+    expect(localStorage.getItem("germi.theme-cache")).toBe("light");
+    expect(localStorage.getItem("germi.theme-preference-cache")).toBe("light");
+    expect(getComputedStyle(document.body).backgroundColor).toBe("rgb(246, 248, 251)");
+  });
+
   it("renders the shared picker for every highlight color", async () => {
     const screen = await render(<AppearanceSettings settings={settings()} onChange={vi.fn()} />);
     await expect.element(screen.getByText("Traffic rows")).toBeVisible();

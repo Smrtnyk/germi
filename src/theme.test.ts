@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  compositeHex8,
+  contrastRatio,
   cssVarUpdates,
   effectiveColor,
   HIGHLIGHT_COLORS,
   joinHex8,
   normalizeHex8,
   parseHexEntry,
+  readableHighlightForeground,
+  relativeLuminance,
   splitHex8,
   withOverride,
 } from "./theme";
@@ -19,11 +23,14 @@ describe("HIGHLIGHT_COLORS registry", () => {
     const keys = HIGHLIGHT_COLORS.map((s) => s.key);
     const vars = HIGHLIGHT_COLORS.flatMap((s) => [
       s.cssVar,
+      s.foregroundVar,
       ...(s.derivedVar ? [s.derivedVar] : []),
     ]);
     expect(new Set(keys).size).toBe(keys.length);
     expect(new Set(vars).size).toBe(vars.length);
-    for (const s of HIGHLIGHT_COLORS) expect(normalizeHex8(s.defaultValue)).toBe(s.defaultValue);
+    for (const s of HIGHLIGHT_COLORS) {
+      for (const value of Object.values(s.defaultValues)) expect(normalizeHex8(value)).toBe(value);
+    }
   });
 });
 
@@ -44,7 +51,9 @@ describe("normalizeHex8", () => {
 describe("splitHex8 / joinHex8", () => {
   it("round-trips every default through the picker + slider parts", () => {
     for (const s of HIGHLIGHT_COLORS) {
-      expect(joinHex8(splitHex8(s.defaultValue)), s.key).toBe(s.defaultValue);
+      for (const value of Object.values(s.defaultValues)) {
+        expect(joinHex8(splitHex8(value)), s.key).toBe(value);
+      }
     }
   });
 
@@ -84,7 +93,8 @@ describe("withOverride", () => {
 
   it("collapses default-equal and invalid values to no override", () => {
     const prior = { selected: "#ff000080" };
-    expect(withOverride(prior, SEL, SEL.defaultValue)).toEqual({});
+    expect(withOverride(prior, SEL, SEL.defaultValues.dark)).toEqual({});
+    expect(withOverride(prior, SEL, SEL.defaultValues.light, "light")).toEqual({});
     expect(withOverride(prior, SEL, "nonsense")).toEqual({});
     expect(prior).toEqual({ selected: "#ff000080" });
   });
@@ -100,14 +110,19 @@ describe("withOverride", () => {
 describe("cssVarUpdates", () => {
   it("covers every owned var, removing all with no overrides", () => {
     const updates = cssVarUpdates({});
-    expect(updates).toHaveLength(11);
+    expect(updates).toHaveLength(20);
     expect(updates.every((u) => u.value === null)).toBe(true);
   });
 
-  it("sets an overridden var and leaves the rest as removals", () => {
-    const updates = cssVarUpdates({ selected: "#ff000080" });
-    expect(updates.find((u) => u.cssVar === "--sel-bg")?.value).toBe("#ff000080");
-    expect(updates.filter((u) => u.value !== null)).toHaveLength(1);
+  it("derives readable custom foregrounds only for light mode", () => {
+    const dark = cssVarUpdates({ selected: "#ff000080" }, "dark");
+    expect(dark.find((u) => u.cssVar === "--sel-bg")?.value).toBe("#ff000080");
+    expect(dark.find((u) => u.cssVar === "--sel-fg")?.value).toBeNull();
+    expect(dark.filter((u) => u.value !== null)).toHaveLength(1);
+
+    const light = cssVarUpdates({ selected: "#ff000080" }, "light");
+    expect(light.find((u) => u.cssVar === "--sel-fg")?.value).not.toBeNull();
+    expect(light.filter((u) => u.value !== null)).toHaveLength(2);
   });
 
   it("derives the intra-line diff mark at 3x alpha, capped", () => {
@@ -130,7 +145,43 @@ describe("effectiveColor", () => {
   });
 
   it("falls back to the default when absent or invalid", () => {
-    expect(effectiveColor({}, ADD)).toBe(ADD.defaultValue);
-    expect(effectiveColor({ diffAdded: "chartreuse" }, ADD)).toBe(ADD.defaultValue);
+    expect(effectiveColor({}, ADD)).toBe(ADD.defaultValues.dark);
+    expect(effectiveColor({}, ADD, "light")).toBe(ADD.defaultValues.light);
+    expect(effectiveColor({ diffAdded: "chartreuse" }, ADD)).toBe(ADD.defaultValues.dark);
+  });
+});
+
+describe("contrast helpers", () => {
+  it("computes WCAG luminance and contrast for known endpoints", () => {
+    expect(relativeLuminance("#000000")).toBe(0);
+    expect(relativeLuminance("#ffffff")).toBe(1);
+    expect(contrastRatio("#000000", "#ffffff")).toBe(21);
+    expect(compositeHex8("#ffffff80", "#000000")).toBe("#808080");
+  });
+
+  it("keeps arbitrary stored tints readable in the light theme", () => {
+    const surface = "#f6f8fb";
+    const samples = [0, 17, 51, 85, 119, 153, 187, 221, 255];
+    const colors = samples.flatMap((r) =>
+      samples.flatMap((g) =>
+        samples.flatMap((b) =>
+          samples.map(
+            (alpha) =>
+              `#${[r, g, b, alpha].map((value) => value.toString(16).padStart(2, "0")).join("")}`,
+          ),
+        ),
+      ),
+    );
+    for (const color of colors) {
+      const foreground = readableHighlightForeground(color, "light");
+      const composite = compositeHex8(color, surface);
+      expect(contrastRatio(foreground, composite), color).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it("handles the midpoint that fails with near-black", () => {
+    const foreground = readableHighlightForeground("#777777ff", "light");
+    expect(foreground).toBe("#000000");
+    expect(contrastRatio(foreground, "#777777")).toBeGreaterThanOrEqual(4.5);
   });
 });

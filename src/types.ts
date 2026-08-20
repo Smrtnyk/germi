@@ -308,10 +308,15 @@ export interface ProxySettings {
   // Shortcuts
   systemProxyHotkey: string;
   // Appearance
+  /** Persisted application color preference, shared by every app window. */
+  theme: ThemePreference;
   /** Highlight-color overrides keyed by semantic name (see `theme.ts`),
    *  values `#rrggbbaa`. Sparse — absent keys use the stylesheet default. */
   highlightColors: Record<string, string>;
 }
+
+export type Theme = "dark" | "light";
+export type ThemePreference = "system" | Theme;
 
 /** One settings section in the export checklist / import preview (issue #112). */
 export interface SettingsSectionSummary {

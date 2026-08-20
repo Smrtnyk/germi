@@ -38,12 +38,15 @@ import {
   LuLogIn,
   LuMaximize2,
   LuMinimize2,
+  LuMonitor,
+  LuMoon,
   LuPanelRightClose,
   LuPanelRightOpen,
   LuPower,
   LuSave,
   LuScrollText,
   LuSquare,
+  LuSun,
   LuTriangleAlert,
   LuUnlink,
   LuX,
@@ -176,6 +179,7 @@ export const IconInfo = make(LuInfo, { color: "var(--s3)" });
 export const IconSave = make(LuSave, { color: "var(--accent)" });
 export const IconExternal = make(LuExternalLink, { color: "var(--accent)", size: 14 });
 export const IconViewer = make(LuEye, { color: "var(--s3)" });
+export const IconSystemTheme = make(LuMonitor, { size: 14 });
 
 export const IconClose = make(LuX);
 export const IconCopy = make(LuCopy, { size: 14 });
@@ -187,6 +191,8 @@ export const IconGrip = make(LuGripVertical, { size: 14 });
 export const IconPower = make(LuPower, { size: 14 });
 export const IconGeneral = make(LuLayers, { color: "var(--s3)", size: 14 });
 export const IconBell = make(LuBell, { size: 14 });
+export const IconMoon = make(LuMoon, { size: 14 });
+export const IconSun = make(LuSun, { size: 14 });
 
 export const IconCompare = make(LuGitCompareArrows, { color: "var(--s3)", size: 14 });
 export const IconDiff = make(LuFileDiff, { size: 14 });

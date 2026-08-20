@@ -48,8 +48,8 @@ pub const SETTINGS_SECTIONS: &[SettingsSection] = &[
     },
     SettingsSection {
         id: "appearance",
-        label: "Highlight colors",
-        keys: &["highlightColors"],
+        label: "Appearance",
+        keys: &["theme", "highlightColors"],
     },
     SettingsSection {
         id: "columns",
@@ -130,7 +130,14 @@ fn section_detail(id: &str, s: &ProxySettings, present: &Map<String, Value>) -> 
         } else {
             s.system_proxy_hotkey.clone()
         }),
-        "appearance" => parts.push(count_noun(s.highlight_colors.len(), "color override")),
+        "appearance" => {
+            if has("theme") {
+                parts.push(format!("{:?} theme", s.theme).to_ascii_lowercase());
+            }
+            if has("highlightColors") {
+                parts.push(count_noun(s.highlight_colors.len(), "color override"));
+            }
+        }
         "columns" => parts.push(count_noun(s.header_columns.len(), "pinned column")),
         _ => {}
     }
@@ -306,7 +313,7 @@ mod tests {
         );
         assert_eq!(by_id("throttling"), "500 ms response delay");
         assert_eq!(by_id("shortcuts"), "Ctrl+Shift+P");
-        assert_eq!(by_id("appearance"), "1 color override");
+        assert_eq!(by_id("appearance"), "system theme · 1 color override");
         assert_eq!(by_id("columns"), "1 pinned column");
     }
 
@@ -323,6 +330,18 @@ mod tests {
     fn preview_detail_skips_fields_the_file_does_not_carry() {
         let found = import_preview(r#"{"maxFlows":100}"#).unwrap();
         assert_eq!(found[0].detail, "keep 100 flows");
+    }
+
+    #[test]
+    fn appearance_preview_and_merge_include_theme() {
+        let found = import_preview(r#"{"theme":"light"}"#).unwrap();
+        assert_eq!(found[0].id, "appearance");
+        assert_eq!(found[0].detail, "light theme");
+
+        let merged =
+            merge_import(&sample(), r#"{"theme":"light"}"#, &ids(&["appearance"])).unwrap();
+        assert_eq!(merged.theme, crate::settings::ColorTheme::Light);
+        assert_eq!(merged.highlight_colors.len(), 1);
     }
 
     #[test]

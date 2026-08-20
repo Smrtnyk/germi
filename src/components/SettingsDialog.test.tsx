@@ -3,10 +3,11 @@ import { userEvent } from "vitest/browser";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
-import { applyHighlightColors } from "../theme";
+import "../styles.css";
+import { applyAppearance } from "../theme";
 import { DEFAULT_SHORTCUTS } from "../shortcuts";
 import { persistSettingsDialogDraft, type SettingsDialogDraft } from "../settingsDraft";
-import type { ProxySettings } from "../types";
+import type { ProxySettings, Theme } from "../types";
 import { SettingsDialog } from "./SettingsDialog";
 
 const apiMocks = vi.hoisted(() => ({
@@ -29,8 +30,40 @@ function settings(overrides: Partial<ProxySettings> = {}): ProxySettings {
     autoStartOnLaunch: true,
     responseDelayMs: 0,
     systemProxyHotkey: "",
+    theme: "dark",
     highlightColors: {},
     ...overrides,
+  };
+}
+
+function mockPreferredScheme(initial: Theme) {
+  const original = window.matchMedia.bind(window);
+  let matches = initial === "dark";
+  const listeners = new Set<(event: MediaQueryListEvent) => void>();
+  const query = {
+    get matches() {
+      return matches;
+    },
+    media: "(prefers-color-scheme: dark)",
+    onchange: null,
+    addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) =>
+      listeners.add(listener),
+    removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) =>
+      listeners.delete(listener),
+  } as unknown as MediaQueryList;
+  const spy = vi
+    .spyOn(window, "matchMedia")
+    .mockImplementation((media) => (media === query.media ? query : original(media)));
+  return {
+    set(theme: Theme) {
+      matches = theme === "dark";
+      const event = { matches, media: query.media } as MediaQueryListEvent;
+      for (const listener of listeners) listener(event);
+    },
+    restore() {
+      applyAppearance("dark", {});
+      spy.mockRestore();
+    },
   };
 }
 
@@ -53,11 +86,13 @@ function props(overrides: Partial<Parameters<typeof SettingsDialog>[0]> = {}) {
 
 function Harness({
   persist = vi.fn(),
+  initialSettings = settings(),
 }: {
   persist?: (draft: SettingsDialogDraft) => Promise<void>;
+  initialSettings?: ProxySettings;
 }) {
   const [open, setOpen] = useState(true);
-  const [savedSettings, setSavedSettings] = useState(settings());
+  const [savedSettings, setSavedSettings] = useState(initialSettings);
   const [savedOrder, setSavedOrder] = useState(["seq", "method", "url"]);
   const [savedShortcuts, setSavedShortcuts] = useState(DEFAULT_SHORTCUTS);
   const [savedLayout, setSavedLayout] = useState<"side" | "stacked">("side");
@@ -159,6 +194,7 @@ async function stagePortAppearanceAndLayout(screen: BrowserScreen) {
   await screen.getByRole("spinbutton").fill("9090");
   await userEvent.tab();
   await screen.getByRole("button", { name: "Appearance" }).click();
+  await screen.getByRole("button", { name: "Light" }).click();
   await setSelectedRowColor(screen, "#ff000080");
   await screen.getByRole("button", { name: "Autoresponder" }).click();
   await screen.getByRole("button", { name: "Stacked" }).click();
@@ -168,6 +204,8 @@ async function expectStagedPortAppearanceAndLayout(screen: BrowserScreen) {
   await screen.getByRole("button", { name: "Connections" }).click();
   await expect.element(screen.getByRole("spinbutton")).toHaveValue(9090);
   await screen.getByRole("button", { name: "Appearance" }).click();
+  await expect.element(screen.getByRole("button", { name: "Light" })).toHaveClass("on");
+  expect(document.documentElement.dataset.theme).toBe("light");
   await expectSelectedRowColor(screen, "#ff000080");
   expect(document.documentElement.style.getPropertyValue("--sel-bg")).toBe("#ff000080");
   await screen.getByRole("button", { name: "Autoresponder" }).click();
@@ -178,6 +216,8 @@ async function expectSavedDefaults(screen: BrowserScreen) {
   await screen.getByRole("button", { name: "Connections" }).click();
   await expect.element(screen.getByRole("spinbutton")).toHaveValue(8080);
   await screen.getByRole("button", { name: "Appearance" }).click();
+  await expect.element(screen.getByRole("button", { name: "Dark" })).toHaveClass("on");
+  expect(document.documentElement.dataset.theme).toBe("dark");
   await expectSelectedRowColor(screen, "#173a36ff");
   await screen.getByRole("button", { name: "Autoresponder" }).click();
   await expect.element(screen.getByRole("button", { name: "Side by side" })).toHaveClass("active");
@@ -191,10 +231,63 @@ beforeEach(() => {
   localStorage.clear();
   localStorage.setItem("germi.autoLayout", "side");
   localStorage.setItem("germi.settingsSection", "connections");
-  applyHighlightColors({});
+  applyAppearance("dark", {});
 });
 
 describe("SettingsDialog", () => {
+  it("keeps System highlight previews and drafts reactive, then restores durable appearance", async () => {
+    const scheme = mockPreferredScheme("dark");
+    try {
+      const durable = settings({ theme: "system" });
+      applyAppearance(durable.theme, durable.highlightColors);
+      const screen = await render(<Harness initialSettings={durable} />);
+      await screen.getByRole("button", { name: "Appearance" }).click();
+
+      await screen.getByRole("button", { name: "Selected row color" }).click();
+      const picker = screen.getByRole("dialog", { name: "Selected row color" });
+      await screen.getByLabelText("Hex").fill("#ffffff80");
+      expect(document.documentElement.style.getPropertyValue("--sel-bg")).toBe("#ffffff80");
+
+      scheme.set("light");
+      expect(document.documentElement.dataset.theme).toBe("light");
+      expect(document.documentElement.style.getPropertyValue("--sel-bg")).toBe("#ffffff80");
+      expect(document.documentElement.style.getPropertyValue("--sel-fg")).toBe("#000000");
+
+      await picker.getByRole("button", { name: "Cancel" }).click();
+      expect(document.documentElement.style.getPropertyValue("--sel-bg")).toBe("");
+      expect(document.documentElement.style.getPropertyValue("--sel-fg")).toBe("");
+      expect(getComputedStyle(document.documentElement).getPropertyValue("--sel-bg").trim()).toBe(
+        "#c9eee8",
+      );
+
+      await screen.getByRole("button", { name: "Selected row color" }).click();
+      const appliedPicker = screen.getByRole("dialog", { name: "Selected row color" });
+      await screen.getByLabelText("Hex").fill("#ffffff80");
+      await appliedPicker.getByRole("button", { name: "Apply" }).click();
+      expect(document.documentElement.style.getPropertyValue("--sel-bg")).toBe("#ffffff80");
+
+      scheme.set("dark");
+      expect(document.documentElement.dataset.theme).toBe("dark");
+      expect(document.documentElement.style.getPropertyValue("--sel-bg")).toBe("#ffffff80");
+      expect(document.documentElement.style.getPropertyValue("--sel-fg")).toBe("");
+
+      scheme.set("light");
+      expect(document.documentElement.style.getPropertyValue("--sel-bg")).toBe("#ffffff80");
+      expect(document.documentElement.style.getPropertyValue("--sel-fg")).toBe("#000000");
+
+      await screen.getByRole("button", { name: "Cancel" }).click();
+      await expect.element(screen.getByRole("button", { name: "Open settings" })).toBeVisible();
+      expect(document.documentElement.dataset.theme).toBe("light");
+      expect(document.documentElement.style.getPropertyValue("--sel-bg")).toBe("");
+      expect(document.documentElement.style.getPropertyValue("--sel-fg")).toBe("");
+      expect(getComputedStyle(document.documentElement).getPropertyValue("--sel-bg").trim()).toBe(
+        "#c9eee8",
+      );
+    } finally {
+      scheme.restore();
+    }
+  });
+
   it("flushes pending settings before previewing and writing selected export sections", async () => {
     const order: string[] = [];
     let releaseWrite = () => {};
@@ -289,6 +382,7 @@ describe("SettingsDialog", () => {
     await screen.getByRole("button", { name: "Discard changes" }).click();
 
     await expect.element(screen.getByRole("button", { name: "Open settings" })).toBeVisible();
+    expect(document.documentElement.dataset.theme).toBe("dark");
     expect(document.documentElement.style.getPropertyValue("--sel-bg")).toBe("");
     expect(localStorage.getItem("germi.autoLayout")).toBe("side");
     expect(persist).not.toHaveBeenCalled();
@@ -425,6 +519,7 @@ describe("SettingsDialog", () => {
     await screen.getByRole("button", { name: "Save" }).click();
 
     await expect.element(screen.getByRole("button", { name: "Open settings" })).toBeVisible();
+    expect(document.documentElement.dataset.theme).toBe("light");
     expect(persist).toHaveBeenCalledOnce();
     expect(localStorage.getItem("germi.autoLayout")).toBe("stacked");
     expect(localStorage.getItem("germi.settingsSection")).toBe("autoresponder");
@@ -433,6 +528,7 @@ describe("SettingsDialog", () => {
     await screen.getByRole("button", { name: "Open settings" }).click();
     await expect.element(screen.getByRole("button", { name: "Stacked" })).toHaveClass("active");
     await screen.getByRole("button", { name: "Appearance" }).click();
+    await expect.element(screen.getByRole("button", { name: "Light" })).toHaveClass("on");
     await expectSelectedRowColor(screen, "#ff000080");
     await screen.getByRole("button", { name: "Connections" }).click();
     await expect.element(screen.getByRole("spinbutton")).toHaveValue(9090);
@@ -472,18 +568,24 @@ describe("SettingsDialog", () => {
       <Harness persist={() => Promise.reject(new Error("settings.json is read-only"))} />,
     );
 
+    await screen.getByRole("button", { name: "Appearance" }).click();
+    await screen.getByRole("button", { name: "Light" }).click();
     await screen.getByRole("button", { name: "Autoresponder" }).click();
     await screen.getByRole("button", { name: "Stacked" }).click();
     await screen.getByRole("button", { name: "Save" }).click();
 
     await expect.element(screen.getByRole("dialog", { name: "Settings" })).toBeVisible();
     await expect.element(screen.getByRole("alert")).toHaveTextContent("settings.json is read-only");
+    expect(document.documentElement.dataset.theme).toBe("light");
     expect(localStorage.getItem("germi.autoLayout")).toBe("side");
     expect(localStorage.getItem("germi.settingsSection")).toBe("connections");
+
+    await screen.getByRole("button", { name: "Cancel" }).click();
+    expect(document.documentElement.dataset.theme).toBe("dark");
   });
 
   it("applies imports immediately without saving unrelated local drafts", async () => {
-    const imported = settings({ excludedHosts: ["example.com"] });
+    const imported = settings({ excludedHosts: ["example.com"], theme: "light" });
     const onImportApplied = vi.fn();
     const onSave = vi.fn(() => Promise.resolve());
     apiMocks.peekSettingsImport.mockResolvedValue([
@@ -503,6 +605,7 @@ describe("SettingsDialog", () => {
     await screen.getByRole("button", { name: "Import", exact: true }).click();
 
     await vi.waitFor(() => expect(onImportApplied).toHaveBeenCalledWith(imported));
+    expect(document.documentElement.dataset.theme).toBe("light");
     expect(onSave).not.toHaveBeenCalled();
     expect(localStorage.getItem("germi.autoLayout")).toBe("side");
     await expect.element(screen.getByRole("spinbutton")).toHaveValue(8080);

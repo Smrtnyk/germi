@@ -54,6 +54,8 @@ import {
   type SettingsDialogDraft,
 } from "./settingsDraft";
 import { emitSettingsChanged } from "./themeSync";
+import { applyAppearance } from "./theme";
+import { loadDurableSettings } from "./settingsHydration";
 import { OrderedTaskQueue } from "./orderedTaskQueue";
 import { readCaptureForImport, useCaptureImport } from "./captureImport";
 import type { CaptureExt } from "./dnd";
@@ -376,19 +378,6 @@ async function reconcileInitialSystemProxy(
         `Re-pointing failed (${repointError}); restoring it failed`,
     );
   }
-}
-
-async function loadDurableSettings(
-  opts: InitialStateOptions,
-  settingsGeneration: number,
-): Promise<ProxySettings> {
-  const loaded = await api.getSettings();
-  if (opts.getSettingsMutationGeneration() === settingsGeneration) {
-    opts.setDurableSettings(loaded);
-    opts.setSettings(loaded);
-  }
-  opts.setSettingsReady();
-  return loaded;
 }
 
 async function restoreRunningProxyState(
@@ -1183,6 +1172,7 @@ function useSettings() {
     autoStartOnLaunch: true,
     responseDelayMs: 0,
     systemProxyHotkey: "",
+    theme: "system",
     highlightColors: {},
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -2677,6 +2667,7 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
   function saveSettings(next: ProxySettings) {
     settingsMutationGenerationRef.current += 1;
     latestSettingsRef.current = next;
+    applyAppearance(next.theme, next.highlightColors);
     settings.setSettings(next);
     void settingsSaveQueue
       .run(async () => {
@@ -2702,6 +2693,7 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
           // known durable value, never another optimistic snapshot.
           if (isEqual(latestSettingsRef.current, next)) {
             latestSettingsRef.current = durable;
+            applyAppearance(durable.theme, durable.highlightColors);
             settings.setSettings(durable);
           }
           const message =
@@ -2770,6 +2762,7 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
   function applyImportedSettings(next: ProxySettings) {
     settingsMutationGenerationRef.current += 1;
     latestSettingsRef.current = next;
+    applyAppearance(next.theme, next.highlightColors);
     settings.setSettings(next);
     // The import command already persisted once. Queue the imported snapshot
     // behind any ordinary save that was waiting in this webview, so an older
@@ -2795,6 +2788,7 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
             persisted = durableBefore;
             if (isEqual(latestSettingsRef.current, next)) {
               latestSettingsRef.current = persisted;
+              applyAppearance(persisted.theme, persisted.highlightColors);
               settings.setSettings(persisted);
             }
             throw Object.assign(
@@ -2807,6 +2801,7 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
           }
           if (isEqual(latestSettingsRef.current, next)) {
             latestSettingsRef.current = persisted;
+            applyAppearance(persisted.theme, persisted.highlightColors);
             settings.setSettings(persisted);
           }
           settingsSaveErrorRef.current = isEqual(persisted, next)

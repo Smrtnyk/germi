@@ -3,6 +3,17 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 
+/// User-selected application color preference. Legacy settings without this
+/// field follow the operating system, matching the first-run UI default.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ColorTheme {
+    #[default]
+    System,
+    Dark,
+    Light,
+}
+
 /// User-configurable proxy settings, persisted by the shell.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +69,9 @@ pub struct ProxySettings {
     pub system_proxy_hotkey: String,
 
     // ---- Appearance ----
+    /// Application color theme, shared by every webview window.
+    #[serde(default)]
+    pub theme: ColorTheme,
     /// Highlight-color overrides for the UI, keyed by a semantic name the
     /// frontend defines (see `src/theme.ts`), values `#rrggbbaa`. Sparse —
     /// absent keys mean the stylesheet default. The engine never interprets
@@ -95,6 +109,7 @@ impl Default for ProxySettings {
             auto_start_on_launch: true,
             response_delay_ms: 0,
             system_proxy_hotkey: String::new(),
+            theme: ColorTheme::default(),
             highlight_colors: BTreeMap::new(),
         }
     }
@@ -310,6 +325,27 @@ mod tests {
             back.highlight_colors.get("selected").map(String::as_str),
             Some("#173a36ff")
         );
+    }
+
+    #[test]
+    fn theme_defaults_system_and_round_trips_every_choice() {
+        let legacy: ProxySettings = serde_json::from_str("{}").expect("load legacy settings");
+        assert_eq!(legacy.theme, ColorTheme::System);
+
+        for (theme, value) in [
+            (ColorTheme::System, "system"),
+            (ColorTheme::Dark, "dark"),
+            (ColorTheme::Light, "light"),
+        ] {
+            let settings = ProxySettings {
+                theme,
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&settings).expect("serialize settings");
+            assert!(json.contains(&format!("\"theme\":\"{value}\"")));
+            let back: ProxySettings = serde_json::from_str(&json).expect("round-trip");
+            assert_eq!(back.theme, theme);
+        }
     }
 
     #[test]

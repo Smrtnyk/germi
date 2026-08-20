@@ -1,6 +1,6 @@
 import { clamp } from "es-toolkit";
 
-const RAIL_RGB = "45, 212, 191";
+const RAIL_RGB = "var(--accent-rgb)";
 const FLOOR = 0.35;
 const SATURATED = 0.95;
 
