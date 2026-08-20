@@ -48,6 +48,11 @@ import {
   toggleSelection,
 } from "./selection";
 import { resolveBindings, type Bindings } from "./shortcuts";
+import {
+  persistSettingsDialogDraft,
+  settleSettingsWrite,
+  type SettingsDialogDraft,
+} from "./settingsDraft";
 import { emitSettingsChanged } from "./themeSync";
 import { OrderedTaskQueue } from "./orderedTaskQueue";
 import { readFileAsBase64 } from "./captureDrop";
@@ -1663,10 +1668,6 @@ function useHistory(
 function usePersistentColumns(headerColumns: string[]) {
   const [columnOrder, setColumnOrder] = useState<string[]>(() => loadColumnOrder());
 
-  useEffect(() => {
-    persist("germi.columns", JSON.stringify(columnOrder));
-  }, [columnOrder]);
-
   const visibleColumns = useMemo(
     () => resolveColumns(columnOrder, headerColumns),
     [columnOrder, headerColumns],
@@ -1681,9 +1682,6 @@ function loadShortcuts(): Bindings {
 
 function usePersistentShortcuts() {
   const [shortcuts, setShortcuts] = useState<Bindings>(loadShortcuts);
-  useEffect(() => {
-    persist("germi.shortcuts", JSON.stringify(shortcuts));
-  }, [shortcuts]);
   return { shortcuts, setShortcuts };
 }
 
@@ -1976,7 +1974,6 @@ function useViewState() {
   );
   const setAutoLayout = useCallback((layout: AutoLayout) => {
     setAutoLayoutState(layout);
-    persist("germi.autoLayout", layout);
   }, []);
 
   const [decode, setDecode] = useState(true);
@@ -2595,6 +2592,43 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
       });
   }
 
+  async function saveSettingsDialog(draft: SettingsDialogDraft): Promise<void> {
+    await persistSettingsDialogDraft(localStorage, draft, async (next) => {
+      await settingsSaveQueue.run(async () => {
+        const durableBefore = durableSettingsRef.current;
+        const result = await settleSettingsWrite(
+          next,
+          () => persistSettings(next, durableBefore.headerColumns, flowStore.refresh, setError),
+          () => api.getSettings(),
+        );
+        const persisted = result.settings;
+
+        if (result.readBack) {
+          emitSettingsChanged();
+          if (!isEqual(persisted.headerColumns, durableBefore.headerColumns)) {
+            try {
+              await flowStore.refresh();
+            } catch (error) {
+              setError(String(error));
+            }
+          }
+        }
+
+        settingsMutationGenerationRef.current += 1;
+        durableSettingsRef.current = persisted;
+        latestSettingsRef.current = persisted;
+        settings.setSettings(persisted);
+        settingsSaveErrorRef.current = null;
+        await proxy.applyListenChange(durableBefore, persisted);
+        if (result.rejection !== null) throw result.rejection;
+      });
+    });
+
+    columns.setColumnOrder(draft.columnOrder);
+    shortcuts.setShortcuts(draft.shortcuts);
+    setAutoLayout(draft.autoLayout);
+  }
+
   function applyImportedSettings(next: ProxySettings) {
     settingsMutationGenerationRef.current += 1;
     latestSettingsRef.current = next;
@@ -2913,6 +2947,7 @@ export function useAppState(flushInlineRules: () => Promise<void> = () => Promis
     session,
     trafficSplit,
     saveSettings,
+    saveSettingsDialog,
     flushSettings,
     applyImportedSettings,
     handleRowClick,

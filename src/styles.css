@@ -2412,9 +2412,15 @@ textarea {
 .settings-foot-left {
   display: flex;
   gap: var(--space-4);
+  margin-right: auto;
 }
 .settings-foot .primary {
-  margin-left: auto;
+  margin-left: 0;
+}
+.settings-foot .settings-err {
+  max-width: 34ch;
+  margin: 0;
+  text-align: right;
 }
 .settings-err {
   color: #f87171;
