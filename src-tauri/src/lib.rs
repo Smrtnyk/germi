@@ -244,6 +244,7 @@ pub fn run() {
             commands::file_exists,
             commands::search_bodies,
             commands::search_headers,
+            commands::search_cookies,
             commands::search_rules,
             commands::save_session,
             commands::open_capture,

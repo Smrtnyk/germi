@@ -13,6 +13,10 @@ const ROWS: { tokens: string[]; desc: string }[] = [
     tokens: ["header:", "req-header:", "resp-header:"],
     desc: "search header name/value (scans backend)",
   },
+  {
+    tokens: ["cookie:", "req-cookie:", "resp-cookie:"],
+    desc: "search each parsed name=value pair, without attributes (case-insensitive)",
+  },
   { tokens: ["/regex/"], desc: "regular expression on the URL" },
   { tokens: ["-term"], desc: "negate any term" },
 ];
@@ -21,6 +25,8 @@ const EXAMPLES = [
   "host:api -mime:json",
   "body:timeout",
   "header:authorization",
+  'req-cookie:"session=abc 123"',
+  'resp-cookie:"sid=a=b/c"',
   "/\\.woff2/",
 ];
 
@@ -80,6 +86,10 @@ export function FilterHelp({ filter, onPick, inputRef }: Props) {
           <h4>Filter syntax</h4>
           <p className="muted small help-hint">
             Whitespace = AND. Click a token to insert it, or an example to try it.
+          </p>
+          <p className="muted small help-hint">
+            Quote the whole pattern after <code>:</code> when it contains spaces, for example{" "}
+            <code>req-cookie:&quot;prefs=hello world&quot;</code>.
           </p>
           <table>
             <tbody>

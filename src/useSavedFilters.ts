@@ -85,7 +85,7 @@ function useFilterColorPresentation(filters: SavedFilter[]) {
 }
 
 /** The solo'd ("only") filter fed through the full match pipeline, so its
- *  body:/header: terms hit the backend scan like the bar filter's do. The chip
+ *  body:/header:/cookie: terms hit the backend scan like the bar filter's do. The chip
  *  sets are keyed by content, not entry identity, so editing an unrelated field
  *  (color, highlight) doesn't refire the content-search effect. */
 function useSoloMatch(flows: FlowSummary[], solo: SavedFilter | null, setError: SetError) {

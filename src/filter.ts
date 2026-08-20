@@ -7,11 +7,12 @@ import type { FlowSummary, ResourceKind } from "./types";
 // path`. A `/regex/` term is a regex over that same string. A leading `-`
 // negates any term (`-"foo bar"` negates the phrase; a `-` inside quotes is
 // literal). `key:value` tokens filter structured fields. `body:` /
-// `req-body:` / `resp-body:` and `header:` / `req-header:` / `resp-header:` are
-// the only tokens that cross into the backend.
+// `req-body:` / `resp-body:`, `header:` / `req-header:` / `resp-header:`, and
+// `cookie:` / `req-cookie:` / `resp-cookie:` are the only tokens that cross
+// into the backend.
 
 export interface ContentTerm {
-  field: "body" | "headers";
+  field: "body" | "headers" | "cookies";
   side: "request" | "response" | "either";
   value: string;
   regex: boolean;
@@ -50,6 +51,7 @@ const SUMMARY_KEYS = new Set([
 ]);
 const BODY_KEYS = new Set(["body", "req-body", "resp-body"]);
 const HEADER_KEYS = new Set(["header", "req-header", "resp-header"]);
+const COOKIE_KEYS = new Set(["cookie", "req-cookie", "resp-cookie"]);
 
 function skipSpaces(s: string, i: number): number {
   while (i < s.length && /\s/.test(s[i])) i++;
@@ -137,11 +139,11 @@ type ClassifiedTerm =
   | { kind: "content"; term: ContentTerm };
 
 function contentTermOf(key: string, value: string, neg: boolean): ContentTerm {
-  const field = HEADER_KEYS.has(key) ? "headers" : "body";
+  const field = HEADER_KEYS.has(key) ? "headers" : COOKIE_KEYS.has(key) ? "cookies" : "body";
   const side =
-    key === "req-body" || key === "req-header"
+    key === "req-body" || key === "req-header" || key === "req-cookie"
       ? "request"
-      : key === "resp-body" || key === "resp-header"
+      : key === "resp-body" || key === "resp-header" || key === "resp-cookie"
         ? "response"
         : "either";
   const m = /^\/(.*)\/$/.exec(value);
@@ -163,7 +165,7 @@ function classifyTerm(raw: string, neg: boolean): ClassifiedTerm {
   if (colon > 0) {
     const key = raw.slice(0, colon).toLowerCase();
     const value = raw.slice(colon + 1);
-    if (BODY_KEYS.has(key) || HEADER_KEYS.has(key)) {
+    if (BODY_KEYS.has(key) || HEADER_KEYS.has(key) || COOKIE_KEYS.has(key)) {
       return { kind: "content", term: contentTermOf(key, value, neg) };
     }
     if (SUMMARY_KEYS.has(key)) return { kind: "summary", term: { t: "kv", key, value, neg } };

@@ -196,6 +196,33 @@ describe("parseFilter content terms", () => {
     ]);
   });
 
+  it("extracts cookie terms for either, request and response sides", () => {
+    const parsed = parseFilter("cookie:sid req-cookie:session -resp-cookie:/^debug=/");
+    expect(parsed.contentTerms).toEqual([
+      { field: "cookies", side: "either", value: "sid", regex: false, neg: false },
+      { field: "cookies", side: "request", value: "session", regex: false, neg: false },
+      { field: "cookies", side: "response", value: "^debug=", regex: true, neg: true },
+    ]);
+  });
+
+  it("keeps a quoted cookie pair with spaces and extra equals as one pattern", () => {
+    expect(parseFilter('REQ-COOKIE:"prefs=hello world=a=b"').contentTerms).toEqual([
+      {
+        field: "cookies",
+        side: "request",
+        value: "prefs=hello world=a=b",
+        regex: false,
+        neg: false,
+      },
+    ]);
+  });
+
+  it("keeps invalid cookie regex syntax for the backend to reject safely", () => {
+    expect(parseFilter("resp-cookie:/(/").contentTerms).toEqual([
+      { field: "cookies", side: "response", value: "(", regex: true, neg: false },
+    ]);
+  });
+
   it("mixes body and header terms, one per field", () => {
     const parsed = parseFilter("body:secret header:x-token");
     expect(parsed.contentTerms).toEqual([
@@ -204,9 +231,10 @@ describe("parseFilter content terms", () => {
     ]);
   });
 
-  it("drops an empty body or header value", () => {
+  it("drops an empty body, header or cookie value", () => {
     expect(parseFilter("body:").contentTerms).toEqual([]);
     expect(parseFilter("header:").contentTerms).toEqual([]);
+    expect(parseFilter("cookie:").contentTerms).toEqual([]);
   });
 });
 

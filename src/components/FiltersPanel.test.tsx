@@ -195,9 +195,9 @@ describe("FiltersPanel", () => {
     expect(document.activeElement).toBe(trigger.element());
   });
 
-  it("disables the highlight toggle for body:/header: filters", async () => {
+  it("disables the highlight toggle for cookie filters", async () => {
     const screen = await render(
-      <FiltersPanel {...makeProps({ filters: [saved({ query: "body:secret" })] })} />,
+      <FiltersPanel {...makeProps({ filters: [saved({ query: "req-cookie:session=secret" })] })} />,
     );
     const toggle = screen.getByRole("button", { name: "highlight" });
     await expect.element(toggle).toBeDisabled();
