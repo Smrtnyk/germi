@@ -37,8 +37,8 @@ jobs:
   # installer builds are skipped for now — to restore them, re-add a
   # `tauri-apps/tauri-action@v0` step across an OS matrix to bundle the
   # .msi/.exe + .deb/.AppImage/.rpm. A portable Windows exe IS built by
-  # portable-windows.yml on every main push/PR, and attached to the GitHub
-  # release on `v*` tags.
+  # portable-windows.yml on every main push and on PRs carrying the opt-in
+  # `portable-ci` label, and attached to the GitHub release on `v*` tags.
   tauri-shell:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

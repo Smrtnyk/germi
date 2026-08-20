@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, labeled]
   workflow_dispatch:
 
 permissions:
@@ -15,6 +18,7 @@ concurrency:
 
 jobs:
   portable-exe:
+    if: github.event_name != 'pull_request'
     runs-on: windows-2025
     timeout-minutes: 45
     permissions:
@@ -98,6 +102,83 @@ jobs:
           name: germi-portable-windows-x64
           path: Germi-portable-*.exe
           if-no-files-found: error
+
+  # Opt-in PR build. Keep this separate from the trusted push/tag build so code
+  # from a PR receives read-only repository permissions and cannot mint build
+  # attestations. Adding other labels must not accidentally trigger a rebuild.
+  portable-exe-pr:
+    if: >-
+      github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'portable-ci') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'portable-ci')
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # aws-lc-rs (via hudsucker/rustls) needs NASM to assemble on Windows.
+      # Use the runner's package manager: setup-nasm's Node 24 update is not
+      # released, while its current v1 release still targets deprecated Node 20.
+      - name: Install and verify NASM
+        shell: pwsh
+        run: |
+          choco install nasm --version=2.16.3 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) {
+            throw "Chocolatey failed to install NASM (exit code $LASTEXITCODE)"
+          }
+
+          $nasmDir = Join-Path $env:ProgramFiles "NASM"
+          $nasm = Join-Path $nasmDir "nasm.exe"
+          if (-not (Test-Path $nasm -PathType Leaf)) {
+            throw "NASM executable was not installed at $nasm"
+          }
+
+          $version = & $nasm --version
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^NASM version 2\.16\.03\b') {
+            throw "Expected NASM 2.16.03, got: $version"
+          }
+          $version
+          $nasmDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Restore compatible caches, but do not spend shared cache quota on PR
+      # target directories.
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+          save-if: false
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      # This is the same canonical portable build used for main and releases.
+      - name: Build portable exe
+        run: pnpm tauri build --no-bundle
+
+      - name: Stage artifact
+        run: |
+          $version = $env:GITHUB_SHA.Substring(0, 7)
+          Copy-Item target/release/germi.exe "Germi-portable-$version-windows-x64.exe"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: germi-portable-windows-x64-pr-${{ github.event.pull_request.number }}
+          path: Germi-portable-*.exe
+          if-no-files-found: error
+          retention-days: 14
 
   # Tag pushes only: attach the exe to the GitHub release (as a draft if the
   # release doesn't exist yet). Split into its own job so the build job never
