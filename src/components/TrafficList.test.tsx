@@ -552,7 +552,12 @@ describe("TrafficList empty states", () => {
                 flowSummary({ id: "one", seq: 1, method: "GET", mime: "text/html" }),
                 flowSummary({ id: "two", seq: 2, method: "POST", mime: "application/json" }),
               ],
-              view: { matchedIds: null, savedTints: new Map(), totalCount: 2 },
+              view: {
+                matchedIds: null,
+                savedTints: new Map(),
+                savedTintPresentations: new Map(),
+                totalCount: 2,
+              },
               columns: resolveColumns(["seq", "method"], []),
               onKeySelect,
             })}
@@ -583,7 +588,12 @@ describe("TrafficList empty states", () => {
         <TrafficList
           {...listProps({
             flows: [flowSummary({ seq: 9, method: "POST", mime: "text/css" })],
-            view: { matchedIds: null, savedTints: new Map(), totalCount: 1 },
+            view: {
+              matchedIds: null,
+              savedTints: new Map(),
+              savedTintPresentations: new Map(),
+              totalCount: 1,
+            },
             columns: resolveColumns(["method", "seq"], []),
             onToggleSort,
           })}
